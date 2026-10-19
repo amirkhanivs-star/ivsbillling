@@ -46,9 +46,25 @@ class FeeImportTest extends TestCase
         $res->assertDontSee('Reset / Clear Fee Records');
     }
 
+    private function setupCashier(): User
+    {
+        $id = DB::table('users')->insertGetId([
+            'name' => 'Cashier User',
+            'email' => 'cashier_' . uniqid() . '@example.test',
+            'password' => bcrypt('secret'),
+            'role' => 'cashier',
+            'campus_id' => DB::table('campuses')->first()->id,
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        return User::find($id);
+    }
+
     public function test_dangerous_deletion_actions_are_rejected_and_ledger_preserved(): void
     {
         $admin = $this->setupAdmin();
+        $cashier = $this->setupCashier();
         $deptId = DB::table('departments')->first()->id;
         $campusId = DB::table('campuses')->first()->id;
         $feeTypeId = DB::table('fee_types')->where('code', 'monthly')->value('id');
@@ -124,16 +140,22 @@ class FeeImportTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        // 1. Web route POST /challan/clear-fee-data MUST return 403 Forbidden
+        // 1. Unauthenticated request to /challan/clear-fee-data redirects to login
+        $this->post('/challan/clear-fee-data')->assertRedirect('/login');
+
+        // 2. Cashier request to /challan/clear-fee-data returns 403 Forbidden
+        $this->actingAs($cashier)->post('/challan/clear-fee-data')->assertStatus(403);
+
+        // 3. Super admin request to /challan/clear-fee-data returns 403 Forbidden
         $res = $this->actingAs($admin)->post('/challan/clear-fee-data');
         $res->assertStatus(403);
 
-        // 2. Direct service calls to clearFeeData and clearAllData MUST throw RuntimeException
+        // 4. Direct service calls to clearFeeData and clearAllData MUST throw RuntimeException
         $svc = new FeeImportService();
         $this->assertThrows(fn() => $svc->clearFeeData(), \RuntimeException::class);
         $this->assertThrows(fn() => $svc->clearAllData(), \RuntimeException::class);
 
-        // 3. Verify ledger records remain completely intact and untouched
+        // 5. Verify ledger records remain completely intact and untouched
         $this->assertDatabaseCount('invoices', 1);
         $this->assertDatabaseCount('invoice_items', 1);
         $this->assertDatabaseCount('payments', 1);
@@ -144,36 +166,44 @@ class FeeImportTest extends TestCase
     public function test_direct_historical_imports_are_rejected(): void
     {
         $admin = $this->setupAdmin();
+        $cashier = $this->setupCashier();
 
         $fileOut = UploadedFile::fake()->createWithContent('outstanding.csv', "GRN,Student Name,Particular,Balance\n5525,Abdullah,Monthly Fee,200\n");
         $fileCol = UploadedFile::fake()->createWithContent('collection.csv', "Slip #,GRN,Student Name,Particular,Date,Amount\n24064,5525,Abdullah,Monthly Fee,03-Aug,200\n");
 
-        // 1. Direct outstanding upload rejected
+        // 1. Unauthenticated requests redirect to login
+        $this->post('/challan/import-outstanding', ['csv_file' => $fileOut])->assertRedirect('/login');
+        $this->post('/challan/import-collection', ['csv_file' => $fileCol])->assertRedirect('/login');
+
+        // 2. Cashier unauthorized requests return 403 Forbidden
+        $this->actingAs($cashier)->post('/challan/import-outstanding', ['csv_file' => $fileOut])->assertStatus(403);
+        $this->actingAs($cashier)->post('/challan/import-outstanding-preloaded')->assertStatus(403);
+        $this->actingAs($cashier)->post('/challan/import-collection', ['csv_file' => $fileCol])->assertStatus(403);
+        $this->actingAs($cashier)->post('/challan/import-collection-preloaded')->assertStatus(403);
+
+        // 3. Authenticated Super Admin requests are rejected with safety lock notice
         $resOut = $this->actingAs($admin)->post('/challan/import-outstanding', ['csv_file' => $fileOut]);
         $resOut->assertRedirect('/challan');
         $resOut->assertSessionHasErrors(['error']);
 
-        // 2. Preloaded outstanding rejected
         $resOutPre = $this->actingAs($admin)->post('/challan/import-outstanding-preloaded');
         $resOutPre->assertRedirect('/challan');
         $resOutPre->assertSessionHasErrors(['error']);
 
-        // 3. Direct collection upload rejected
         $resCol = $this->actingAs($admin)->post('/challan/import-collection', ['csv_file' => $fileCol]);
         $resCol->assertRedirect('/challan');
         $resCol->assertSessionHasErrors(['error']);
 
-        // 4. Preloaded collection rejected
         $resColPre = $this->actingAs($admin)->post('/challan/import-collection-preloaded');
         $resColPre->assertRedirect('/challan');
         $resColPre->assertSessionHasErrors(['error']);
 
-        // 5. Direct service method execution throws RuntimeException
+        // 4. Direct service method execution throws RuntimeException
         $svc = new FeeImportService();
         $this->assertThrows(fn() => $svc->importOutstanding('dummy.csv'), \RuntimeException::class);
         $this->assertThrows(fn() => $svc->importCollection('dummy.csv'), \RuntimeException::class);
 
-        // 6. Verify zero phantom financial records created
+        // 5. Verify zero phantom financial records created
         $this->assertDatabaseCount('invoices', 0);
         $this->assertDatabaseCount('invoice_items', 0);
         $this->assertDatabaseCount('payments', 0);

@@ -28,6 +28,21 @@ class StudentImportTest extends TestCase
         return User::find($id);
     }
 
+    private function setupCashier(): User
+    {
+        $id = DB::table('users')->insertGetId([
+            'name' => 'Cashier User',
+            'email' => 'cashier_' . uniqid() . '@example.test',
+            'password' => bcrypt('secret'),
+            'role' => 'cashier',
+            'campus_id' => DB::table('campuses')->first()->id,
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        return User::find($id);
+    }
+
     public function test_manage_student_shows_import_button_and_dialog_with_safety_lock(): void
     {
         $admin = $this->setupAdmin();
@@ -44,6 +59,7 @@ class StudentImportTest extends TestCase
     public function test_direct_bulk_student_import_is_rejected_and_normal_admission_remains_functional(): void
     {
         $admin = $this->setupAdmin();
+        $cashier = $this->setupCashier();
         $deptId = DB::table('departments')->first()->id;
         $campusId = DB::table('campuses')->first()->id;
 
@@ -56,7 +72,15 @@ CSV;
 
         $file = UploadedFile::fake()->createWithContent('test_students.csv', $csvContent);
 
-        // 1. Direct CSV upload MUST be rejected
+        // 1. Unauthenticated requests MUST redirect to login
+        $this->post('/manage-student/import', ['csv_file' => $file])->assertRedirect('/login');
+        $this->post('/manage-student/import-preloaded')->assertRedirect('/login');
+
+        // 2. Cashier unauthorized requests MUST return 403 Forbidden
+        $this->actingAs($cashier)->post('/manage-student/import', ['csv_file' => $file])->assertStatus(403);
+        $this->actingAs($cashier)->post('/manage-student/import-preloaded')->assertStatus(403);
+
+        // 3. Authenticated Super Admin requests MUST be safely rejected with session notice
         $res = $this->actingAs($admin)->post('/manage-student/import', [
             'csv_file' => $file,
         ]);
@@ -68,12 +92,12 @@ CSV;
             'gr_number' => '99901',
         ]);
 
-        // 2. Preloaded direct import MUST be rejected
+        // 4. Preloaded direct import MUST be rejected for Super Admin
         $resPre = $this->actingAs($admin)->post('/manage-student/import-preloaded');
         $resPre->assertRedirect('/manage-student');
         $resPre->assertSessionHasErrors(['error']);
 
-        // 3. Direct service call MUST throw RuntimeException
+        // 5. Direct service call MUST throw RuntimeException
         $svc = new StudentImportService();
         $this->assertThrows(fn() => $svc->importFromFile('dummy.csv'), \RuntimeException::class);
 
