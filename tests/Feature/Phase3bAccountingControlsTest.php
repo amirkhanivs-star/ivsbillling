@@ -639,5 +639,131 @@ class Phase3bAccountingControlsTest extends TestCase
         $this->assertEquals($paymentsBefore, DB::table('payments')->count());
         $this->assertEquals($allocationsBefore, DB::table('payment_allocations')->count());
     }
+
+    /**
+     * Test Phase 3B.3.1A: Strict per-currency monetary totals verification.
+     */
+    public function test_phase3b31a_per_currency_monetary_totals_exact_reconciliation(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // Fictional snapshot representing all seven active currencies with exact decimal values
+        $v1Dues = [
+            ['gr_number' => '101', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 2827415.00],
+            ['gr_number' => '102', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'AED', 'outstanding_amount' => 1609993.00],
+            ['gr_number' => '103', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'PKR', 'outstanding_amount' => 6528345.00],
+            ['gr_number' => '104', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'QAR', 'outstanding_amount' => 11595.00],
+            ['gr_number' => '105', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'USD', 'outstanding_amount' => 2452.00],
+            ['gr_number' => '106', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'OMR', 'outstanding_amount' => 174.00],
+            ['gr_number' => '107', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'UNRESOLVED', 'outstanding_amount' => 13635.00],
+        ];
+
+        $results = $service->compareSnapshots($v1Dues, $v1Dues);
+
+        $this->assertEquals(2827415.00, $results['currencies']['SAR']['unchanged_amount']);
+        $this->assertEquals(1609993.00, $results['currencies']['AED']['unchanged_amount']);
+        $this->assertEquals(6528345.00, $results['currencies']['PKR']['unchanged_amount']);
+        $this->assertEquals(11595.00, $results['currencies']['QAR']['unchanged_amount']);
+        $this->assertEquals(2452.00, $results['currencies']['USD']['unchanged_amount']);
+        $this->assertEquals(174.00, $results['currencies']['OMR']['unchanged_amount']);
+        $this->assertEquals(13635.00, $results['currencies']['UNRESOLVED']['unchanged_amount']);
+        $this->assertEquals(0, $results['summary']['total_classification_conflicts']);
+    }
+
+    /**
+     * Test Phase 3B.3.1A: Same row counts with different amounts must detect variances.
+     */
+    public function test_phase3b31a_same_row_counts_different_amounts_detection(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // V1 has 2 rows of 100.00 SAR
+        $v1Dues = [
+            ['gr_number' => '201', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 100.00],
+            ['gr_number' => '202', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 100.00],
+        ];
+
+        // V2 has 2 rows of 150.00 SAR (same row count, different amounts)
+        $v2Dues = [
+            ['gr_number' => '201', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 150.00],
+            ['gr_number' => '202', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 150.00],
+        ];
+
+        $results = $service->compareSnapshots($v1Dues, $v2Dues);
+
+        $sar = $results['currencies']['SAR'];
+        $this->assertEquals(0, $sar['unchanged_count']);
+        $this->assertEquals(2, $sar['increased_count']);
+        $this->assertEquals(100.00, $sar['increased_delta']); // (150-100) + (150-100) = 100.00
+        $this->assertEquals(100.00, $sar['net_variance']);
+    }
+
+    /**
+     * Test Phase 3B.3.1A: Same amounts assigned to different currencies are strictly isolated.
+     */
+    public function test_phase3b31a_same_amounts_different_currencies_isolation(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // V1 has 500.00 SAR
+        $v1Dues = [
+            ['gr_number' => '301', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 500.00],
+        ];
+
+        // V2 has 500.00 AED for the exact same student and period
+        $v2Dues = [
+            ['gr_number' => '301', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'AED', 'outstanding_amount' => 500.00],
+        ];
+
+        $results = $service->compareSnapshots($v1Dues, $v2Dues);
+
+        // Must NOT match as unchanged
+        $this->assertEquals(0, $results['currencies']['SAR']['unchanged_count']);
+        $this->assertEquals(0, $results['currencies']['AED']['unchanged_count']);
+
+        // Must record as disappearing in SAR and newly appearing in AED
+        $this->assertEquals(1, $results['currencies']['SAR']['disappearing_count']);
+        $this->assertEquals(500.00, $results['currencies']['SAR']['disappearing_amount']);
+        $this->assertEquals(-500.00, $results['currencies']['SAR']['net_variance']);
+
+        $this->assertEquals(1, $results['currencies']['AED']['newly_appearing_count']);
+        $this->assertEquals(500.00, $results['currencies']['AED']['newly_appearing_amount']);
+        $this->assertEquals(500.00, $results['currencies']['AED']['net_variance']);
+
+        // Must record CURRENCY_MISMATCH conflict
+        $this->assertEquals(1, $results['summary']['total_classification_conflicts']);
+        $this->assertEquals('CURRENCY_MISMATCH', $results['conflicts'][0]['type']);
+    }
+
+    /**
+     * Test Phase 3B.3.1A: Source row identity and multiplicity preservation.
+     */
+    public function test_phase3b31a_source_row_identity_and_multiplicity_preservation(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // V1 has two identical legitimate fee lines of 200.00 SAR for the same student & period
+        $v1Dues = [
+            ['source_row' => 10, 'gr_number' => '401', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 200.00],
+            ['source_row' => 11, 'gr_number' => '401', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 200.00],
+        ];
+
+        // Scenario 1: V2 also has two identical lines -> both must be unchanged
+        $results1 = $service->compareSnapshots($v1Dues, $v1Dues);
+        $this->assertEquals(2, $results1['currencies']['SAR']['unchanged_count']);
+        $this->assertEquals(400.00, $results1['currencies']['SAR']['unchanged_amount']);
+        $this->assertEquals(0, $results1['currencies']['SAR']['disappearing_count']);
+
+        // Scenario 2: V2 only has one line -> 1 unchanged (200), 1 disappearing (200)
+        $v2Single = [
+            ['source_row' => 10, 'gr_number' => '401', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 200.00],
+        ];
+        $results2 = $service->compareSnapshots($v1Dues, $v2Single);
+        $this->assertEquals(1, $results2['currencies']['SAR']['unchanged_count']);
+        $this->assertEquals(200.00, $results2['currencies']['SAR']['unchanged_amount']);
+        $this->assertEquals(1, $results2['currencies']['SAR']['disappearing_count']);
+        $this->assertEquals(200.00, $results2['currencies']['SAR']['disappearing_amount']);
+        $this->assertEquals(-200.00, $results2['currencies']['SAR']['net_variance']);
+    }
 }
 

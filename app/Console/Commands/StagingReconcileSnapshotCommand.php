@@ -200,7 +200,7 @@ class StagingReconcileSnapshotCommand extends Command
             ->first();
 
         if (!$adminUser || !in_array($adminUser->role, ['super_admin', 'finance_admin'], true) || !$adminUser->is_active) {
-            $this->error("\n [AUTHENTICATION ERROR] Administrator '{$authorizedBy}' does not match any active super_admin or finance_admin account. Self-declared CLI identity is rejected.");
+            $this->error("\n [AUTHORIZATION ERROR] Administrator '{$authorizedBy}' does not match any registered, active super_admin or finance_admin account. Role authorization rejected.");
             return Command::FAILURE;
         }
 
@@ -214,7 +214,7 @@ class StagingReconcileSnapshotCommand extends Command
         $this->line("   V2 Identifier:      " . ($v2Id ?: 'MYSKOOL_SNAPSHOT_V2'));
         $this->line("   Coverage/Filters:   " . ($coverage ?: 'All Classes & Campuses'));
         $this->line("   Freeze Evidence:    {$freezeEvidence}");
-        $this->line("   Certified By Admin: {$adminIdentity}");
+        $this->line("   Authorized Sign-off: {$adminIdentity} [Administrative Role Registry Verification]");
         $this->line("   Outstanding File:   " . basename($v2DuesPath) . " [SHA-256: {$v2DuesSha256}]");
         $this->line("   Collection File:    " . basename($v2PaymentsPath) . " [SHA-256: {$v2PaymentsSha256}]");
 
