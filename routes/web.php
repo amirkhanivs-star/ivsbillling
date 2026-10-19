@@ -35,4 +35,15 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/challan/clear-fee-data', fn() => abort(403, 'Dangerous ledger deletion route has been disabled for Phase 1 Recovery Protection.'))->name('challan.clear_fee_data');
  Route::get('/receipts/{payment}/pdf',[B::class,'receipt']);
  Route::get('/reports',[B::class,'report']);Route::get('/reports/export',[B::class,'exportReport']);Route::get('/reports/export.xlsx',[B::class,'exportXlsx']);Route::get('/reports/export.pdf',[B::class,'reportPdf']);
+ Route::get('/migration', [\App\Http\Controllers\MigrationReviewController::class, 'index'])->name('migration.index');
+ Route::get('/migration/campus', [\App\Http\Controllers\MigrationReviewController::class, 'campusIndex'])->name('migration.campus');
+ Route::post('/migration/campus/approve', [\App\Http\Controllers\MigrationReviewController::class, 'campusApprove'])->name('migration.campus.approve');
+ Route::get('/migration/department', [\App\Http\Controllers\MigrationReviewController::class, 'departmentIndex'])->name('migration.department');
+ Route::post('/migration/department/approve', [\App\Http\Controllers\MigrationReviewController::class, 'departmentApprove'])->name('migration.department.approve');
+ Route::get('/migration/currency', [\App\Http\Controllers\MigrationReviewController::class, 'currencyIndex'])->name('migration.currency');
+ Route::post('/migration/currency/approve', [\App\Http\Controllers\MigrationReviewController::class, 'currencyApprove'])->name('migration.currency.approve');
+ Route::get('/migration/gr-reconciliation', [\App\Http\Controllers\MigrationReviewController::class, 'grReconciliationIndex'])->name('migration.gr_reconciliation');
+ Route::post('/migration/gr-reconciliation/resolve', [\App\Http\Controllers\MigrationReviewController::class, 'grReconciliationResolve'])->name('migration.gr_reconciliation.resolve');
+ Route::get('/migration/exceptions', [\App\Http\Controllers\MigrationReviewController::class, 'exceptionsIndex'])->name('migration.exceptions');
+ Route::get('/migration/exceptions/export', [\App\Http\Controllers\MigrationReviewController::class, 'exportExceptions'])->name('migration.exceptions.export');
 });
