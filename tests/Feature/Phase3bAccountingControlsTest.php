@@ -292,4 +292,76 @@ class Phase3bAccountingControlsTest extends TestCase
         $this->assertFalse(Hash::check('SuperSecretLivePass123!', $user->password));
         $this->assertFalse(password_verify('password', $user->password));
     }
+
+    /**
+     * Test Phase 3B.3 SnapshotReconciliationService multi-currency delta analysis.
+     */
+    public function test_phase3b3_snapshot_reconciliation_service_detects_deltas_by_currency(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // Fictional Version 1 Dues
+        $v1Dues = [
+            // Unchanged SAR
+            ['gr_number' => '1001', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 200.00],
+            // Decreased SAR (partially paid in legacy between snapshots)
+            ['gr_number' => '1002', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 300.00],
+            // Disappeared AED (settled in full in legacy)
+            ['gr_number' => '1003', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'AED', 'outstanding_amount' => 250.00],
+            // Currency conflict item (V1 has SAR, V2 will have AED)
+            ['gr_number' => '1004', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 150.00],
+        ];
+
+        // Fictional Version 2 Dues
+        $v2Dues = [
+            // Unchanged SAR
+            ['gr_number' => '1001', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 200.00],
+            // Decreased SAR (now 100 instead of 300 -> -200 delta)
+            ['gr_number' => '1002', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 100.00],
+            // Newly appearing SAR
+            ['gr_number' => '1005', 'period_key' => '2026-11', 'particular_raw' => 'Monthly Fee - Nov-2026', 'currency_iso' => 'SAR', 'outstanding_amount' => 220.00],
+            // Currency conflict item (now AED)
+            ['gr_number' => '1004', 'period_key' => '2026-10', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'AED', 'outstanding_amount' => 150.00],
+        ];
+
+        $results = $service->compareSnapshots($v1Dues, $v2Dues);
+
+        // Check SAR metrics
+        $sar = $results['currencies']['SAR'];
+        $this->assertEquals(1, $sar['unchanged_count']);
+        $this->assertEquals(200.00, $sar['unchanged_amount']);
+        $this->assertEquals(1, $sar['decreased_count']);
+        $this->assertEquals(200.00, $sar['decreased_delta']);
+        $this->assertEquals(1, $sar['newly_appearing_count']);
+        $this->assertEquals(220.00, $sar['newly_appearing_amount']);
+
+        // Check AED metrics
+        $aed = $results['currencies']['AED'];
+        $this->assertEquals(1, $aed['disappearing_count']);
+        $this->assertEquals(250.00, $aed['disappearing_amount']);
+
+        // Check Classification Conflicts
+        $this->assertGreaterThanOrEqual(1, $results['summary']['total_classification_conflicts']);
+        $this->assertTrue(collect($results['conflicts'])->contains(fn($c) => $c['type'] === 'CURRENCY_MISMATCH' && $c['gr_number'] === '1004'));
+    }
+
+    /**
+     * Test command staging:reconcile-snapshot safety checks and execution.
+     */
+    public function test_phase3b3_reconcile_command_safety_checks(): void
+    {
+        $conn = config('database.default');
+
+        // Command with no arguments notifies that V1 is frozen and awaits V2 files
+        $this->artisan('staging:reconcile-snapshot', [
+            '--v1-connection' => $conn,
+        ])->assertSuccessful();
+
+        // Providing non-existent V2 path fails gracefully
+        $this->artisan('staging:reconcile-snapshot', [
+            '--v1-connection' => $conn,
+            '--v2-dues' => 'non_existent_file.csv',
+        ])->assertSuccessful();
+    }
 }
+
