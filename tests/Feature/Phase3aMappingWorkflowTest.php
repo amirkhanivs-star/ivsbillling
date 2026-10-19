@@ -46,6 +46,7 @@ class Phase3aMappingWorkflowTest extends TestCase
 
     private function seedFictionalStagingData(): void
     {
+        $this->seed();
         $now = now();
 
         // 1. Students:
@@ -405,5 +406,95 @@ class Phase3aMappingWorkflowTest extends TestCase
         $this->actingAs($admin)->get('/migration/currency')->assertStatus(200);
         $this->actingAs($admin)->get('/migration/gr-reconciliation')->assertStatus(200);
         $this->actingAs($admin)->get('/migration/exceptions')->assertStatus(200);
+    }
+
+    public function test_currency_distribution_and_student_level_integrity(): void
+    {
+        $this->seedFictionalStagingData();
+
+        // Approved students have currency, pending student has null
+        $approvedCount = DB::table('staging_currency_reviews')->where('review_status', 'APPROVED')->count();
+        $pendingCount = DB::table('staging_currency_reviews')->where('review_status', 'PENDING_REVIEW')->count();
+
+        $this->assertEquals(4, $approvedCount);
+        $this->assertEquals(1, $pendingCount);
+
+        // Test distribution
+        $currencies = DB::table('staging_currency_reviews')
+            ->where('review_status', 'APPROVED')
+            ->pluck('currency_approved_manual')
+            ->toArray();
+
+        $counts = array_count_values($currencies);
+        $this->assertEquals(3, $counts['SAR'] ?? 0);
+        $this->assertEquals(1, $counts['AED'] ?? 0);
+
+        // Assert pending student currency cannot change without manual approval
+        $pendingStudent = DB::table('staging_currency_reviews')->where('gr_number', '80005')->first();
+        $this->assertNull($pendingStudent->currency_approved_manual);
+        $this->assertEquals('PENDING_REVIEW', $pendingStudent->review_status);
+    }
+
+    public function test_main_campus_bulk_approval_idempotency_and_audit_history(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        // Generate proposals
+        $service->processCampusProposals($conn);
+        $this->assertEquals(5, DB::table('staging_campus_assignments')->where('status', 'PENDING')->count());
+
+        // First pass approval
+        $approved = $service->approveCampusBulk($conn, [], 'main', 'Senior Architect', 'Authorized bulk approval');
+        $this->assertEquals(5, $approved);
+        $this->assertEquals(0, DB::table('staging_campus_assignments')->where('status', 'PENDING')->count());
+        $this->assertEquals(5, DB::table('staging_campus_assignments')->where('status', 'APPROVED')->count());
+        $this->assertEquals(5, DB::table('staging_students')->where('campus_approved', 'main')->count());
+
+        // Audit log exists
+        $this->assertDatabaseHas('staging_approval_logs', [
+            'entity_type' => 'campus',
+            'action' => 'CAMPUS_BULK_APPROVAL',
+            'performed_by' => 'Senior Architect',
+        ]);
+
+        // Second pass approval (strict idempotency)
+        $reApproved = $service->approveCampusBulk($conn, [], 'main', 'Senior Architect', 'Repeated run');
+        $this->assertEquals(0, $reApproved);
+        $this->assertEquals(5, DB::table('staging_campus_assignments')->where('status', 'APPROVED')->count());
+
+        // Campus correction
+        $corrected = $service->correctCampusAssignment($conn, '80001', 'main', 'Supervisor', 'Verified assignment');
+        $this->assertTrue($corrected);
+        $this->assertDatabaseHas('staging_approval_logs', [
+            'entity_type' => 'campus',
+            'action' => 'CAMPUS_ASSIGNMENT_CORRECTION',
+            'gr_number' => '80001',
+            'performed_by' => 'Supervisor',
+        ]);
+    }
+
+    public function test_financial_ledger_isolation_and_source_immutability(): void
+    {
+        $this->seedFictionalStagingData();
+
+        // 1. Production ledger tables must be completely empty
+        $this->assertEquals(0, DB::table('students')->count());
+        $this->assertEquals(0, DB::table('invoices')->count());
+        $this->assertEquals(0, DB::table('payments')->count());
+        $this->assertEquals(0, DB::table('payment_allocations')->count());
+
+        // 2. Historical dues and payments must have valid amounts and currencies
+        $duesTotal = DB::table('staging_dues')->sum('outstanding_amount');
+        $payTotal = DB::table('staging_payments')->sum('paid_amount');
+        $this->assertEquals(650.00, $duesTotal);
+        $this->assertEquals(850.00, $payTotal);
+
+        // 3. Database isolation guard blocks quarantine database
+        $this->assertThrows(
+            fn() => DatabaseSafetyGuard::assertStagingDatabase('mysql'),
+            DatabaseSafetyException::class
+        );
     }
 }

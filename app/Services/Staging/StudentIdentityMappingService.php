@@ -3,6 +3,7 @@
 namespace App\Services\Staging;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class StudentIdentityMappingService
@@ -376,6 +377,17 @@ class StudentIdentityMappingService
     ): int {
         DatabaseSafetyGuard::assertStagingDatabase($connection);
 
+        // Verify campus exists in master if table exists
+        if (Schema::connection($connection)->hasTable('campuses')) {
+            $campusExists = DB::connection($connection)->table('campuses')
+                ->where('code', $targetCampus)
+                ->orWhere('name', $targetCampus)
+                ->exists();
+            if (!$campusExists) {
+                throw new \InvalidArgumentException("Target campus '{$targetCampus}' does not exist in campuses master.");
+            }
+        }
+
         $query = DB::connection($connection)->table('staging_campus_assignments')
             ->where('status', 'PENDING');
 
@@ -404,6 +416,22 @@ class StudentIdentityMappingService
             'updated_at' => $now,
         ]);
 
+        // Synchronize staging_students.campus_approved for affected students
+        if (Schema::connection($connection)->hasTable('staging_students')) {
+            $grQuery = DB::connection($connection)->table('staging_campus_assignments')
+                ->where('approved_campus', $targetCampus)
+                ->where('status', 'APPROVED');
+            if (!empty($criteria['class_name'])) {
+                $grQuery->where('class_name', $criteria['class_name']);
+            }
+            $affectedGrs = $grQuery->pluck('gr_number')->toArray();
+            foreach (array_chunk($affectedGrs, 500) as $grChunk) {
+                DB::connection($connection)->table('staging_students')
+                    ->whereIn('gr_number', $grChunk)
+                    ->update(['campus_approved' => $targetCampus]);
+            }
+        }
+
         // Audit log entry
         DB::connection($connection)->table('staging_approval_logs')->insert([
             'entity_type' => 'campus',
@@ -419,6 +447,77 @@ class StudentIdentityMappingService
         ]);
 
         return $count;
+    }
+
+    /**
+     * Correct a specific student's campus assignment with full audit trail.
+     */
+    public function correctCampusAssignment(
+        string $connection,
+        string $grNumber,
+        string $newCampus,
+        string $approverName,
+        ?string $reason = null
+    ): bool {
+        DatabaseSafetyGuard::assertStagingDatabase($connection);
+
+        if (Schema::connection($connection)->hasTable('campuses')) {
+            $campusExists = DB::connection($connection)->table('campuses')
+                ->where('code', $newCampus)
+                ->orWhere('name', $newCampus)
+                ->exists();
+            if (!$campusExists) {
+                throw new \InvalidArgumentException("Target campus '{$newCampus}' does not exist in campuses master.");
+            }
+        }
+
+        $existing = DB::connection($connection)->table('staging_campus_assignments')
+            ->where('gr_number', $grNumber)
+            ->first();
+
+        if (!$existing) {
+            return false;
+        }
+
+        $now = now();
+        $oldValue = [
+            'approved_campus' => $existing->approved_campus,
+            'status' => $existing->status,
+            'approved_by' => $existing->approved_by,
+            'approved_at' => $existing->approved_at,
+        ];
+
+        DB::connection($connection)->table('staging_campus_assignments')
+            ->where('gr_number', $grNumber)
+            ->update([
+                'approved_campus' => $newCampus,
+                'status' => 'APPROVED',
+                'approved_by' => $approverName,
+                'approved_at' => $now,
+                'notes' => $reason ?: "Campus corrected to '{$newCampus}'",
+                'updated_at' => $now,
+            ]);
+
+        if (Schema::connection($connection)->hasTable('staging_students')) {
+            DB::connection($connection)->table('staging_students')
+                ->where('gr_number', $grNumber)
+                ->update(['campus_approved' => $newCampus]);
+        }
+
+        DB::connection($connection)->table('staging_approval_logs')->insert([
+            'entity_type' => 'campus',
+            'entity_id' => $existing->id,
+            'gr_number' => $grNumber,
+            'action' => 'CAMPUS_ASSIGNMENT_CORRECTION',
+            'old_value' => json_encode($oldValue),
+            'new_value' => json_encode(['approved_campus' => $newCampus, 'status' => 'APPROVED', 'approved_by' => $approverName]),
+            'performed_by' => $approverName,
+            'reason' => $reason ?: 'Administrative campus correction',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        return true;
     }
 
     /**

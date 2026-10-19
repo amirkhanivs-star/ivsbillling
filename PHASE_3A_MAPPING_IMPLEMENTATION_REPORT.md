@@ -235,7 +235,7 @@ Below are the verified live statistics extracted from `iqra_billing_clean`:
 ### Currency Review Status
 | Currency Status | Student Count | Percentage | Policy / State |
 | :--- | :---: | :---: | :--- |
-| **Approved (Phase 2 Verified)** | **4,202** | **96.8%** | Preserved verbatim (SAR: 3,924, PKR: 177, AED: 93, USD: 8). |
+| **Approved (Phase 2 Verified)** | **4,202** | **96.8%** | Preserved verbatim (SAR: 2,684, AED: 1,477, PKR: 24, QAR: 11, OMR: 4, BHD: 2). |
 | **Pending Administrative Review** | **138** | **3.2%** | Maintained in review workbench. No auto-default to SAR. |
 | **Total Currency Records** | **4,340** | **100.0%** | 100% accounted for. |
 

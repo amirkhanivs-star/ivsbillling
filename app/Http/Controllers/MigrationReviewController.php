@@ -113,6 +113,34 @@ class MigrationReviewController
     }
 
     /**
+     * Correct a specific student's campus assignment.
+     */
+    public function campusCorrect(Request $request, StudentIdentityMappingService $service)
+    {
+        $this->authorizeAdmin($request);
+        $validated = $request->validate([
+            'gr_number' => 'required|string|max:50',
+            'target_campus' => 'required|string|max:50',
+            'reason' => 'nullable|string|max:500',
+        ]);
+
+        $conn = $this->connection();
+        $success = $service->correctCampusAssignment(
+            $conn,
+            $validated['gr_number'],
+            $validated['target_campus'],
+            $request->user()->name,
+            $validated['reason'] ?? null
+        );
+
+        if (!$success) {
+            return redirect('/migration/campus')->with('alert', "Student GR {$validated['gr_number']} not found for campus correction.");
+        }
+
+        return redirect('/migration/campus')->with('notice', "Successfully corrected campus for student GR {$validated['gr_number']} to '{$validated['target_campus']}'.");
+    }
+
+    /**
      * Department Review & Bulk Approval.
      */
     public function departmentIndex(Request $request)

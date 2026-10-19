@@ -38,6 +38,7 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/migration', [\App\Http\Controllers\MigrationReviewController::class, 'index'])->name('migration.index');
  Route::get('/migration/campus', [\App\Http\Controllers\MigrationReviewController::class, 'campusIndex'])->name('migration.campus');
  Route::post('/migration/campus/approve', [\App\Http\Controllers\MigrationReviewController::class, 'campusApprove'])->name('migration.campus.approve');
+ Route::post('/migration/campus/correct', [\App\Http\Controllers\MigrationReviewController::class, 'campusCorrect'])->name('migration.campus.correct');
  Route::get('/migration/department', [\App\Http\Controllers\MigrationReviewController::class, 'departmentIndex'])->name('migration.department');
  Route::post('/migration/department/approve', [\App\Http\Controllers\MigrationReviewController::class, 'departmentApprove'])->name('migration.department.approve');
  Route::get('/migration/currency', [\App\Http\Controllers\MigrationReviewController::class, 'currencyIndex'])->name('migration.currency');
