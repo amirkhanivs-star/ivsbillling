@@ -521,19 +521,41 @@ class StudentIdentityMappingService
     }
 
     /**
-     * Bulk approve department classification.
+     * Bulk approve department classification in a controlled database transaction.
      */
     public function approveDepartmentBulk(
         string $connection,
         array $criteria,
         string $targetDepartment,
         string $approverName,
-        ?string $notes = null
+        ?string $notes = null,
+        bool $logIndividualRecords = true
     ): int {
         DatabaseSafetyGuard::assertStagingDatabase($connection);
 
+        $validDepts = ['school', 'tuition'];
+        if (Schema::connection($connection)->hasTable('departments')) {
+            $dbDepts = DB::connection($connection)->table('departments')->pluck('code')->toArray();
+            if (!empty($dbDepts)) {
+                $validDepts = array_unique(array_merge($validDepts, $dbDepts));
+            }
+        }
+
+        if (!in_array($targetDepartment, $validDepts, true)) {
+            throw new \InvalidArgumentException("Target department '{$targetDepartment}' is not a valid department.");
+        }
+
+        if ($targetDepartment === 'quran') {
+            throw new \InvalidArgumentException("Automatic or unverified bulk approval for 'quran' department is strictly prohibited. Individual evidence review is required.");
+        }
+
+        if (trim($approverName) === '') {
+            throw new \InvalidArgumentException("A verified administrator identity is required for department bulk approval.");
+        }
+
         $query = DB::connection($connection)->table('staging_department_assignments')
-            ->where('status', 'PROPOSED');
+            ->where('status', 'PROPOSED')
+            ->where('is_primary', true);
 
         if (!empty($criteria['class_name'])) {
             $query->where('class_name', $criteria['class_name']);
@@ -545,35 +567,110 @@ class StudentIdentityMappingService
             $query->whereIn('gr_number', (array) $criteria['gr_numbers']);
         }
 
-        $count = $query->count();
+        $records = $query->get();
+        $count = $records->count();
         if ($count === 0) {
-            return 0;
+            return 0; // Strictly idempotent
         }
 
-        $now = now();
-        $query->update([
-            'department_code' => $targetDepartment,
-            'status' => 'APPROVED',
-            'approved_by' => $approverName,
-            'approved_at' => $now,
-            'notes' => $notes ?: "Bulk approved department '{$targetDepartment}' for {$count} records",
-            'updated_at' => $now,
-        ]);
+        return DB::connection($connection)->transaction(function () use (
+            $connection,
+            $records,
+            $count,
+            $criteria,
+            $targetDepartment,
+            $approverName,
+            $notes,
+            $logIndividualRecords
+        ) {
+            $now = now();
+            $batchId = 'DEPT-APPR-' . date('Ymd-His') . '-' . strtoupper(Str::random(6));
+            $approvalNote = $notes ?: "Bulk approved department '{$targetDepartment}' for {$count} records (Batch: {$batchId})";
 
-        DB::connection($connection)->table('staging_approval_logs')->insert([
-            'entity_type' => 'department',
-            'entity_id' => null,
-            'gr_number' => null,
-            'action' => 'DEPARTMENT_BULK_APPROVAL',
-            'old_value' => json_encode(['status' => 'PROPOSED']),
-            'new_value' => json_encode(['status' => 'APPROVED', 'department_code' => $targetDepartment, 'criteria' => $criteria, 'affected_count' => $count]),
-            'performed_by' => $approverName,
-            'reason' => $notes ?: 'Administrative bulk department approval',
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
+            // 1. Update staging_department_assignments
+            $ids = $records->pluck('id')->toArray();
+            foreach (array_chunk($ids, 500) as $idChunk) {
+                DB::connection($connection)->table('staging_department_assignments')
+                    ->whereIn('id', $idChunk)
+                    ->update([
+                        'department_code' => $targetDepartment,
+                        'status' => 'APPROVED',
+                        'approved_by' => $approverName,
+                        'approved_at' => $now,
+                        'notes' => $approvalNote,
+                        'updated_at' => $now,
+                    ]);
+            }
 
-        return $count;
+            // 2. Synchronize staging_students.department_approved
+            if (Schema::connection($connection)->hasTable('staging_students')) {
+                $grNumbers = $records->pluck('gr_number')->toArray();
+                foreach (array_chunk($grNumbers, 500) as $grChunk) {
+                    DB::connection($connection)->table('staging_students')
+                        ->whereIn('gr_number', $grChunk)
+                        ->update(['department_approved' => $targetDepartment]);
+                }
+            }
+
+            // 3. Insert master bulk audit log
+            DB::connection($connection)->table('staging_approval_logs')->insert([
+                'entity_type' => 'department',
+                'entity_id' => null,
+                'gr_number' => null,
+                'action' => 'DEPARTMENT_BULK_APPROVAL',
+                'old_value' => json_encode([
+                    'status' => 'PROPOSED',
+                    'department_code' => $criteria['department_code'] ?? null,
+                ]),
+                'new_value' => json_encode([
+                    'batch_id' => $batchId,
+                    'status' => 'APPROVED',
+                    'department_code' => $targetDepartment,
+                    'criteria' => $criteria,
+                    'affected_count' => $count,
+                    'approved_at' => $now->toIso8601String(),
+                ]),
+                'performed_by' => $approverName,
+                'reason' => $approvalNote,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            // 4. Traceable per-student audit logs
+            if ($logIndividualRecords) {
+                $logRows = [];
+                foreach ($records as $rec) {
+                    $logRows[] = [
+                        'entity_type' => 'department',
+                        'entity_id' => $rec->id,
+                        'gr_number' => $rec->gr_number,
+                        'action' => 'DEPARTMENT_APPROVAL',
+                        'old_value' => json_encode([
+                            'source_key' => $rec->source_key,
+                            'proposed_department' => $rec->department_code,
+                            'status' => 'PROPOSED',
+                        ]),
+                        'new_value' => json_encode([
+                            'batch_id' => $batchId,
+                            'approved_department' => $targetDepartment,
+                            'status' => 'APPROVED',
+                            'class_name' => $rec->class_name,
+                            'evidence_source' => $rec->evidence_source,
+                        ]),
+                        'performed_by' => $approverName,
+                        'reason' => $approvalNote,
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ];
+                }
+
+                foreach (array_chunk($logRows, 500) as $chunk) {
+                    DB::connection($connection)->table('staging_approval_logs')->insert($chunk);
+                }
+            }
+
+            return $count;
+        });
     }
 
     /**
@@ -679,8 +776,13 @@ class StudentIdentityMappingService
                 'approved_at' => $now,
                 'notes' => $reason ?: "Manually assigned department {$newDepartment}",
                 'created_at' => $now,
-                'updated_at' => $now,
             ]);
+        }
+
+        if (Schema::connection($connection)->hasTable('staging_students')) {
+            DB::connection($connection)->table('staging_students')
+                ->where('gr_number', $grNumber)
+                ->update(['department_approved' => $newDepartment]);
         }
 
         DB::connection($connection)->table('staging_approval_logs')->insert([

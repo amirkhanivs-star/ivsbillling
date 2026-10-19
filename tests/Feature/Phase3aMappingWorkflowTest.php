@@ -497,4 +497,236 @@ class Phase3aMappingWorkflowTest extends TestCase
             DatabaseSafetyException::class
         );
     }
+
+    public function test_phase3a3_controlled_department_bulk_approval_exact_counts_and_isolation(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        // Initial department proposals (4 School, 1 Tuition)
+        $service->processDepartmentProposals($conn);
+        $this->assertEquals(5, DB::table('staging_department_assignments')->where('status', 'PROPOSED')->count());
+
+        // 1. Approve School
+        $schoolCount = $service->approveDepartmentBulk($conn, ['department_code' => 'school'], 'school', 'Mustafa Admin', 'Approved School bulk');
+        $this->assertEquals(4, $schoolCount);
+
+        // 2. Approve Tuition
+        $tuitionCount = $service->approveDepartmentBulk($conn, ['department_code' => 'tuition'], 'tuition', 'Mustafa Admin', 'Approved Tuition bulk');
+        $this->assertEquals(1, $tuitionCount);
+
+        // Post-approval counts
+        $this->assertEquals(4, DB::table('staging_department_assignments')->where('department_code', 'school')->where('status', 'APPROVED')->count());
+        $this->assertEquals(1, DB::table('staging_department_assignments')->where('department_code', 'tuition')->where('status', 'APPROVED')->count());
+        $this->assertEquals(0, DB::table('staging_department_assignments')->where('status', 'PROPOSED')->count());
+        $this->assertEquals(0, DB::table('staging_department_assignments')->where('department_code', 'quran')->count());
+
+        // Synchronization in staging_students
+        $this->assertEquals(4, DB::table('staging_students')->where('department_approved', 'school')->count());
+        $this->assertEquals(1, DB::table('staging_students')->where('department_approved', 'tuition')->count());
+
+        // Zero records posted to production ledger
+        $this->assertEquals(0, DB::table('students')->count());
+        $this->assertEquals(0, DB::table('invoices')->count());
+        $this->assertEquals(0, DB::table('payments')->count());
+        $this->assertEquals(0, DB::table('payment_allocations')->count());
+    }
+
+    public function test_phase3a3_quran_automatic_approval_is_strictly_prohibited(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        $service->processDepartmentProposals($conn);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("Automatic or unverified bulk approval for 'quran' department is strictly prohibited");
+
+        $service->approveDepartmentBulk($conn, [], 'quran', 'Mustafa Admin', 'Attempted Quran auto approval');
+    }
+
+    public function test_phase3a3_repeated_approval_is_strictly_idempotent(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        $service->processDepartmentProposals($conn);
+
+        // First approval
+        $c1 = $service->approveDepartmentBulk($conn, ['department_code' => 'school'], 'school', 'Mustafa Admin', 'First pass');
+        $this->assertEquals(4, $c1);
+
+        $logCountAfterFirst = DB::table('staging_approval_logs')->where('action', 'DEPARTMENT_BULK_APPROVAL')->count();
+        $this->assertEquals(1, $logCountAfterFirst);
+
+        // Second approval (re-run)
+        $c2 = $service->approveDepartmentBulk($conn, ['department_code' => 'school'], 'school', 'Mustafa Admin', 'Second pass');
+        $this->assertEquals(0, $c2);
+
+        // Verify zero duplicate logs and unchanged assignment count
+        $logCountAfterSecond = DB::table('staging_approval_logs')->where('action', 'DEPARTMENT_BULK_APPROVAL')->count();
+        $this->assertEquals(1, $logCountAfterSecond);
+        $this->assertEquals(4, DB::table('staging_department_assignments')->where('status', 'APPROVED')->count());
+    }
+
+    public function test_phase3a3_audit_log_traceability_and_administrator_identity(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        $service->processDepartmentProposals($conn);
+
+        $approverIdentity = 'Mustafa <mustafa@gmail.com> (super_admin, ID: 1)';
+        $service->approveDepartmentBulk($conn, ['department_code' => 'school'], 'school', $approverIdentity, 'Controlled bulk approval');
+
+        // Master bulk log check
+        $bulkLog = DB::table('staging_approval_logs')
+            ->where('entity_type', 'department')
+            ->where('action', 'DEPARTMENT_BULK_APPROVAL')
+            ->first();
+
+        $this->assertNotNull($bulkLog);
+        $this->assertEquals($approverIdentity, $bulkLog->performed_by);
+        $newVal = json_decode($bulkLog->new_value, true);
+        $this->assertArrayHasKey('batch_id', $newVal);
+        $this->assertEquals('APPROVED', $newVal['status']);
+        $this->assertEquals('school', $newVal['department_code']);
+        $this->assertEquals(4, $newVal['affected_count']);
+
+        // Individual student log check
+        $studentLog = DB::table('staging_approval_logs')
+            ->where('gr_number', '80001')
+            ->where('action', 'DEPARTMENT_APPROVAL')
+            ->first();
+
+        $this->assertNotNull($studentLog);
+        $this->assertEquals($approverIdentity, $studentLog->performed_by);
+        $stuOld = json_decode($studentLog->old_value, true);
+        $stuNew = json_decode($studentLog->new_value, true);
+        $this->assertEquals('STU:2', $stuOld['source_key']);
+        $this->assertEquals('PROPOSED', $stuOld['status']);
+        $this->assertEquals('school', $stuNew['approved_department']);
+        $this->assertEquals('Grade 1 - A', $stuNew['class_name']);
+    }
+
+    public function test_phase3a3_raw_source_immutability_and_preservation(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        // Set campus and approve
+        $service->processCampusProposals($conn);
+        $service->approveCampusBulk($conn, [], 'main', 'Mustafa Admin', 'Campus bulk');
+
+        // Capture raw student snapshot
+        $stuBefore = DB::table('staging_students')->where('gr_number', '80001')->first();
+
+        // Perform department approval
+        $service->processDepartmentProposals($conn);
+        $service->approveDepartmentBulk($conn, ['department_code' => 'school'], 'school', 'Mustafa Admin', 'Dept bulk');
+
+        $stuAfter = DB::table('staging_students')->where('gr_number', '80001')->first();
+
+        // Immutable fields preserved
+        $this->assertEquals($stuBefore->source_key, $stuAfter->source_key);
+        $this->assertEquals($stuBefore->raw_id, $stuAfter->raw_id);
+        $this->assertEquals($stuBefore->family_code, $stuAfter->family_code);
+        $this->assertEquals($stuBefore->student_name, $stuAfter->student_name);
+        $this->assertEquals($stuBefore->class_name, $stuAfter->class_name);
+        $this->assertEquals($stuBefore->department_hint, $stuAfter->department_hint);
+
+        // Only department_approved was updated
+        $this->assertEquals('school', $stuAfter->department_approved);
+        // Campus approval remains main
+        $this->assertEquals('main', $stuAfter->campus_approved);
+
+        // Currencies preserved
+        $this->assertEquals(4, DB::table('staging_currency_reviews')->where('review_status', 'APPROVED')->count());
+        $this->assertEquals(1, DB::table('staging_currency_reviews')->where('review_status', 'PENDING_REVIEW')->count());
+    }
+
+    public function test_phase3a3_secondary_enrollment_safeguards_and_reassignment(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        $service->processDepartmentProposals($conn);
+        $service->approveDepartmentBulk($conn, ['department_code' => 'school'], 'school', 'Mustafa Admin');
+
+        // Student 80001 is School (primary)
+        $primary = DB::table('staging_department_assignments')
+            ->where('gr_number', '80001')
+            ->where('is_primary', 1)
+            ->first();
+        $this->assertEquals('school', $primary->department_code);
+
+        // Admin adds secondary enrollment for Tuition
+        $added = $service->reassignStudentDepartment($conn, '80001', 'tuition', 'Mustafa Admin', 'Enrolled in evening tuition', true);
+        $this->assertTrue($added);
+
+        $enrollments = DB::table('staging_department_assignments')->where('gr_number', '80001')->get();
+        $this->assertCount(2, $enrollments);
+
+        // Primary remains School, secondary is Tuition
+        $p = $enrollments->where('is_primary', 1)->first();
+        $s = $enrollments->where('is_primary', 0)->first();
+        $this->assertEquals('school', $p->department_code);
+        $this->assertEquals('tuition', $s->department_code);
+
+        // Adding duplicate secondary enrollment is prevented (returns true, count remains 2)
+        $addedDuplicate = $service->reassignStudentDepartment($conn, '80001', 'tuition', 'Mustafa Admin', 'Duplicate add', true);
+        $this->assertTrue($addedDuplicate);
+        $this->assertEquals(2, DB::table('staging_department_assignments')->where('gr_number', '80001')->count());
+
+        // Primary department_approved in staging_students remains primary (school)
+        $stu = DB::table('staging_students')->where('gr_number', '80001')->first();
+        $this->assertEquals('school', $stu->department_approved);
+    }
+
+    public function test_phase3a3_transaction_rollback_when_validation_fails(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        $service->processDepartmentProposals($conn);
+
+        // Invalid department throws and does not mutate any records
+        $this->assertThrows(
+            fn() => $service->approveDepartmentBulk($conn, [], 'invalid_dept_code', 'Mustafa Admin'),
+            \InvalidArgumentException::class
+        );
+
+        $this->assertEquals(0, DB::table('staging_department_assignments')->where('status', 'APPROVED')->count());
+        $this->assertEquals(5, DB::table('staging_department_assignments')->where('status', 'PROPOSED')->count());
+        $this->assertEquals(0, DB::table('staging_approval_logs')->where('action', 'DEPARTMENT_BULK_APPROVAL')->count());
+    }
+
+    public function test_phase3a3_unauthorized_bulk_approval_rejection(): void
+    {
+        $this->seedFictionalStagingData();
+        $service = app(StudentIdentityMappingService::class);
+        $conn = config('database.default');
+
+        $service->processDepartmentProposals($conn);
+
+        // Empty approver name is rejected
+        $this->assertThrows(
+            fn() => $service->approveDepartmentBulk($conn, [], 'school', '   '),
+            \InvalidArgumentException::class
+        );
+
+        // Web route rejection for cashier
+        $cashier = $this->setupCashier();
+        $this->actingAs($cashier)->post('/migration/department/approve', [
+            'target_department' => 'school',
+            'confirm_approval' => 1,
+        ])->assertStatus(403);
+    }
 }
