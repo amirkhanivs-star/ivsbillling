@@ -38,6 +38,7 @@
 /docs/*.csv
 /storage/app/imports/*
 !/storage/app/imports/.gitignore
+PHASE_3A_2_DEPARTMENT_VERIFICATION_REPORT.md
 
 # Private Staging Exports, Scratch Scripts & Diagnostic Archives
 /scratch/
