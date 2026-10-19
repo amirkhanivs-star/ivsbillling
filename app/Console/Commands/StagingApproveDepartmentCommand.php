@@ -19,6 +19,7 @@ class StagingApproveDepartmentCommand extends Command
                             {--database=staging : Target database connection (must be iqra_billing_clean)}
                             {--department=all : Target department to approve (all, school, tuition)}
                             {--approver= : Name or email of verified administrator}
+                            {--executor= : Context or identity of technical CLI executor}
                             {--notes= : Audit remarks for the approval}
                             {--dry-run : Simulate approval without persisting changes}';
 
@@ -37,6 +38,7 @@ class StagingApproveDepartmentCommand extends Command
         $connection = (string) $this->option('database');
         $deptOption = strtolower((string) $this->option('department'));
         $approverInput = (string) $this->option('approver');
+        $executorInput = (string) $this->option('executor');
         $notes = (string) ($this->option('notes') ?: 'Phase 3A.3 authorized bulk approval for School and Tuition primary departments');
         $dryRun = (bool) $this->option('dry-run');
 
@@ -90,7 +92,12 @@ class StagingApproveDepartmentCommand extends Command
         }
 
         $approverIdentity = "{$adminUser->name} <{$adminUser->email}> ({$adminUser->role}, ID: {$adminUser->id})";
+        $currentUser = get_current_user() ?: 'cli_user';
+        $hostname = gethostname() ?: 'localhost';
+        $executorIdentity = $executorInput ?: "{$currentUser}@{$hostname} (CLI)";
+        $auditPerformedBy = "authorized_by: {$approverIdentity} | executed_by: {$executorIdentity}";
         $this->info(" [AUTHENTICATED] Authorized Administrator: {$approverIdentity}");
+        $this->info(" [EXECUTOR] Technical Execution Context: {$executorIdentity}");
 
         // 3. Pre-Approval Verification Checks
         $stagingStudentsCount = $c->table('staging_students')->count();
@@ -200,7 +207,7 @@ class StagingApproveDepartmentCommand extends Command
                 $connection,
                 ['department_code' => 'school'],
                 'school',
-                $approverIdentity,
+                $auditPerformedBy,
                 $notes,
                 true // Full individual student audit logging
             );
@@ -214,7 +221,7 @@ class StagingApproveDepartmentCommand extends Command
                 $connection,
                 ['department_code' => 'tuition'],
                 'tuition',
-                $approverIdentity,
+                $auditPerformedBy,
                 $notes,
                 true // Full individual student audit logging
             );

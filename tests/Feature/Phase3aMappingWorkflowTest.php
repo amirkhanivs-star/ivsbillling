@@ -729,4 +729,52 @@ class Phase3aMappingWorkflowTest extends TestCase
             'confirm_approval' => 1,
         ])->assertStatus(403);
     }
+
+    public function test_phase3b1_credential_remediation_command_isolates_live_hash_and_creates_audit_log(): void
+    {
+        $conn = config('database.default');
+
+        // Create a test user with live bcrypt hash
+        $testUser = \App\Models\User::create([
+            'name' => 'Staging Admin',
+            'email' => 'admin@staging.local',
+            'password' => bcrypt('SuperSecretLivePass123!'),
+            'role' => 'super_admin',
+            'is_active' => true,
+        ]);
+
+        $this->assertTrue(str_starts_with($testUser->password, '$2y$'));
+
+        // Run dry-run
+        $this->artisan('staging:remediate-credentials', [
+            '--database' => $conn,
+            '--dry-run' => true,
+        ])->assertSuccessful();
+
+        $testUser->refresh();
+        $this->assertTrue(str_starts_with($testUser->password, '$2y$'));
+
+        // Run actual remediation
+        $this->artisan('staging:remediate-credentials', [
+            '--database' => $conn,
+            '--authorized-by' => 'Mustafa <mustafa@gmail.com>',
+            '--executor' => 'test-runner@phpunit (CLI)',
+        ])->assertSuccessful();
+
+        $testUser->refresh();
+        $this->assertTrue(str_starts_with($testUser->password, '!LOCKED_STAGING_ISOLATED_'));
+
+        // Verify audit log exists
+        $this->assertDatabaseHas('staging_approval_logs', [
+            'entity_type' => 'USER',
+            'entity_id' => $testUser->id,
+            'action' => 'CREDENTIAL_ISOLATION_REMEDIATED',
+        ]);
+
+        // Verify idempotency
+        $this->artisan('staging:remediate-credentials', [
+            '--database' => $conn,
+        ])->assertSuccessful();
+    }
 }
+
