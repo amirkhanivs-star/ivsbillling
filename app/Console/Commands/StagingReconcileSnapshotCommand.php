@@ -281,6 +281,29 @@ class StagingReconcileSnapshotCommand extends Command
         $this->line("   Missing Payments:     " . count($diff['missing_payments']));
         $this->line("   Changed Payments:     " . count($diff['changed_payments']));
 
+        $payTableData = [];
+        foreach ($diff['currencies'] as $curr => $data) {
+            if ($data['v1_payments_count'] == 0 && $data['v2_payments_count'] == 0) {
+                continue;
+            }
+            $payTableData[] = [
+                $curr,
+                "{$data['v1_payments_count']} (" . number_format($data['v1_payments_amount'], 2) . ")",
+                "{$data['v2_payments_count']} (" . number_format($data['v2_payments_amount'], 2) . ")",
+                "{$data['unchanged_payments_count']} (" . number_format($data['unchanged_payments_amount'], 2) . ")",
+                "{$data['new_payments_count']} (" . number_format($data['new_payments_amount'], 2) . ")",
+                "{$data['missing_payments_count']} (" . number_format($data['missing_payments_amount'], 2) . ")",
+            ];
+        }
+
+        if (!empty($payTableData)) {
+            $this->info("\n HISTORICAL PAYMENT RECONCILIATION SUMMARY (BY CURRENCY)");
+            $this->table(
+                ['Currency', 'V1 Baseline Payments', 'V2 Snapshot Payments', 'Unchanged', 'Newly Added', 'Missing'],
+                $payTableData
+            );
+        }
+
         $this->info("\n [STATUS] Dry-run preview complete. Version 1 preserved untouched. No ledger postings executed.");
         return Command::SUCCESS;
     }

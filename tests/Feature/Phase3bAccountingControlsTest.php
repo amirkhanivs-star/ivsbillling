@@ -765,5 +765,182 @@ class Phase3bAccountingControlsTest extends TestCase
         $this->assertEquals(200.00, $results2['currencies']['SAR']['disappearing_amount']);
         $this->assertEquals(-200.00, $results2['currencies']['SAR']['net_variance']);
     }
+
+    /**
+     * Test Phase 3B.3.1A: Payment incorrect amount detection.
+     */
+    public function test_phase3b31a_payment_incorrect_amount_detection(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        $v1Payments = [
+            ['slip_number' => 'SLIP-101', 'gr_number' => '501', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 250.00, 'payment_date_iso' => '2026-10-15'],
+        ];
+
+        // V2 has same slip and GR, but altered amount of 300.00
+        $v2Payments = [
+            ['slip_number' => 'SLIP-101', 'gr_number' => '501', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 300.00, 'payment_date_iso' => '2026-10-15'],
+        ];
+
+        $results = $service->compareSnapshots([], [], $v1Payments, $v2Payments);
+
+        $this->assertCount(1, $results['changed_payments']);
+        $this->assertEquals(250.00, $results['changed_payments'][0]['v1_amount']);
+        $this->assertEquals(300.00, $results['changed_payments'][0]['v2_amount']);
+        $this->assertEquals(0, $results['currencies']['SAR']['unchanged_payments_count']);
+    }
+
+    /**
+     * Test Phase 3B.3.1A: Payment incorrect currency detection.
+     */
+    public function test_phase3b31a_payment_incorrect_currency_detection(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        $v1Payments = [
+            ['slip_number' => 'SLIP-102', 'gr_number' => '502', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 500.00],
+        ];
+
+        // V2 assigns same slip and GR to AED instead of SAR
+        $v2Payments = [
+            ['slip_number' => 'SLIP-102', 'gr_number' => '502', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'AED', 'paid_amount' => 500.00],
+        ];
+
+        $results = $service->compareSnapshots([], [], $v1Payments, $v2Payments);
+
+        $this->assertEquals(1, $results['currencies']['SAR']['missing_payments_count']);
+        $this->assertEquals(500.00, $results['currencies']['SAR']['missing_payments_amount']);
+        $this->assertEquals(1, $results['currencies']['AED']['new_payments_count']);
+        $this->assertEquals(500.00, $results['currencies']['AED']['new_payments_amount']);
+        $this->assertEquals(0, $results['currencies']['SAR']['unchanged_payments_count']);
+        $this->assertEquals(0, $results['currencies']['AED']['unchanged_payments_count']);
+    }
+
+    /**
+     * Test Phase 3B.3.1A: Missing and duplicated payment details multiplicity.
+     */
+    public function test_phase3b31a_payment_missing_and_duplicated_details(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // V1 has two identical legitimate payment lines of 100 SAR on the same slip
+        $v1Payments = [
+            ['slip_number' => 'SLIP-103', 'gr_number' => '503', 'particular_raw' => 'Tuition Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 100.00],
+            ['slip_number' => 'SLIP-103', 'gr_number' => '503', 'particular_raw' => 'Tuition Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 100.00],
+        ];
+
+        // Scenario 1: V2 drops one duplicate line -> 1 unchanged, 1 missing
+        $v2Single = [
+            ['slip_number' => 'SLIP-103', 'gr_number' => '503', 'particular_raw' => 'Tuition Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 100.00],
+        ];
+        $results1 = $service->compareSnapshots([], [], $v1Payments, $v2Single);
+        $this->assertEquals(1, $results1['currencies']['SAR']['unchanged_payments_count']);
+        $this->assertEquals(100.00, $results1['currencies']['SAR']['unchanged_payments_amount']);
+        $this->assertEquals(1, $results1['currencies']['SAR']['missing_payments_count']);
+        $this->assertEquals(100.00, $results1['currencies']['SAR']['missing_payments_amount']);
+
+        // Scenario 2: V2 adds an extra duplicate line -> 2 unchanged, 1 new
+        $v2Triple = [
+            ['slip_number' => 'SLIP-103', 'gr_number' => '503', 'particular_raw' => 'Tuition Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 100.00],
+            ['slip_number' => 'SLIP-103', 'gr_number' => '503', 'particular_raw' => 'Tuition Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 100.00],
+            ['slip_number' => 'SLIP-103', 'gr_number' => '503', 'particular_raw' => 'Tuition Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 100.00],
+        ];
+        $results2 = $service->compareSnapshots([], [], $v1Payments, $v2Triple);
+        $this->assertEquals(2, $results2['currencies']['SAR']['unchanged_payments_count']);
+        $this->assertEquals(200.00, $results2['currencies']['SAR']['unchanged_payments_amount']);
+        $this->assertEquals(1, $results2['currencies']['SAR']['new_payments_count']);
+        $this->assertEquals(100.00, $results2['currencies']['SAR']['new_payments_amount']);
+    }
+
+    /**
+     * Test Phase 3B.3.1A: Matching row count but different currency distribution.
+     */
+    public function test_phase3b31a_payment_matching_row_count_different_currency_distribution(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // V1: 4 rows total (3 SAR @ 250, 1 AED @ 250) = 1,000 total nominal
+        $v1Payments = [
+            ['slip_number' => 'S1', 'gr_number' => '601', 'particular_raw' => 'Fee', 'currency_iso' => 'SAR', 'paid_amount' => 250.00],
+            ['slip_number' => 'S2', 'gr_number' => '602', 'particular_raw' => 'Fee', 'currency_iso' => 'SAR', 'paid_amount' => 250.00],
+            ['slip_number' => 'S3', 'gr_number' => '603', 'particular_raw' => 'Fee', 'currency_iso' => 'SAR', 'paid_amount' => 250.00],
+            ['slip_number' => 'S4', 'gr_number' => '604', 'particular_raw' => 'Fee', 'currency_iso' => 'AED', 'paid_amount' => 250.00],
+        ];
+
+        // V2: 4 rows total (1 SAR @ 250, 3 AED @ 250) = 1,000 total nominal
+        $v2Payments = [
+            ['slip_number' => 'S1', 'gr_number' => '601', 'particular_raw' => 'Fee', 'currency_iso' => 'SAR', 'paid_amount' => 250.00],
+            ['slip_number' => 'S2', 'gr_number' => '602', 'particular_raw' => 'Fee', 'currency_iso' => 'AED', 'paid_amount' => 250.00],
+            ['slip_number' => 'S3', 'gr_number' => '603', 'particular_raw' => 'Fee', 'currency_iso' => 'AED', 'paid_amount' => 250.00],
+            ['slip_number' => 'S4', 'gr_number' => '604', 'particular_raw' => 'Fee', 'currency_iso' => 'AED', 'paid_amount' => 250.00],
+        ];
+
+        $results = $service->compareSnapshots([], [], $v1Payments, $v2Payments);
+
+        // Both row counts are 4
+        $this->assertEquals(4, $results['summary']['v1_payments_total_rows']);
+        $this->assertEquals(4, $results['summary']['v2_payments_total_rows']);
+
+        // SAR: 1 unchanged, 2 missing
+        $this->assertEquals(1, $results['currencies']['SAR']['unchanged_payments_count']);
+        $this->assertEquals(2, $results['currencies']['SAR']['missing_payments_count']);
+        $this->assertEquals(500.00, $results['currencies']['SAR']['missing_payments_amount']);
+
+        // AED: 1 unchanged, 2 new
+        $this->assertEquals(1, $results['currencies']['AED']['unchanged_payments_count']);
+        $this->assertEquals(2, $results['currencies']['AED']['new_payments_count']);
+        $this->assertEquals(500.00, $results['currencies']['AED']['new_payments_amount']);
+    }
+
+    /**
+     * Test Phase 3B.3.1A: Multi-currency receipt slip handling.
+     */
+    public function test_phase3b31a_payment_multi_currency_receipt_handling(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // A single receipt slip containing multiple lines in different currencies
+        $v1Payments = [
+            ['slip_number' => 'SLIP-MULTI-99', 'gr_number' => '701', 'particular_raw' => 'Monthly Fee - Oct-2026', 'currency_iso' => 'SAR', 'paid_amount' => 250.00],
+            ['slip_number' => 'SLIP-MULTI-99', 'gr_number' => '702', 'particular_raw' => 'Exam Fee - Oct-2026', 'currency_iso' => 'USD', 'paid_amount' => 70.00],
+        ];
+
+        $results = $service->compareSnapshots([], [], $v1Payments, $v1Payments);
+
+        $this->assertEquals(1, $results['currencies']['SAR']['unchanged_payments_count']);
+        $this->assertEquals(250.00, $results['currencies']['SAR']['unchanged_payments_amount']);
+        $this->assertEquals(1, $results['currencies']['USD']['unchanged_payments_count']);
+        $this->assertEquals(70.00, $results['currencies']['USD']['unchanged_payments_amount']);
+        $this->assertEquals(0, $results['currencies']['SAR']['new_payments_count']);
+        $this->assertEquals(0, $results['currencies']['USD']['new_payments_count']);
+    }
+
+    /**
+     * Test Phase 3B.3.1A: Unresolved currency preservation in payments.
+     */
+    public function test_phase3b31a_payment_unresolved_currency_preservation(): void
+    {
+        $service = app(\App\Services\Staging\SnapshotReconciliationService::class);
+
+        // Malformed currency labels ('SAFR', '0', blank, 'SAT')
+        $v1Payments = [
+            ['slip_number' => 'S1', 'gr_number' => '801', 'particular_raw' => 'Fee', 'currency_raw' => 'SAFR', 'paid_amount' => 730.00],
+            ['slip_number' => 'S2', 'gr_number' => '802', 'particular_raw' => 'Fee', 'currency_raw' => '0', 'paid_amount' => 1160.00],
+            ['slip_number' => 'S3', 'gr_number' => '803', 'particular_raw' => 'Fee', 'currency_raw' => '', 'paid_amount' => 50.00],
+            ['slip_number' => 'S4', 'gr_number' => '804', 'particular_raw' => 'Fee', 'currency_raw' => 'SAT', 'paid_amount' => 50.00],
+        ];
+
+        $results = $service->compareSnapshots([], [], $v1Payments, $v1Payments);
+
+        // All 4 malformed currency lines must be preserved under UNRESOLVED
+        $this->assertEquals(4, $results['currencies']['UNRESOLVED']['v1_payments_count']);
+        $this->assertEquals(1990.00, $results['currencies']['UNRESOLVED']['v1_payments_amount']);
+        $this->assertEquals(4, $results['currencies']['UNRESOLVED']['unchanged_payments_count']);
+        $this->assertEquals(1990.00, $results['currencies']['UNRESOLVED']['unchanged_payments_amount']);
+
+        // None should leak into SAR or AED
+        $this->assertEquals(0, $results['currencies']['SAR']['v1_payments_count']);
+        $this->assertEquals(0, $results['currencies']['AED']['v1_payments_count']);
+    }
 }
 

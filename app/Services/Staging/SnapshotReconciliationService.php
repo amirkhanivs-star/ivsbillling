@@ -69,8 +69,16 @@ class SnapshotReconciliationService
                 'v1_total_amount' => 0.0,
                 'v2_total_amount' => 0.0,
                 'net_variance' => 0.0,
+                'v1_payments_count' => 0,
+                'v1_payments_amount' => 0.0,
+                'v2_payments_count' => 0,
+                'v2_payments_amount' => 0.0,
+                'unchanged_payments_count' => 0,
+                'unchanged_payments_amount' => 0.0,
                 'new_payments_count' => 0,
                 'new_payments_amount' => 0.0,
+                'missing_payments_count' => 0,
+                'missing_payments_amount' => 0.0,
             ];
         }
 
@@ -306,13 +314,16 @@ class SnapshotReconciliationService
         foreach ($v1Payments as $p) {
             $pObj = (object) $p;
             $results['summary']['v1_payments_total_rows']++;
-            $curr = $this->normalizeCurrency($pObj->currency_iso ?? $pObj->currency ?? null);
+            $curr = $this->normalizeCurrency($pObj->currency_iso ?? $pObj->currency ?? $pObj->currency_raw ?? null);
             $slip = trim((string)($pObj->slip_number ?? ''));
             $gr = trim((string)($pObj->gr_number ?? ''));
             $period = $this->canonicalPeriodKey($pObj->period_key ?? null, $pObj->particular_raw ?? null);
             $normDesc = $this->canonicalFeeDescription($pObj->fee_description ?? null, $pObj->particular_raw ?? null);
             $date = $pObj->payment_date_iso ?? $pObj->payment_date_raw ?? '';
             $amt = (float)($pObj->paid_amount ?? $pObj->amount ?? 0);
+
+            $results['currencies'][$curr]['v1_payments_count']++;
+            $results['currencies'][$curr]['v1_payments_amount'] = round($results['currencies'][$curr]['v1_payments_amount'] + $amt, 2);
 
             $payKey = "{$curr}|{$slip}|{$gr}|{$period}|{$normDesc}";
 
@@ -332,13 +343,16 @@ class SnapshotReconciliationService
         foreach ($v2Payments as $p) {
             $pObj = (object) $p;
             $results['summary']['v2_payments_total_rows']++;
-            $curr = $this->normalizeCurrency($pObj->currency_iso ?? $pObj->currency ?? null);
+            $curr = $this->normalizeCurrency($pObj->currency_iso ?? $pObj->currency ?? $pObj->currency_raw ?? null);
             $slip = trim((string)($pObj->slip_number ?? ''));
             $gr = trim((string)($pObj->gr_number ?? ''));
             $period = $this->canonicalPeriodKey($pObj->period_key ?? null, $pObj->particular_raw ?? null);
             $normDesc = $this->canonicalFeeDescription($pObj->fee_description ?? null, $pObj->particular_raw ?? null);
             $date = $pObj->payment_date_iso ?? $pObj->payment_date_raw ?? '';
             $amt = (float)($pObj->paid_amount ?? $pObj->amount ?? 0);
+
+            $results['currencies'][$curr]['v2_payments_count']++;
+            $results['currencies'][$curr]['v2_payments_amount'] = round($results['currencies'][$curr]['v2_payments_amount'] + $amt, 2);
 
             $payKey = "{$curr}|{$slip}|{$gr}|{$period}|{$normDesc}";
 
@@ -366,10 +380,10 @@ class SnapshotReconciliationService
                 // Entirely new payment lines
                 foreach ($v2Items as $item) {
                     $results['currencies'][$curr]['new_payments_count']++;
-                    $results['currencies'][$curr]['new_payments_amount'] += $item['amount'];
+                    $results['currencies'][$curr]['new_payments_amount'] = round($results['currencies'][$curr]['new_payments_amount'] + $item['amount'], 2);
                     $results['new_payments'][] = $item;
                     $results['summary']['new_payments_total_count']++;
-                    $results['summary']['new_payments_total_amount'] += $item['amount'];
+                    $results['summary']['new_payments_total_amount'] = round($results['summary']['new_payments_total_amount'] + $item['amount'], 2);
                 }
                 continue;
             }
@@ -377,6 +391,8 @@ class SnapshotReconciliationService
             if (!empty($v1Items) && empty($v2Items)) {
                 // Entirely missing in V2
                 foreach ($v1Items as $item) {
+                    $results['currencies'][$curr]['missing_payments_count']++;
+                    $results['currencies'][$curr]['missing_payments_amount'] = round($results['currencies'][$curr]['missing_payments_amount'] + $item['amount'], 2);
                     $results['missing_payments'][] = $item;
                 }
                 continue;
@@ -394,6 +410,8 @@ class SnapshotReconciliationService
                     }
                     if (abs($item1['amount'] - $item2['amount']) < 0.001) {
                         $matchedV2Indices[$v2Index] = true;
+                        $results['currencies'][$curr]['unchanged_payments_count']++;
+                        $results['currencies'][$curr]['unchanged_payments_amount'] = round($results['currencies'][$curr]['unchanged_payments_amount'] + $item1['amount'], 2);
                         $found = true;
                         break;
                     }
@@ -426,6 +444,8 @@ class SnapshotReconciliationService
 
             if (count($unmatchedV1) > $pairs) {
                 for ($p = $pairs; $p < count($unmatchedV1); $p++) {
+                    $results['currencies'][$curr]['missing_payments_count']++;
+                    $results['currencies'][$curr]['missing_payments_amount'] = round($results['currencies'][$curr]['missing_payments_amount'] + $unmatchedV1[$p]['amount'], 2);
                     $results['missing_payments'][] = $unmatchedV1[$p];
                 }
             }
@@ -433,10 +453,10 @@ class SnapshotReconciliationService
             if (count($unmatchedV2) > $pairs) {
                 for ($p = $pairs; $p < count($unmatchedV2); $p++) {
                     $results['currencies'][$curr]['new_payments_count']++;
-                    $results['currencies'][$curr]['new_payments_amount'] += $unmatchedV2[$p]['amount'];
+                    $results['currencies'][$curr]['new_payments_amount'] = round($results['currencies'][$curr]['new_payments_amount'] + $unmatchedV2[$p]['amount'], 2);
                     $results['new_payments'][] = $unmatchedV2[$p];
                     $results['summary']['new_payments_total_count']++;
-                    $results['summary']['new_payments_total_amount'] += $unmatchedV2[$p]['amount'];
+                    $results['summary']['new_payments_total_amount'] = round($results['summary']['new_payments_total_amount'] + $unmatchedV2[$p]['amount'], 2);
                 }
             }
         }
@@ -498,9 +518,12 @@ class SnapshotReconciliationService
      */
     public function normalizeCurrency(?string $raw): string
     {
-        $c = strtoupper(trim((string)$raw));
+        $c = strtoupper(trim(str_replace(['`', "'", '"', ' '], '', (string)$raw)));
         if (in_array($c, ['SAR', 'AED', 'PKR', 'QAR', 'BHD', 'OMR', 'USD'], true)) {
             return $c;
+        }
+        if (in_array($c, ['RS', 'RUPEES'], true)) {
+            return 'PKR';
         }
         return 'UNRESOLVED';
     }
