@@ -41,6 +41,7 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/migration/campus/correct', [\App\Http\Controllers\MigrationReviewController::class, 'campusCorrect'])->name('migration.campus.correct');
  Route::get('/migration/department', [\App\Http\Controllers\MigrationReviewController::class, 'departmentIndex'])->name('migration.department');
  Route::post('/migration/department/approve', [\App\Http\Controllers\MigrationReviewController::class, 'departmentApprove'])->name('migration.department.approve');
+ Route::post('/migration/department/reassign', [\App\Http\Controllers\MigrationReviewController::class, 'departmentReassign'])->name('migration.department.reassign');
  Route::get('/migration/currency', [\App\Http\Controllers\MigrationReviewController::class, 'currencyIndex'])->name('migration.currency');
  Route::post('/migration/currency/approve', [\App\Http\Controllers\MigrationReviewController::class, 'currencyApprove'])->name('migration.currency.approve');
  Route::get('/migration/gr-reconciliation', [\App\Http\Controllers\MigrationReviewController::class, 'grReconciliationIndex'])->name('migration.gr_reconciliation');

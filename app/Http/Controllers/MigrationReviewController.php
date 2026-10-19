@@ -150,13 +150,24 @@ class MigrationReviewController
 
         $deptCode = $request->query('department_code');
         $status = $request->query('status');
+        $className = $request->query('class_name');
 
-        $query = DB::connection($conn)->table('staging_department_assignments');
+        $query = DB::connection($conn)->table('staging_department_assignments')
+            ->leftJoin('staging_students', 'staging_department_assignments.gr_number', '=', 'staging_students.gr_number')
+            ->select(
+                'staging_department_assignments.*',
+                'staging_students.student_name',
+                'staging_students.father_name'
+            );
+
         if (!empty($deptCode)) {
-            $query->where('department_code', $deptCode);
+            $query->where('staging_department_assignments.department_code', $deptCode);
         }
         if (!empty($status)) {
-            $query->where('status', $status);
+            $query->where('staging_department_assignments.status', $status);
+        }
+        if (!empty($className)) {
+            $query->where('staging_department_assignments.class_name', $className);
         }
 
         $records = $query->paginate(25)->withQueryString();
@@ -169,11 +180,22 @@ class MigrationReviewController
 
         $departments = DB::connection($conn)->table('departments')->orderBy('name')->get();
 
+        $metrics = [
+            'total' => DB::connection($conn)->table('staging_department_assignments')->count(),
+            'school' => DB::connection($conn)->table('staging_department_assignments')->where('department_code', 'school')->count(),
+            'tuition' => DB::connection($conn)->table('staging_department_assignments')->where('department_code', 'tuition')->count(),
+            'quran' => DB::connection($conn)->table('staging_department_assignments')->where('department_code', 'quran')->count(),
+            'approved' => DB::connection($conn)->table('staging_department_assignments')->where('status', 'APPROVED')->count(),
+            'proposed' => DB::connection($conn)->table('staging_department_assignments')->where('status', 'PROPOSED')->count(),
+        ];
+
         return view('migration.department', [
             'records' => $records,
             'classSummary' => $classSummary,
             'departments' => $departments,
+            'metrics' => $metrics,
             'currentDept' => $deptCode,
+            'currentClass' => $className,
             'currentStatus' => $status,
         ]);
     }
@@ -207,6 +229,40 @@ class MigrationReviewController
         );
 
         return redirect('/migration/department')->with('notice', "Successfully approved department '{$validated['target_department']}' for {$approvedCount} record(s).");
+    }
+
+    /**
+     * Reassign or add department enrollment for an individual student.
+     */
+    public function departmentReassign(Request $request, StudentIdentityMappingService $service)
+    {
+        $this->authorizeAdmin($request);
+        $validated = $request->validate([
+            'gr_number' => 'required|string|max:50',
+            'department_code' => 'required|string|max:50',
+            'is_additional' => 'nullable|boolean',
+            'reason' => 'nullable|string|max:500',
+        ]);
+
+        $conn = $this->connection();
+        $success = $service->reassignStudentDepartment(
+            $conn,
+            $validated['gr_number'],
+            $validated['department_code'],
+            $request->user()->name,
+            $validated['reason'] ?? null,
+            (bool) ($validated['is_additional'] ?? false)
+        );
+
+        if (!$success) {
+            return redirect('/migration/department')->with('alert', "Student GR {$validated['gr_number']} not found for department reassignment.");
+        }
+
+        $msg = ($validated['is_additional'] ?? false)
+            ? "Added secondary enrollment in department '{$validated['department_code']}' for GR {$validated['gr_number']}."
+            : "Reassigned department for GR {$validated['gr_number']} to '{$validated['department_code']}'.";
+
+        return redirect('/migration/department')->with('notice', $msg);
     }
 
     /**

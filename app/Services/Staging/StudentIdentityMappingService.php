@@ -577,6 +577,129 @@ class StudentIdentityMappingService
     }
 
     /**
+     * Reassign or add department enrollment for a specific student.
+     */
+    public function reassignStudentDepartment(
+        string $connection,
+        string $grNumber,
+        string $newDepartment,
+        string $approverName,
+        ?string $reason = null,
+        bool $asAdditionalEnrollment = false
+    ): bool {
+        DatabaseSafetyGuard::assertStagingDatabase($connection);
+
+        if (Schema::connection($connection)->hasTable('departments')) {
+            $deptExists = DB::connection($connection)->table('departments')
+                ->where('code', $newDepartment)
+                ->exists();
+            if (!$deptExists) {
+                throw new \InvalidArgumentException("Target department '{$newDepartment}' does not exist.");
+            }
+        }
+
+        $now = now();
+        $student = DB::connection($connection)->table('staging_students')
+            ->where('gr_number', $grNumber)
+            ->first();
+
+        if (!$student) {
+            return false;
+        }
+
+        if ($asAdditionalEnrollment) {
+            $existing = DB::connection($connection)->table('staging_department_assignments')
+                ->where('gr_number', $grNumber)
+                ->where('department_code', $newDepartment)
+                ->first();
+
+            if ($existing) {
+                return true;
+            }
+
+            DB::connection($connection)->table('staging_department_assignments')->insert([
+                'source_key' => $student->source_key,
+                'gr_number' => $grNumber,
+                'class_name' => $student->class_name,
+                'department_code' => $newDepartment,
+                'evidence_source' => 'manual_multi_department_enrollment',
+                'status' => 'APPROVED',
+                'is_primary' => false,
+                'approved_by' => $approverName,
+                'approved_at' => $now,
+                'notes' => $reason ?: "Added secondary enrollment in {$newDepartment}",
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            DB::connection($connection)->table('staging_approval_logs')->insert([
+                'entity_type' => 'department',
+                'entity_id' => null,
+                'gr_number' => $grNumber,
+                'action' => 'DEPARTMENT_ADDITIONAL_ENROLLMENT',
+                'old_value' => null,
+                'new_value' => json_encode(['department_code' => $newDepartment, 'is_primary' => false, 'status' => 'APPROVED']),
+                'performed_by' => $approverName,
+                'reason' => $reason ?: 'Added multi-department enrollment',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            return true;
+        }
+
+        $existing = DB::connection($connection)->table('staging_department_assignments')
+            ->where('gr_number', $grNumber)
+            ->where('is_primary', true)
+            ->first();
+
+        $oldDept = $existing ? $existing->department_code : 'unknown';
+
+        if ($existing) {
+            DB::connection($connection)->table('staging_department_assignments')
+                ->where('id', $existing->id)
+                ->update([
+                    'department_code' => $newDepartment,
+                    'status' => 'APPROVED',
+                    'approved_by' => $approverName,
+                    'approved_at' => $now,
+                    'notes' => $reason ?: "Reassigned from {$oldDept} to {$newDepartment}",
+                    'updated_at' => $now,
+                ]);
+        } else {
+            DB::connection($connection)->table('staging_department_assignments')->insert([
+                'source_key' => $student->source_key,
+                'gr_number' => $grNumber,
+                'class_name' => $student->class_name,
+                'department_code' => $newDepartment,
+                'evidence_source' => 'manual_reassignment',
+                'status' => 'APPROVED',
+                'is_primary' => true,
+                'approved_by' => $approverName,
+                'approved_at' => $now,
+                'notes' => $reason ?: "Manually assigned department {$newDepartment}",
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+        }
+
+        DB::connection($connection)->table('staging_approval_logs')->insert([
+            'entity_type' => 'department',
+            'entity_id' => $existing ? $existing->id : null,
+            'gr_number' => $grNumber,
+            'action' => 'DEPARTMENT_REASSIGNMENT',
+            'old_value' => json_encode(['department_code' => $oldDept]),
+            'new_value' => json_encode(['department_code' => $newDepartment, 'status' => 'APPROVED']),
+            'performed_by' => $approverName,
+            'reason' => $reason ?: 'Manual department reassignment',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        return true;
+    }
+
+    /**
      * Approve currency for an unresolved student.
      */
     public function approveCurrency(
