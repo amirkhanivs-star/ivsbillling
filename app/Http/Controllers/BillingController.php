@@ -826,33 +826,21 @@ class BillingController {
  }
   public function importOutstanding(Request $r){
    abort_unless(in_array($r->user()->role,['super_admin','finance_admin','department_manager'],true),403);
-   $r->validate(['csv_file'=>'required|file|mimes:csv,txt|max:51200']);
-   $res=(new \App\Services\FeeImportService())->importOutstanding($r->file('csv_file')->getRealPath());
-   return redirect('/challan')->with('notice',"Imported {$res['items']} outstanding fee obligations across {$res['students']} students in {$res['invoices']} invoices.");
+   return redirect('/challan')->withErrors(['error'=>'Direct-to-ledger outstanding fee imports are disabled during Phase 1 Recovery Protection until the staging and reconciliation system is implemented in Phase 2.']);
   }
   public function importOutstandingPreloaded(Request $r){
    abort_unless(in_array($r->user()->role,['super_admin','finance_admin','department_manager'],true),403);
-   $path=storage_path('app/imports/outstanding_report.csv');
-   if(!file_exists($path)) return back()->withErrors(['error'=>'Preloaded outstanding report not found.']);
-   $res=(new \App\Services\FeeImportService())->importOutstanding($path);
-   return redirect('/challan')->with('notice',"Imported preloaded outstanding report: {$res['items']} fee items across {$res['students']} students in {$res['invoices']} invoices.");
+   return redirect('/challan')->withErrors(['error'=>'Direct-to-ledger outstanding fee imports are disabled during Phase 1 Recovery Protection until the staging and reconciliation system is implemented in Phase 2.']);
   }
   public function importCollection(Request $r){
    abort_unless(in_array($r->user()->role,['super_admin','finance_admin','department_manager'],true),403);
-   $r->validate(['csv_file'=>'required|file|mimes:csv,txt|max:51200']);
-   $res=(new \App\Services\FeeImportService())->importCollection($r->file('csv_file')->getRealPath());
-   return redirect('/challan')->with('notice',"Imported {$res['receipts']} receipts ({$res['items_paid']} items paid).");
+   return redirect('/challan')->withErrors(['error'=>'Direct-to-ledger historical collection imports are disabled during Phase 1 Recovery Protection until the staging and reconciliation system is implemented in Phase 2.']);
   }
   public function importCollectionPreloaded(Request $r){
    abort_unless(in_array($r->user()->role,['super_admin','finance_admin','department_manager'],true),403);
-   $path=storage_path('app/imports/collection_report.csv');
-   if(!file_exists($path)) return back()->withErrors(['error'=>'Preloaded collection report not found.']);
-   $res=(new \App\Services\FeeImportService())->importCollection($path);
-   return redirect('/challan')->with('notice',"Imported preloaded collection report: {$res['receipts']} receipts ({$res['items_paid']} items paid).");
+   return redirect('/challan')->withErrors(['error'=>'Direct-to-ledger historical collection imports are disabled during Phase 1 Recovery Protection until the staging and reconciliation system is implemented in Phase 2.']);
   }
   public function clearFeeData(Request $r){
-   abort_unless(in_array($r->user()->role,['super_admin','finance_admin'],true),403);
-   (new \App\Services\FeeImportService())->clearFeeData();
-   return redirect('/challan')->with('notice','All fee invoices, invoice items, and payment receipts have been cleared.');
+   abort(403, 'Dangerous ledger deletion endpoint has been disabled for Phase 1 Recovery Protection.');
   }
 }

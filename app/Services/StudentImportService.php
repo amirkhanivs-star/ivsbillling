@@ -39,6 +39,8 @@ class StudentImportService
 
     public function importFromFile(string $filePath): array
     {
+        throw new \RuntimeException('Direct-to-production student bulk imports are disabled during Phase 1 Recovery Protection.');
+
         if (!file_exists($filePath)) {
             throw new \InvalidArgumentException("CSV file not found at {$filePath}");
         }

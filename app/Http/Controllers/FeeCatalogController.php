@@ -24,27 +24,7 @@ class FeeCatalogController
         }
         $departments = DB::table('departments')->orderBy('id')->get();
         $selectedType = $request->integer('type') ?: optional($types->firstWhere('code', 'monthly'))->id;
-
-        // Ensure every class has an entry with by-default value 0 for the selected fee type
-        if ($selectedType) {
-            $defaultDept = $departments->first()?->id ?? 1;
-            $selectedTypeObj = $types->firstWhere('id', $selectedType);
-            $freq = ($selectedTypeObj && $selectedTypeObj->code === 'monthly') ? 'monthly' : 'one_time';
-            foreach ($classes as $cls) {
-                if (!DB::table('fee_catalog_rates')->where('fee_type_id', $selectedType)->where('class_label', $cls)->exists()) {
-                    DB::table('fee_catalog_rates')->insert([
-                        'fee_type_id' => $selectedType,
-                        'department_id' => $defaultDept,
-                        'class_label' => $cls,
-                        'currency' => 'SAR',
-                        'amount_minor' => 0,
-                        'frequency' => $freq,
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ]);
-                }
-            }
-        }
+        // Phase 1 Recovery: Safe idempotent GET display without side-effect DB writes
 
         $query = DB::table('fee_catalog_rates as c')->join('fee_types as t', 't.id', '=', 'c.fee_type_id')
             ->join('departments as d', 'd.id', '=', 'c.department_id')

@@ -1092,18 +1092,19 @@
   {{-- Card 1: Outstanding Fees --}}
   <div style="background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:14px;">
    <div style="font-weight:600;margin-bottom:6px;color:#7367f0;font-size:14px;">1. Outstanding Fees Report</div>
+   <div style="padding:8px 12px;background:#fff3cd;color:#856404;border-radius:4px;font-size:12px;margin-bottom:10px;font-weight:600;">🔒 Direct-to-ledger import disabled for Phase 1 Recovery Protection. Migration will proceed via verified staging tables in Phase 2.</div>
    <p style="margin:0 0 10px;font-size:12px;color:#6e6b7b;">Creates unpaid invoice obligations by class, student GRN, and billing month matching the Outstanding Report.</p>
    
-   <form method="post" action="{{ route('challan.import.outstanding.preloaded') }}" style="margin-bottom:12px;" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Importing Outstanding... Please wait';">
+   <form method="post" action="{{ route('challan.import.outstanding.preloaded') }}" style="margin-bottom:12px;">
     @csrf
-    <button type="submit" class="btn-ms-purple" style="width:100%;padding:9px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;">⚡ Run Preloaded Outstanding Report (16,900+ Records)</button>
+    <button type="submit" disabled style="width:100%;padding:9px;background:#c8c4f0;color:#fff;border:none;border-radius:4px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;cursor:not-allowed;">⚡ Preloaded Outstanding Report (Locked)</button>
    </form>
 
-   <form method="post" action="{{ route('challan.import.outstanding') }}" enctype="multipart/form-data" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Uploading & Importing...';">
+   <form method="post" action="{{ route('challan.import.outstanding') }}" enctype="multipart/form-data">
     @csrf
     <div style="display:flex;gap:8px;">
-     <input type="file" name="csv_file" accept=".csv,text/csv,text/plain" required style="flex:1;padding:6px;border:1px solid #d8d6de;border-radius:4px;background:#fff;font-size:12px;">
-     <button type="submit" style="background:#fff;border:1px solid #7367f0;color:#7367f0;padding:6px 14px;border-radius:4px;font-weight:600;cursor:pointer;">Upload CSV</button>
+     <input type="file" name="csv_file" accept=".csv,text/csv,text/plain" disabled style="flex:1;padding:6px;border:1px solid #d8d6de;border-radius:4px;background:#eee;font-size:12px;cursor:not-allowed;">
+     <button type="submit" disabled style="background:#f0f0f0;border:1px solid #ccc;color:#999;padding:6px 14px;border-radius:4px;font-weight:600;cursor:not-allowed;">Upload CSV (Locked)</button>
     </div>
    </form>
   </div>
@@ -1111,29 +1112,20 @@
   {{-- Card 2: Collection Report --}}
   <div style="background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:14px;">
    <div style="font-weight:600;margin-bottom:6px;color:#28c76f;font-size:14px;">2. Fee Collection (Paid Receipts) Report</div>
+   <div style="padding:8px 12px;background:#fff3cd;color:#856404;border-radius:4px;font-size:12px;margin-bottom:10px;font-weight:600;">🔒 Direct-to-ledger import disabled for Phase 1 Recovery Protection. Migration will proceed via verified staging tables in Phase 2.</div>
    <p style="margin:0 0 10px;font-size:12px;color:#6e6b7b;">Records paid cash slips, receipts, and fee allocations by GRN and month matching the Collection Report.</p>
    
-   <form method="post" action="{{ route('challan.import.collection.preloaded') }}" style="margin-bottom:12px;" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Importing Collection... Please wait';">
+   <form method="post" action="{{ route('challan.import.collection.preloaded') }}" style="margin-bottom:12px;">
     @csrf
-    <button type="submit" style="width:100%;padding:9px;background:#28c76f;color:#fff;border:none;border-radius:4px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;">⚡ Run Preloaded Collection Report (2,220+ Slips)</button>
+    <button type="submit" disabled style="width:100%;padding:9px;background:#a3e0be;color:#fff;border:none;border-radius:4px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;cursor:not-allowed;">⚡ Preloaded Collection Report (Locked)</button>
    </form>
 
-   <form method="post" action="{{ route('challan.import.collection') }}" enctype="multipart/form-data" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Uploading & Importing...';">
+   <form method="post" action="{{ route('challan.import.collection') }}" enctype="multipart/form-data">
     @csrf
     <div style="display:flex;gap:8px;">
-     <input type="file" name="csv_file" accept=".csv,text/csv,text/plain" required style="flex:1;padding:6px;border:1px solid #d8d6de;border-radius:4px;background:#fff;font-size:12px;">
-     <button type="submit" style="background:#fff;border:1px solid #28c76f;color:#28c76f;padding:6px 14px;border-radius:4px;font-weight:600;cursor:pointer;">Upload CSV</button>
+     <input type="file" name="csv_file" accept=".csv,text/csv,text/plain" disabled style="flex:1;padding:6px;border:1px solid #d8d6de;border-radius:4px;background:#eee;font-size:12px;cursor:not-allowed;">
+     <button type="submit" disabled style="background:#f0f0f0;border:1px solid #ccc;color:#999;padding:6px 14px;border-radius:4px;font-weight:600;cursor:not-allowed;">Upload CSV (Locked)</button>
     </div>
-   </form>
-  </div>
-
-  {{-- Card 3: Delete / Reset Option --}}
-  <div style="background:#fff5f5;border:1px solid #ffcccc;border-radius:6px;padding:14px;">
-   <div style="font-weight:600;margin-bottom:6px;color:#ea5455;font-size:14px;">3. Reset / Clear Fee Records</div>
-   <p style="margin:0 0 10px;font-size:12px;color:#6e6b7b;">Clear all imported invoices, obligations, and payment receipts from the database to test or re-import freshly.</p>
-   <form method="post" action="{{ route('challan.clear_fee_data') }}" onsubmit="return confirm('Are you sure you want to clear all fee dues and payment records? Students and families will be preserved.');">
-    @csrf
-    <button type="submit" style="width:100%;padding:9px;background:#ea5455;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer;">🗑 Clear Fee Dues & Payment Receipts</button>
    </form>
   </div>
 

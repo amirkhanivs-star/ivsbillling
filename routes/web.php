@@ -32,7 +32,7 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/challan/import-outstanding-preloaded',[B::class,'importOutstandingPreloaded'])->name('challan.import.outstanding.preloaded');
  Route::post('/challan/import-collection',[B::class,'importCollection'])->name('challan.import.collection');
  Route::post('/challan/import-collection-preloaded',[B::class,'importCollectionPreloaded'])->name('challan.import.collection.preloaded');
- Route::post('/challan/clear-fee-data',[B::class,'clearFeeData'])->name('challan.clear_fee_data');
+ Route::post('/challan/clear-fee-data', fn() => abort(403, 'Dangerous ledger deletion route has been disabled for Phase 1 Recovery Protection.'))->name('challan.clear_fee_data');
  Route::get('/receipts/{payment}/pdf',[B::class,'receipt']);
  Route::get('/reports',[B::class,'report']);Route::get('/reports/export',[B::class,'exportReport']);Route::get('/reports/export.xlsx',[B::class,'exportXlsx']);Route::get('/reports/export.pdf',[B::class,'reportPdf']);
 });

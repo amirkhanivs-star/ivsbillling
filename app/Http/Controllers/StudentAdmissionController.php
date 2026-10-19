@@ -369,29 +369,13 @@ class StudentAdmissionController
     public function import(Request $request)
     {
         $this->authorizeWrite($request);
-        $request->validate([
-            'csv_file' => 'required|file|mimes:csv,txt|max:51200',
-        ]);
-
-        $file = $request->file('csv_file');
-        $service = new \App\Services\StudentImportService();
-        $result = $service->importFromFile($file->getRealPath());
-
-        return redirect('/manage-student')->with('notice', "Successfully processed {$result['total']} students ({$result['imported']} new, {$result['updated']} updated across {$result['families_count']} families).");
+        return redirect('/manage-student')->withErrors(['error' => 'Direct student bulk imports are disabled during Phase 1 Recovery Protection until the staging and reconciliation system is implemented in Phase 2.']);
     }
 
     public function importPreloaded(Request $request)
     {
         $this->authorizeWrite($request);
-        $path = storage_path('app/imports/students.csv');
-        if (!file_exists($path)) {
-            return back()->withErrors(['error' => 'Preloaded import file not found. Please upload a CSV.']);
-        }
-
-        $service = new \App\Services\StudentImportService();
-        $result = $service->importFromFile($path);
-
-        return redirect('/manage-student')->with('notice', "Successfully imported preloaded school dataset: {$result['total']} students ({$result['imported']} new, {$result['updated']} updated across {$result['families_count']} families).");
+        return redirect('/manage-student')->withErrors(['error' => 'Direct student bulk imports are disabled during Phase 1 Recovery Protection until the staging and reconciliation system is implemented in Phase 2.']);
     }
 }
 

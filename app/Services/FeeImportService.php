@@ -106,13 +106,8 @@ class FeeImportService
 
     public function importOutstanding(string $filePath): array
     {
-        if (!file_exists($filePath)) {
-            throw new \InvalidArgumentException("Outstanding CSV not found at {$filePath}");
-        }
+        throw new \RuntimeException('Direct-to-ledger outstanding fee imports are disabled during Phase 1 Recovery Protection.');
 
-        $handle = fopen($filePath, 'r');
-        $currentClass = 'General';
-        $currentGr = '';
         $currentStudent = null;
         $studentsCache = DB::table('students')->select('id', 'gr_number', 'family_id')->get()->keyBy('gr_number')->toArray();
         $enrollmentsCache = DB::table('enrollments')->select('id', 'student_id', 'department_id', 'campus_id', 'grade_label')->get()->groupBy('student_id')->toArray();
@@ -352,6 +347,8 @@ class FeeImportService
 
     public function importCollection(string $filePath): array
     {
+        throw new \RuntimeException('Direct-to-ledger historical collection imports are disabled during Phase 1 Recovery Protection.');
+
         if (!file_exists($filePath)) {
             throw new \InvalidArgumentException("Collection CSV not found at {$filePath}");
         }
@@ -521,29 +518,11 @@ class FeeImportService
 
     public function clearFeeData(): void
     {
-        DB::transaction(function () {
-            DB::table('fee_adjustments')->delete();
-            DB::table('fee_installments')->delete();
-            DB::table('payment_allocations')->delete();
-            DB::table('payments')->delete();
-            DB::table('notifications')->delete();
-            DB::table('invoice_items')->delete();
-            DB::table('invoices')->delete();
-            DB::table('billing_runs')->delete();
-        });
+        throw new \RuntimeException('Dangerous operation disabled: raw database ledger truncation is locked for Phase 1 Recovery Protection.');
     }
 
     public function clearAllData(): void
     {
-        $this->clearFeeData();
-        DB::transaction(function () {
-            DB::table('fee_rate_changes')->delete();
-            DB::table('fee_plan_items')->delete();
-            DB::table('fee_catalog_rates')->delete();
-            DB::table('student_registration_details')->delete();
-            DB::table('enrollments')->delete();
-            DB::table('students')->delete();
-            DB::table('families')->delete();
-        });
+        throw new \RuntimeException('Dangerous operation disabled: mass database purge is locked for Phase 1 Recovery Protection.');
     }
 }

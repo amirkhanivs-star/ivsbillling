@@ -37,24 +37,26 @@
   <button type="button" onclick="document.getElementById('import-dialog').close()" style="background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;">&times;</button>
  </div>
  <div style="padding:22px;display:flex;flex-direction:column;gap:18px;font-size:13px;color:#5e5873;">
+  <div style="padding:8px 12px;background:#fff3cd;color:#856404;border-radius:4px;font-size:12px;margin-bottom:10px;font-weight:600;">🔒 Direct student bulk import is disabled for Phase 1 Recovery Protection. Migration will proceed via verified staging tables in Phase 2.</div>
+
   <div style="background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:14px;">
    <div style="font-weight:600;margin-bottom:6px;color:#7367f0;">Option 1: Quick-Import Preloaded School Data</div>
    <p style="margin:0 0 10px;font-size:12px;color:#6e6b7b;">Directly import/sync the 4,330 students, sibling family linkages, enrollments, and monthly fee plans from the uploaded export file.</p>
-   <form method="post" action="{{ route('student.import.preloaded') }}" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Importing... Please wait';">
+   <form method="post" action="{{ route('student.import.preloaded') }}">
     @csrf
-    <button type="submit" class="btn green" style="width:100%;font-weight:600;padding:10px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;">⚡ Run Preloaded Import (4,330 Records)</button>
+    <button type="submit" disabled style="width:100%;font-weight:600;padding:10px;display:flex;align-items:center;justify-content:center;gap:6px;background:#a3e0be;color:#fff;border:none;border-radius:4px;cursor:not-allowed;">⚡ Run Preloaded Import (Locked)</button>
    </form>
   </div>
 
   <div style="background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:14px;">
    <div style="font-weight:600;margin-bottom:6px;color:#7367f0;">Option 2: Upload Custom CSV File</div>
    <p style="margin:0 0 10px;font-size:12px;color:#6e6b7b;">Upload any custom student CSV export. Supported columns include <code>GR No</code>, <code>Family Code</code>, <code>Student Name</code>, <code>Gender</code>, <code>Class</code>, <code>Monthly Fee</code>, <code>Status</code>, <code>Guardian Name</code>, <code>Contact</code>, etc.</p>
-   <form method="post" action="{{ route('student.import') }}" enctype="multipart/form-data" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Uploading & Importing...';">
+   <form method="post" action="{{ route('student.import') }}" enctype="multipart/form-data">
     @csrf
     <div style="margin-bottom:12px;">
-     <input type="file" name="csv_file" accept=".csv,text/csv,text/plain" required style="width:100%;padding:8px;border:1px solid #d8d6de;border-radius:4px;background:#fff;box-sizing:border-box;">
+     <input type="file" name="csv_file" accept=".csv,text/csv,text/plain" disabled style="width:100%;padding:8px;border:1px solid #d8d6de;border-radius:4px;background:#eee;box-sizing:border-box;cursor:not-allowed;">
     </div>
-    <button type="submit" class="btn purple" style="width:100%;font-weight:600;padding:10px;cursor:pointer;">Upload & Import CSV</button>
+    <button type="submit" disabled style="width:100%;font-weight:600;padding:10px;background:#c8c4f0;color:#fff;border:none;border-radius:4px;cursor:not-allowed;">Upload & Import CSV (Locked)</button>
    </form>
   </div>
  </div>
