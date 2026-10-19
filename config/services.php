@@ -1,0 +1,7 @@
+<?php
+return ['n8n'=>[
+ 'url'=>env('N8N_INVOICE_WEBHOOK_URL'),
+ 'secret'=>env('N8N_WEBHOOK_SECRET'),
+ 'callback_secret'=>env('N8N_CALLBACK_SECRET'),
+ 'rate_limit'=>(int)env('IQRA_NOTIFICATION_RATE_LIMIT',30),
+]];

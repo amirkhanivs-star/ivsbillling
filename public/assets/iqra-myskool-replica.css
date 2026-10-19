@@ -1,0 +1,621 @@
+/* Exact MySkool Fee Collection CSS Replica */
+:root {
+  --ms-purple: #7367f0;
+  --ms-purple-hover: #5e50ee;
+  --ms-lavender-bg: #eceafc;
+  --ms-lavender-text: #7367f0;
+  --ms-green: #28c76f;
+  --ms-green-hover: #22a95c;
+  --ms-red: #ea5455;
+  --ms-red-border: #f87171;
+  --ms-bg: #f8f7fa;
+  --ms-card-bg: #ffffff;
+  --ms-border: #ebe9f1;
+  --ms-input-border: #d8d6de;
+  --ms-text: #6e6b7b;
+  --ms-heading: #5e5873;
+}
+
+body {
+  background: var(--ms-bg) !important;
+  color: var(--ms-text) !important;
+  font-family: 'Montserrat', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+/* Centered 2-Column Wrapper */
+.myskool-challan-wrapper {
+  max-width: 1140px;
+  margin: 10px auto 25px auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  gap: 16px;
+  align-items: start;
+}
+
+/* MySkool Card Styles */
+.myskool-card {
+  background: var(--ms-card-bg);
+  border: 1px solid var(--ms-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 20px 0 rgba(34, 41, 47, 0.05);
+  padding: 16px;
+  position: relative;
+}
+
+.myskool-card + .myskool-card {
+  margin-top: 16px;
+}
+
+/* Top Search Form */
+.myskool-search-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.myskool-field {
+  flex: 1;
+  min-width: 110px;
+}
+
+.myskool-field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: #b9b9c3;
+  margin-bottom: 4px;
+}
+
+.myskool-input {
+  width: 100%;
+  height: 33px;
+  border: 1px solid var(--ms-input-border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--ms-text);
+  background: #ffffff;
+  outline: none;
+  transition: border-color .15s ease-in-out;
+}
+
+.myskool-input:focus {
+  border-color: var(--ms-purple);
+}
+
+.myskool-input.disabled,
+.myskool-input[readonly],
+.myskool-input:disabled {
+  background: #efefef !important;
+  color: #5e5873 !important;
+  cursor: default;
+}
+
+/* Toggle Pill Switch */
+.myskool-toggle {
+  position: relative;
+  display: inline-block;
+  width: 38px;
+  height: 20px;
+  margin: 0 4px 7px 4px;
+}
+.myskool-toggle input { opacity: 0; width: 0; height: 0; }
+.myskool-toggle-slider {
+  position: absolute; cursor: pointer; inset: 0;
+  background-color: #d8d6de; border-radius: 20px;
+  transition: .3s;
+}
+.myskool-toggle-slider:before {
+  position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px;
+  background-color: white; border-radius: 50%; transition: .3s;
+}
+.myskool-toggle input:checked + .myskool-toggle-slider {
+  background-color: var(--ms-purple);
+}
+.myskool-toggle input:checked + .myskool-toggle-slider:before {
+  transform: translateX(18px);
+}
+
+/* Buttons */
+.btn-ms-purple {
+  background: var(--ms-purple) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--ms-purple) !important;
+  border-radius: 5px !important;
+  height: 33px;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s ease;
+}
+
+.btn-ms-purple:hover {
+  background: var(--ms-purple-hover) !important;
+  border-color: var(--ms-purple-hover) !important;
+}
+
+.btn-ms-icon {
+  background: #ffffff;
+  border: 1px solid var(--ms-input-border);
+  border-radius: 5px;
+  width: 33px;
+  height: 33px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #6e6b7b;
+  cursor: pointer;
+}
+
+/* Toolbar Buttons */
+.myskool-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.myskool-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.myskool-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.myskool-pill-btn {
+  border: 1px solid var(--ms-purple) !important;
+  background: #ffffff !important;
+  color: var(--ms-purple) !important;
+  border-radius: 4px !important;
+  padding: 3px 10px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  text-decoration: none;
+  height: 27px;
+}
+
+.myskool-pill-btn:hover {
+  background: #f8f7ff !important;
+}
+
+/* Table Entry Picking (MySkool Style with Gray Selection Line) */
+.myskool-table tbody tr.clickable-row {
+  cursor: pointer;
+  user-select: none;
+  transition: background .12s ease;
+}
+
+.myskool-table tbody tr.myskool-row-selected,
+.myskool-table tbody tr.myskool-row-selected td {
+  background: #f2f4f8 !important;
+}
+
+.myskool-table tbody tr.myskool-row-selected {
+  outline: 1px solid #d8d6de;
+  box-shadow: inset 3px 0 0 var(--ms-purple);
+}
+
+.btn-ms-remove-disc {
+  background: #ffffff !important;
+  color: var(--ms-red) !important;
+  border: 1px solid var(--ms-red) !important;
+  border-radius: 5px !important;
+  height: 36px;
+  width: 100%;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+  transition: all .15s ease;
+}
+
+.btn-ms-remove-disc:hover {
+  background: #fff5f5 !important;
+}
+
+/* Table Design */
+.myskool-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: left;
+}
+
+.myskool-table thead th {
+  border-top: 1px solid var(--ms-border);
+  border-bottom: 1px solid var(--ms-border);
+  color: #b9b9c3;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 8px 6px;
+  letter-spacing: .4px;
+  text-transform: uppercase;
+  background: #ffffff;
+}
+
+.myskool-table td {
+  padding: 8px 6px;
+  border-bottom: 1px solid #f3f2f7;
+  color: var(--ms-text);
+  vertical-align: middle;
+}
+
+.myskool-table tbody tr:hover {
+  background: #fafafc;
+}
+
+/* Badges & Chips */
+.ms-pill-lavender {
+  background: var(--ms-lavender-bg);
+  color: var(--ms-lavender-text);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.ms-action-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.btn-ms-disc {
+  background: var(--ms-purple);
+  color: #ffffff;
+  border: 1px solid var(--ms-purple);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  height: 25px;
+  line-height: 1;
+}
+
+.btn-ms-disc:hover {
+  background: var(--ms-purple-hover);
+}
+
+.btn-ms-square-action {
+  width: 25px;
+  height: 25px;
+  background: #ffffff;
+  border: 1px solid var(--ms-purple);
+  color: var(--ms-purple);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-ms-square-action:hover {
+  background: #f8f7ff;
+}
+
+.btn-ms-square-action.danger {
+  border-color: #ea5455;
+  color: #ea5455;
+}
+
+.btn-ms-square-action.danger:hover {
+  background: #fff5f5;
+}
+
+/* Fee History Section */
+.myskool-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 10px;
+}
+
+.myskool-history-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ms-heading);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.myskool-history-chevron {
+  font-size: 15px;
+  color: #b9b9c3;
+  transition: transform .2s ease;
+}
+
+/* Right Side Panel */
+.myskool-profile-card {
+  text-align: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f3f2f7;
+  margin-bottom: 14px;
+  position: relative;
+}
+
+.myskool-card-gear {
+  position: absolute;
+  top: 0;
+  right: 0;
+  color: #b9b9c3;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.myskool-avatar {
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: #f0f2f5;
+  color: #b9b9c3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 8px auto;
+  font-size: 26px;
+}
+
+.myskool-student-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ms-heading);
+  margin-bottom: 2px;
+}
+
+.myskool-father-name {
+  font-size: 11px;
+  color: #b9b9c3;
+  margin-bottom: 4px;
+}
+
+.myskool-class-name {
+  font-size: 12px;
+  color: #6e6b7b;
+  margin-bottom: 4px;
+}
+
+.myskool-badge-row {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.myskool-status-badge {
+  background: var(--ms-lavender-bg);
+  color: var(--ms-lavender-text);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.myskool-campus-badge {
+  background: #f8f8f8;
+  color: #b9b9c3;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.myskool-profile-actions {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+}
+
+.myskool-profile-btn {
+  border: 1px solid var(--ms-purple);
+  background: #ffffff;
+  color: var(--ms-purple);
+  border-radius: 4px;
+  height: 25px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+/* Receiving Form Fields */
+.myskool-receive-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.myskool-form-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.myskool-form-group label {
+  font-size: 11px;
+  color: #6e6b7b;
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.myskool-btn-receive {
+  background: var(--ms-purple) !important;
+  color: #ffffff !important;
+  border: none !important;
+  border-radius: 5px !important;
+  height: 38px;
+  font-size: 13px;
+  font-weight: 600;
+  width: 100%;
+  cursor: pointer;
+  margin-top: 6px;
+  transition: background .15s ease;
+}
+
+.myskool-btn-receive:hover {
+  background: var(--ms-purple-hover) !important;
+}
+
+/* MySkool Discount Drawer (Matching Image 2) */
+.myskool-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+  z-index: 1050;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.myskool-drawer-overlay[hidden] {
+  display: none !important;
+}
+
+.myskool-drawer {
+  width: 350px;
+  max-width: 100%;
+  height: 100%;
+  background: #ffffff;
+  box-shadow: -5px 0 25px rgba(0, 0, 0, 0.15);
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  animation: slideDrawer .2s ease;
+}
+
+@keyframes slideDrawer {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.myskool-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+.myskool-drawer-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ms-heading);
+}
+
+.myskool-drawer-close {
+  background: none;
+  border: none;
+  font-size: 16px;
+  color: #b9b9c3;
+  cursor: pointer;
+}
+
+.myskool-drawer-field {
+  margin-bottom: 14px;
+}
+
+.myskool-drawer-field label {
+  font-size: 11px;
+  color: #6e6b7b;
+  margin-bottom: 4px;
+  display: block;
+}
+
+.btn-ms-save {
+  background: var(--ms-green) !important;
+  color: #ffffff !important;
+  border: none !important;
+  border-radius: 5px !important;
+  height: 38px;
+  width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 10px;
+  transition: background .15s ease;
+}
+
+.btn-ms-save:hover {
+  background: var(--ms-green-hover) !important;
+}
+
+/* Compact Target Month Chips */
+.ms-month-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.ms-month-chip {
+  background: #ffffff;
+  border: 1px solid var(--ms-purple);
+  color: var(--ms-purple);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.ms-month-chip.active {
+  background: var(--ms-purple);
+  color: #ffffff;
+}
+
+/* Toast */
+.ms-toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 2000;
+  padding: 10px 16px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+  background: #333333;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.2);
+}
+.ms-toast.success { background: var(--ms-green); }
+.ms-toast.error { background: var(--ms-red); }
+
+@media (max-width: 991px) {
+  .myskool-challan-wrapper {
+    grid-template-columns: 1fr;
+    padding: 0 10px;
+  }
+}
+
+/* Create Fee Panel & Chips */
+.create-fee-panel{background:#fff;border:1px solid var(--ms-border);border-radius:6px;padding:16px 18px;margin-bottom:16px;animation:fadeIn 0.2s ease}.ms-chips-container{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.ms-chip{background:#fff;border:1px solid var(--ms-input-border);color:#5e5873;border-radius:4px;padding:5px 14px;font-size:11px;cursor:pointer;transition:all 0.15s ease;font-family:inherit;line-height:1.4;user-select:none}.ms-chip:hover{border-color:var(--ms-purple);color:var(--ms-purple)}.ms-chip.active{border-color:var(--ms-purple);color:var(--ms-purple);background:var(--ms-lavender-bg);font-weight:600}

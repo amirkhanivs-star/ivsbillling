@@ -1,0 +1,64 @@
+# Dependencies & Package Managers
+/vendor/
+/node_modules/
+
+# Environment & Credentials
+.env
+.env.*
+!.env.example
+*.key
+/storage/*.key
+
+# PHPUnit & Testing Caches
+.phpunit.result.cache
+
+# Framework Storage, Caches & Logs
+/storage/logs/*
+!/storage/logs/.gitignore
+/storage/framework/cache/*
+!/storage/framework/cache/.gitignore
+/storage/framework/sessions/*
+!/storage/framework/sessions/.gitignore
+/storage/framework/views/*
+!/storage/framework/views/.gitignore
+/storage/framework/testing/*
+!/storage/framework/testing/.gitignore
+/storage/app/private/*
+/storage/app/public/*
+/storage/*.html
+/public/storage
+/public/preview_*.html
+/public/screenshot_test.png
+*.log
+
+# Sensitive Data: Student Info, Financial Dues, Payments & Exports
+*.csv
+*.xlsx
+*.xls
+/docs/*.csv
+/storage/app/imports/*
+!/storage/app/imports/.gitignore
+
+# Private Staging Exports, Scratch Scripts & Diagnostic Archives
+/scratch/
+scratch_check.txt
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+IQRA_STAGING_ONLY*
+
+# Database Dumps, Backups & Local SQLite Files
+*.sql
+*.dump
+/backups/
+*.sqlite
+*.sqlite3
+
+# IDE & OS Artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

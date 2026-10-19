@@ -1,0 +1,38 @@
+<?php
+use App\Http\Controllers\AuthController;
+use App\Http\Controllers\BillingController as B;
+use App\Http\Controllers\StudentAdmissionController as Admission;
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\FeeCatalogController as FC;
+Route::get('/',fn()=>redirect('/dashboard'));
+Route::get('/login',[AuthController::class,'form'])->name('login')->middleware('guest');
+Route::post('/login',[AuthController::class,'login'])->middleware('guest')->middleware('throttle:10,1');
+Route::post('/logout',[AuthController::class,'logout'])->middleware('auth');
+Route::post('/webhook/n8n/callback',[B::class,'callback'])->name('n8n.callback')->middleware('throttle:120,1');
+Route::get('/public/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invoices.signed_pdf')->middleware('signed');
+Route::middleware(['auth','accounts'])->group(function(){
+ Route::get('/dashboard',[B::class,'dashboard']);Route::get('/settings/branding',[B::class,'branding']);Route::post('/settings/branding',[B::class,'saveBranding']);
+ Route::get('/manage-branches',[B::class,'campuses']);Route::post('/manage-branches',[B::class,'addCampus']);
+ Route::get('/manage-classes',[B::class,'classes']);Route::post('/manage-classes',[B::class,'addClass']);
+ Route::get('/manage-student',[B::class,'students']);Route::post('/manage-student/import',[Admission::class,'import'])->name('student.import');Route::post('/manage-student/import-preloaded',[Admission::class,'importPreloaded'])->name('student.import.preloaded');Route::get('/manage-student/admission/new',[Admission::class,'create'])->name('student.admission.create');Route::post('/manage-student/admission/new',[Admission::class,'store'])->name('student.admission.store');Route::get('/manage-student/admission/check-number',[Admission::class,'checkRegistrationNumber'])->name('student.admission.check-number')->middleware('throttle:30,1');Route::get('/manage-student/{student}',[B::class,'showStudent']);Route::get('/manage-student/{student}/edit',[Admission::class,'edit'])->name('student.admission.edit');Route::put('/manage-student/{student}',[Admission::class,'update'])->name('student.admission.update');Route::post('/manage-student/{student}/status',[B::class,'studentStatus'])->name('student.status');Route::delete('/manage-student/{student}',[B::class,'deleteStudent'])->name('student.delete');Route::post('/manage-student/{student}/enrollments',[B::class,'addEnrollment']);Route::post('/families/{family}/contact',[B::class,'updateFamilyContact']);
+ Route::get('/manage-fee',[FC::class,'index']);Route::post('/manage-fee',[B::class,'addFeePlan']);
+ Route::post('/manage-fee/catalog',[FC::class,'store']);Route::put('/manage-fee/catalog/{rate}',[FC::class,'update']);Route::delete('/manage-fee/catalog/{rate}',[FC::class,'destroy'])->name('fee.catalog.destroy');Route::delete('/manage-fee/types/{type}',[FC::class,'destroyType'])->name('fee.types.destroy');Route::post('/manage-fee/increment',[FC::class,'increment']);
+ Route::get('/fee-creator',[B::class,'creator']);Route::post('/fee-creator',[B::class,'generate']);
+ Route::get('/invoices',[B::class,'invoices']);Route::post('/invoices/send',[B::class,'approveSend']);
+ Route::get('/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invoices.pdf');
+ Route::get('/challan',[B::class,'collection'])->name('challan.index');
+ Route::post('/challan/create-fee',[B::class,'createChallanFee'])->name('challan.create_fee');
+ Route::post('/challan/receive',[B::class,'receive'])->name('challan.receive');
+ Route::post('/challan/discount',[B::class,'discount'])->name('challan.discount');
+ Route::post('/challan/exempt',[B::class,'exempt'])->name('challan.exempt');
+ Route::post('/challan/installment',[B::class,'installment'])->name('challan.installment');
+ Route::post('/challan/void',[B::class,'voidFee'])->name('challan.void');
+ Route::post('/challan/reverse-receipt',[B::class,'reverseReceipt'])->name('challan.reverse_receipt');
+ Route::post('/challan/import-outstanding',[B::class,'importOutstanding'])->name('challan.import.outstanding');
+ Route::post('/challan/import-outstanding-preloaded',[B::class,'importOutstandingPreloaded'])->name('challan.import.outstanding.preloaded');
+ Route::post('/challan/import-collection',[B::class,'importCollection'])->name('challan.import.collection');
+ Route::post('/challan/import-collection-preloaded',[B::class,'importCollectionPreloaded'])->name('challan.import.collection.preloaded');
+ Route::post('/challan/clear-fee-data',[B::class,'clearFeeData'])->name('challan.clear_fee_data');
+ Route::get('/receipts/{payment}/pdf',[B::class,'receipt']);
+ Route::get('/reports',[B::class,'report']);Route::get('/reports/export',[B::class,'exportReport']);Route::get('/reports/export.xlsx',[B::class,'exportXlsx']);Route::get('/reports/export.pdf',[B::class,'reportPdf']);
+});
