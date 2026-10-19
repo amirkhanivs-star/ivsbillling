@@ -3,6 +3,8 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Services\FeeImportService;
+use App\Services\InvoiceService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -27,7 +29,7 @@ class FeeImportTest extends TestCase
         return User::find($id);
     }
 
-    public function test_fee_collection_shows_import_button_and_dialog(): void
+    public function test_fee_collection_shows_import_button_and_dialog_with_safety_locks(): void
     {
         $admin = $this->setupAdmin();
 
@@ -37,14 +39,21 @@ class FeeImportTest extends TestCase
         $res->assertSee('fee-import-dialog');
         $res->assertSee('Outstanding Fees Report');
         $res->assertSee('Fee Collection (Paid Receipts) Report');
-        $res->assertSee('Clear Fee Dues', false);
+        // Verify safety lock notice is visible
+        $res->assertSee('Direct-to-ledger import disabled for Phase 1 Recovery Protection');
+        // Verify dangerous clear button and reset actions are completely removed
+        $res->assertDontSee('Clear Fee Dues');
+        $res->assertDontSee('Reset / Clear Fee Records');
     }
 
-    public function test_outstanding_and_collection_imports_and_clear(): void
+    public function test_dangerous_deletion_actions_are_rejected_and_ledger_preserved(): void
     {
         $admin = $this->setupAdmin();
+        $deptId = DB::table('departments')->first()->id;
+        $campusId = DB::table('campuses')->first()->id;
+        $feeTypeId = DB::table('fee_types')->where('code', 'monthly')->value('id');
 
-        // Create student and family
+        // Seed sample financial ledger records
         $familyId = DB::table('families')->insertGetId([
             'family_code' => 'FAM-TEST-99',
             'guardian_name' => 'Test Guardian',
@@ -61,10 +70,7 @@ class FeeImportTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        $deptId = DB::table('departments')->first()->id;
-        $campusId = DB::table('campuses')->first()->id;
-
-        DB::table('enrollments')->insert([
+        $enrollId = DB::table('enrollments')->insertGetId([
             'student_id' => $studentId,
             'campus_id' => $campusId,
             'department_id' => $deptId,
@@ -76,165 +82,185 @@ class FeeImportTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        // 1. Upload Outstanding CSV
-        $outstandingCsv = <<<CSV
-IQRA VIRTUAL SCHOOL,Agha Meer Jani Road Wazir Bagh Peshawar,Outstanding Report,,,,
-,,,,,,
-,GRN,Student Name,Contact #,Particular,Balance,
-,FS-1 - A,,,,,
-,5525,Muhammad Abdullah,4213123412312,Monthly Fee - Jul-2025,200,
-,,,,Monthly Fee - Nov-2025,200,
-CSV;
-
-        $fileOut = UploadedFile::fake()->createWithContent('outstanding.csv', $outstandingCsv);
-        $res = $this->actingAs($admin)->post('/challan/import-outstanding', [
-            'csv_file' => $fileOut,
-        ]);
-        $res->assertRedirect('/challan');
-        $res->assertSessionHas('notice');
-
-        // Check invoice items created
-        $this->assertDatabaseHas('invoice_items', [
-            'student_id' => $studentId,
+        DB::table('fee_plan_items')->insert([
+            'enrollment_id' => $enrollId,
+            'fee_type_id' => $feeTypeId,
             'description' => 'Monthly Fee',
+            'frequency' => 'monthly',
+            'currency' => 'SAR',
             'amount_minor' => 20000,
-            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
 
-        // 2. Upload Collection CSV
-        $collectionCsv = <<<CSV
-Cash,Slip #,GRN,Student Name,Particular,Date,Amount
-,24064,5525,Muhammad Abdullah,Monthly Fee - Jul-2025, 3 - Aug,200
-CSV;
-
-        $fileCol = UploadedFile::fake()->createWithContent('collection.csv', $collectionCsv);
-        $res2 = $this->actingAs($admin)->post('/challan/import-collection', [
-            'csv_file' => $fileCol,
+        $runId = DB::table('billing_runs')->insertGetId([
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'frequency' => 'monthly',
+            'period_key' => 'monthly:2026-10-01..2026-10-31',
+            'period_start' => '2026-10-01',
+            'period_end' => '2026-10-31',
+            'due_date' => '2026-10-25',
+            'created_by' => $admin->id,
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
-        $res2->assertRedirect('/challan');
-        $res2->assertSessionHas('notice');
 
-        // Check payment recorded and item paid
-        $this->assertDatabaseHas('payments', [
-            'receipt_number' => 'REC-24064',
+        app(InvoiceService::class)->generate($runId);
+
+        DB::table('payments')->insert([
+            'family_id' => $familyId,
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'currency' => 'SAR',
             'amount_minor' => 20000,
-        ]);
-        $this->assertDatabaseHas('invoice_items', [
-            'student_id' => $studentId,
-            'period_start' => '2025-07-01',
-            'status' => 'paid',
+            'unallocated_minor' => 0,
+            'received_on' => '2026-10-19',
+            'receipt_number' => 'REC-TEST-001',
+            'idempotency_key' => 'idemp-001',
+            'request_hash' => 'hash-001',
+            'received_by' => $admin->id,
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
 
-        // 3. Test Clear Fee Data
-        $res3 = $this->actingAs($admin)->post('/challan/clear-fee-data');
-        $res3->assertRedirect('/challan');
+        // 1. Web route POST /challan/clear-fee-data MUST return 403 Forbidden
+        $res = $this->actingAs($admin)->post('/challan/clear-fee-data');
+        $res->assertStatus(403);
 
-        $this->assertDatabaseCount('invoices', 0);
-        $this->assertDatabaseCount('invoice_items', 0);
-        $this->assertDatabaseCount('payments', 0);
-        $this->assertDatabaseCount('payment_allocations', 0);
-        // Student and family are still preserved
+        // 2. Direct service calls to clearFeeData and clearAllData MUST throw RuntimeException
+        $svc = new FeeImportService();
+        $this->assertThrows(fn() => $svc->clearFeeData(), \RuntimeException::class);
+        $this->assertThrows(fn() => $svc->clearAllData(), \RuntimeException::class);
+
+        // 3. Verify ledger records remain completely intact and untouched
+        $this->assertDatabaseCount('invoices', 1);
+        $this->assertDatabaseCount('invoice_items', 1);
+        $this->assertDatabaseCount('payments', 1);
         $this->assertDatabaseCount('students', 1);
         $this->assertDatabaseCount('families', 1);
     }
 
-    public function test_import_outstanding_handles_summation_rows_and_currency_columns(): void
+    public function test_direct_historical_imports_are_rejected(): void
     {
         $admin = $this->setupAdmin();
 
+        $fileOut = UploadedFile::fake()->createWithContent('outstanding.csv', "GRN,Student Name,Particular,Balance\n5525,Abdullah,Monthly Fee,200\n");
+        $fileCol = UploadedFile::fake()->createWithContent('collection.csv', "Slip #,GRN,Student Name,Particular,Date,Amount\n24064,5525,Abdullah,Monthly Fee,03-Aug,200\n");
+
+        // 1. Direct outstanding upload rejected
+        $resOut = $this->actingAs($admin)->post('/challan/import-outstanding', ['csv_file' => $fileOut]);
+        $resOut->assertRedirect('/challan');
+        $resOut->assertSessionHasErrors(['error']);
+
+        // 2. Preloaded outstanding rejected
+        $resOutPre = $this->actingAs($admin)->post('/challan/import-outstanding-preloaded');
+        $resOutPre->assertRedirect('/challan');
+        $resOutPre->assertSessionHasErrors(['error']);
+
+        // 3. Direct collection upload rejected
+        $resCol = $this->actingAs($admin)->post('/challan/import-collection', ['csv_file' => $fileCol]);
+        $resCol->assertRedirect('/challan');
+        $resCol->assertSessionHasErrors(['error']);
+
+        // 4. Preloaded collection rejected
+        $resColPre = $this->actingAs($admin)->post('/challan/import-collection-preloaded');
+        $resColPre->assertRedirect('/challan');
+        $resColPre->assertSessionHasErrors(['error']);
+
+        // 5. Direct service method execution throws RuntimeException
+        $svc = new FeeImportService();
+        $this->assertThrows(fn() => $svc->importOutstanding('dummy.csv'), \RuntimeException::class);
+        $this->assertThrows(fn() => $svc->importCollection('dummy.csv'), \RuntimeException::class);
+
+        // 6. Verify zero phantom financial records created
+        $this->assertDatabaseCount('invoices', 0);
+        $this->assertDatabaseCount('invoice_items', 0);
+        $this->assertDatabaseCount('payments', 0);
+    }
+
+    public function test_normal_cashier_fee_collection_remains_functional(): void
+    {
+        $admin = $this->setupAdmin();
+        $deptId = DB::table('departments')->first()->id;
+        $campusId = DB::table('campuses')->first()->id;
+        $feeTypeId = DB::table('fee_types')->where('code', 'monthly')->value('id');
+
         $familyId = DB::table('families')->insertGetId([
-            'family_code' => 'FAM-888',
-            'guardian_name' => 'Guardian 888',
+            'family_code' => 'FAM-REGULAR-1',
+            'guardian_name' => 'Regular Guardian',
             'created_at' => now(),
             'updated_at' => now(),
         ]);
 
         $studentId = DB::table('students')->insertGetId([
-            'gr_number' => '9834',
-            'name' => 'Saleh Ahmed',
+            'gr_number' => '7701',
+            'name' => 'Zayd Khan',
             'family_id' => $familyId,
             'status' => 'present',
             'created_at' => now(),
             'updated_at' => now(),
         ]);
 
-        $deptId = DB::table('departments')->first()->id;
-        $campusId = DB::table('campuses')->first()->id;
-
-        DB::table('enrollments')->insert([
+        $enrollId = DB::table('enrollments')->insertGetId([
             'student_id' => $studentId,
             'campus_id' => $campusId,
             'department_id' => $deptId,
-            'grade_label' => 'FS-1 - A',
+            'grade_label' => 'Grade 1',
             'currency' => 'SAR',
-            'monthly_fee_minor' => 22000,
+            'monthly_fee_minor' => 30000,
             'status' => 'active',
             'created_at' => now(),
             'updated_at' => now(),
         ]);
 
-        // CSV with class header, student lines with blank GRN, summation line, and Currency column
-        $duesCsv = <<<CSV
-IQRA VIRTUAL SCHOOL,Agha Meer Jani Road Wazir Bagh Peshawar,Outstanding Report,,,,,
-,,,,,,,
-FS-1 - A,GRN,Student Name,Contact #,Particular,Currency,Balance,
-,,,,,,,
-,9834,Saleh Ahmed,,Monthly Fee - Sep-2026,SAR,220,
-,,,,Monthly Fee - Oct-2026,SAR,220,
-,440,,,,,,
-CSV;
-
-        $fileOut = UploadedFile::fake()->createWithContent('dues_with_summation.csv', $duesCsv);
-        $res = $this->actingAs($admin)->post('/challan/import-outstanding', [
-            'csv_file' => $fileOut,
-        ]);
-        $res->assertRedirect('/challan');
-        $res->assertSessionHas('notice');
-
-        // Verify only 2 invoice items were created, NO phantom item or student for "440"
-        $this->assertDatabaseCount('invoice_items', 2);
-        $this->assertDatabaseHas('invoice_items', [
-            'student_id' => $studentId,
-            'period_start' => '2026-09-01',
-            'amount_minor' => 22000,
+        DB::table('fee_plan_items')->insert([
+            'enrollment_id' => $enrollId,
+            'fee_type_id' => $feeTypeId,
+            'description' => 'Monthly Fee',
+            'frequency' => 'monthly',
             'currency' => 'SAR',
+            'amount_minor' => 30000,
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
-        $this->assertDatabaseHas('invoice_items', [
-            'student_id' => $studentId,
+
+        $runId = DB::table('billing_runs')->insertGetId([
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'frequency' => 'monthly',
+            'period_key' => 'monthly:2026-10-01..2026-10-31',
             'period_start' => '2026-10-01',
-            'amount_minor' => 22000,
+            'period_end' => '2026-10-31',
+            'due_date' => '2026-10-25',
+            'created_by' => $admin->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        app(InvoiceService::class)->generate($runId);
+
+        // Cashier collects fee payment normally
+        $res = $this->actingAs($admin)->post('/challan/receive', [
+            'family_id' => $familyId,
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'currency' => 'SAR',
+            'receiving_amount' => '300.00',
+            'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
+        ]);
+
+        $res->assertRedirect();
+        $this->assertDatabaseHas('payments', [
+            'family_id' => $familyId,
+            'amount_minor' => 30000,
             'currency' => 'SAR',
         ]);
-        $this->assertDatabaseMissing('students', [
-            'gr_number' => '440',
-        ]);
 
-        // Now test 8-column Paid Details with Currency column and date like "1-Mar-25"
-        $paidCsv = <<<CSV
-IQRA VIRTUAL SCHOOL,Agha Meer Jani Road Wazir Bagh Peshawar,Collection Report (01/Mar/2025 - 17/Oct/2026),,,,,,
-,,,,,,,,
-Cash,Slip #,GRN,Student Name,Particular,Date,Currency,Amount,
-,,,,,,,,
-,8888,9834,Saleh Ahmed,Monthly Fee - Sep-2026, 1-Mar-25,SAR,220,
-CSV;
-
-        $filePaid = UploadedFile::fake()->createWithContent('paid_with_currency.csv', $paidCsv);
-        $resPaid = $this->actingAs($admin)->post('/challan/import-collection', [
-            'csv_file' => $filePaid,
-        ]);
-        $resPaid->assertRedirect('/challan');
-
-        // Check paid item settled
+        // Invoice item marked paid
         $this->assertDatabaseHas('invoice_items', [
             'student_id' => $studentId,
-            'period_start' => '2026-09-01',
-            'status' => 'paid',
-        ]);
-        $this->assertDatabaseHas('payments', [
-            'receipt_number' => 'REC-8888',
-            'received_on' => '2025-03-01',
-            'currency' => 'SAR',
-            'amount_minor' => 22000,
+            'paid_minor' => 30000,
         ]);
     }
 }
