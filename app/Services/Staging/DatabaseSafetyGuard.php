@@ -9,6 +9,7 @@ class DatabaseSafetyGuard
 {
     public const REQUIRED_STAGING_DATABASE = 'iqra_billing_clean';
     public const FORBIDDEN_QUARANTINE_DATABASE = 'iqra_billing';
+    public const ALLOWED_QA_DATABASE = 'iqra_billing_qa';
 
     /**
      * Assert that the connection is strictly isolated and connected to iqra_billing_clean.
@@ -52,6 +53,51 @@ class DatabaseSafetyGuard
     }
 
     /**
+     * Assert that the connection is strictly isolated and connected to iqra_billing_qa.
+     *
+     * @param string|null $connection
+     * @throws DatabaseSafetyException
+     */
+    public static function assertQaDatabase(?string $connection = 'qa'): void
+    {
+        $conn = DB::connection($connection);
+        $driver = $conn->getDriverName();
+
+        if ($driver === 'sqlite') {
+            return;
+        }
+
+        try {
+            $row = $conn->selectOne('SELECT DATABASE() as current_db');
+            $activeDb = $row?->current_db ?? $conn->getDatabaseName();
+        } catch (\Throwable $e) {
+            throw new DatabaseSafetyException(
+                "DATABASE IDENTITY CHECK FAILED: Unable to query physical database on connection '{$connection}': " . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+
+        if (strtolower((string) $activeDb) === strtolower(self::FORBIDDEN_QUARANTINE_DATABASE)) {
+            throw new DatabaseSafetyException(
+                "CRITICAL DATABASE ISOLATION BREACH: Connection '{$connection}' is connected to the quarantined database '" . self::FORBIDDEN_QUARANTINE_DATABASE . "'. QA operations are STRICTLY FORBIDDEN on this database."
+            );
+        }
+
+        if (strtolower((string) $activeDb) === strtolower(self::REQUIRED_STAGING_DATABASE)) {
+            throw new DatabaseSafetyException(
+                "DATABASE IDENTITY CHECK FAILED: Target is staging database '" . self::REQUIRED_STAGING_DATABASE . "', but operation strictly requires QA database '" . self::ALLOWED_QA_DATABASE . "'."
+            );
+        }
+
+        if (strtolower((string) $activeDb) !== strtolower(self::ALLOWED_QA_DATABASE)) {
+            throw new DatabaseSafetyException(
+                "DATABASE IDENTITY CHECK FAILED: Expected QA database '" . self::ALLOWED_QA_DATABASE . "', but connected to '{$activeDb}'. Execution aborted."
+            );
+        }
+    }
+
+    /**
      * Guard staging migrations from executing against iqra_billing.
      *
      * @param string|null $connection
@@ -87,6 +133,78 @@ class DatabaseSafetyGuard
             throw new DatabaseSafetyException(
                 "MIGRATION SAFETY CHECK FAILED: Staging migrations must run against '" . self::REQUIRED_STAGING_DATABASE . "', but target is '{$activeDb}'."
             );
+        }
+    }
+
+    /**
+     * Ensure that the connection is NOT targeting the quarantined database.
+     *
+     * @param string|null $connection
+     * @throws DatabaseSafetyException
+     */
+    public static function assertNotQuarantineDatabase(?string $connection = null): void
+    {
+        $conn = DB::connection($connection);
+        if ($conn->getDriverName() === 'sqlite') {
+            return;
+        }
+
+        try {
+            $row = $conn->selectOne('SELECT DATABASE() as current_db');
+            $activeDb = $row?->current_db ?? $conn->getDatabaseName();
+        } catch (\Throwable $e) {
+            return;
+        }
+
+        if (strtolower((string) $activeDb) === strtolower(self::FORBIDDEN_QUARANTINE_DATABASE)) {
+            throw new DatabaseSafetyException(
+                "CRITICAL DATABASE ISOLATION BREACH: Application or testing attempted to access quarantined database '" . self::FORBIDDEN_QUARANTINE_DATABASE . "'. This database is strictly protected and quarantined."
+            );
+        }
+    }
+
+    /**
+     * Ensure that the connection is NOT targeting the staging database.
+     *
+     * @param string|null $connection
+     * @throws DatabaseSafetyException
+     */
+    public static function assertNotStagingDatabase(?string $connection = null): void
+    {
+        $conn = DB::connection($connection);
+        if ($conn->getDriverName() === 'sqlite') {
+            return;
+        }
+
+        try {
+            $row = $conn->selectOne('SELECT DATABASE() as current_db');
+            $activeDb = $row?->current_db ?? $conn->getDatabaseName();
+        } catch (\Throwable $e) {
+            return;
+        }
+
+        if (strtolower((string) $activeDb) === strtolower(self::REQUIRED_STAGING_DATABASE)) {
+            throw new DatabaseSafetyException(
+                "DATABASE SAFETY BREACH: Attempted to run a QA-specific operation against staging database '" . self::REQUIRED_STAGING_DATABASE . "'."
+            );
+        }
+    }
+
+    /**
+     * Helper to test if connection is QA database.
+     */
+    public static function isQaDatabase(?string $connection = null): bool
+    {
+        $conn = DB::connection($connection);
+        if ($conn->getDriverName() === 'sqlite') {
+            return false;
+        }
+        try {
+            $row = $conn->selectOne('SELECT DATABASE() as current_db');
+            $activeDb = $row?->current_db ?? $conn->getDatabaseName();
+            return strtolower((string) $activeDb) === strtolower(self::ALLOWED_QA_DATABASE);
+        } catch (\Throwable $e) {
+            return false;
         }
     }
 

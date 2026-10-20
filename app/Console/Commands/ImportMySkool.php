@@ -10,6 +10,9 @@ class ImportMySkool extends Command {
  protected $signature='iqra:import-myskool {file : Path to exported XLSX} {--campus=main} {--department=} {--currency= : REQUIRED, e.g. PKR/SAR/AED} {--commit : Without this, dry-run only}';
  protected $description='Import student/family numbers and monthly fee plans from Total data of Myskool sheet';
  public function handle():int {
+  $this->error('UNSAFE DIRECT IMPORT BLOCKED: Direct MySkool Excel imports bypass campus, department, currency, and identity verification.');
+  $this->line('Use the approved staging migration pipeline (php artisan qa:import-approved-students) which imports verified staging data.');
+  return self::FAILURE;
   $path=$this->argument('file');if(!is_file($path)){$this->error('File not found.');return self::FAILURE;}
   $currency=strtoupper(trim((string)$this->option('currency')));if(!preg_match('/^[A-Z]{3}$/',$currency)){$this->error('Specify --currency=PKR, --currency=SAR etc. Student export does not contain currency.');return self::FAILURE;}
   if(!$this->option('department')){$this->error('Specify --department=school|quran|tuition. The workbook has no department column.');return self::FAILURE;}

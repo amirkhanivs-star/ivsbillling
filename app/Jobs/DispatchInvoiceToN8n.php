@@ -16,6 +16,10 @@ class DispatchInvoiceToN8n implements ShouldQueue {
  public function handle():void {
   $notification=DB::table('notifications')->where('id',$this->notificationId)->first();
   if(!$notification||in_array($notification->status,['submitted','delivered','read'],true))return;
+  if(config('services.notifications_disabled',false)||\App\Services\Staging\DatabaseSafetyGuard::isQaDatabase()){
+   DB::table('notifications')->where('id',$notification->id)->update(['status'=>'qa_suppressed','error'=>'QA Portal: real notifications and external webhooks are disabled.','updated_at'=>now()]);
+   return;
+  }
   $invoice=DB::table('invoices')->where('id',$notification->invoice_id)->first();
   $family=$invoice?DB::table('families')->where('id',$invoice->family_id)->first():null;
   if(!$invoice||!$family)throw new RuntimeException('Missing invoice or family.');

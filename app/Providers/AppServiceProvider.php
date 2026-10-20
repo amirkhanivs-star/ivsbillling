@@ -7,5 +7,10 @@ class AppServiceProvider extends ServiceProvider {
     public function register(): void {}
     public function boot(): void {
         Paginator::defaultView('vendor.pagination.myskool');
+
+        // Critical safety: ensure normal application runtime never targets the quarantined database
+        if (config('database.default') === 'mysql' && !app()->runningUnitTests()) {
+            \App\Services\Staging\DatabaseSafetyGuard::assertNotQuarantineDatabase('mysql');
+        }
     }
 }

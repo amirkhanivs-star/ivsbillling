@@ -12,6 +12,11 @@ return new class extends Migration
      */
     public function up(): void
     {
+        // Staging tables belong strictly to iqra_billing_clean; skip on QA portal
+        if (DatabaseSafetyGuard::isQaDatabase($this->getConnection())) {
+            return;
+        }
+
         // Enforce database identity guard
         DatabaseSafetyGuard::assertAllowedMigration($this->getConnection());
 
@@ -194,6 +199,10 @@ return new class extends Migration
      */
     public function down(): void
     {
+        if (DatabaseSafetyGuard::isQaDatabase($this->getConnection())) {
+            return;
+        }
+
         DatabaseSafetyGuard::assertAllowedMigration($this->getConnection());
 
         Schema::dropIfExists('staging_approval_logs');

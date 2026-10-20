@@ -12,6 +12,11 @@ return new class extends Migration
      */
     public function up(): void
     {
+        // Staging mapping tables belong strictly to iqra_billing_clean; skip on QA portal
+        if (DatabaseSafetyGuard::isQaDatabase($this->getConnection())) {
+            return;
+        }
+
         DatabaseSafetyGuard::assertAllowedMigration($this->getConnection());
 
         // 1. staging_student_identities
@@ -110,6 +115,10 @@ return new class extends Migration
      */
     public function down(): void
     {
+        if (DatabaseSafetyGuard::isQaDatabase($this->getConnection())) {
+            return;
+        }
+
         DatabaseSafetyGuard::assertAllowedMigration($this->getConnection());
 
         Schema::dropIfExists('staging_gr_reconciliations');
