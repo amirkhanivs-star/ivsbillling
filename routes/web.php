@@ -34,6 +34,7 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/challan/import-collection-preloaded',[B::class,'importCollectionPreloaded'])->name('challan.import.collection.preloaded');
  Route::post('/challan/clear-fee-data', fn() => abort(403, 'Dangerous ledger deletion route has been disabled for Phase 1 Recovery Protection.'))->name('challan.clear_fee_data');
  Route::get('/receipts/{payment}/pdf',[B::class,'receipt']);
+ Route::get('/receipts/historical/{id}/pdf',[B::class,'historicalReceiptPdf'])->name('receipts.historical_pdf');
  Route::get('/reports',[B::class,'report']);Route::get('/reports/export',[B::class,'exportReport']);Route::get('/reports/export.xlsx',[B::class,'exportXlsx']);Route::get('/reports/export.pdf',[B::class,'reportPdf']);
  Route::get('/migration', [\App\Http\Controllers\MigrationReviewController::class, 'index'])->name('migration.index');
  Route::get('/migration/campus', [\App\Http\Controllers\MigrationReviewController::class, 'campusIndex'])->name('migration.campus');

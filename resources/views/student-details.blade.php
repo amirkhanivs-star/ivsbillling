@@ -70,101 +70,109 @@
       </div>
     </div>
    </section>
-   <div class="iq-history-title"><strong>◷ &nbsp; Payment History (New Portal Receipts)</strong><span class="iq-pill" style="background:#dcfce7;color:#166534;font-weight:600;">{{ $receipts->count() }} portal records</span></div>
-   <div class="iq-receipt-timeline">
-    @forelse($receipts as $receipt)
-     <div class="iq-receipt-entry">
-       <div class="iq-timeline-dot">✓</div>
-       <div class="iq-receipt-card">
-         <div class="iq-receipt-heading">
-           <a href="/receipts/{{ $receipt->id }}/pdf" target="_blank" @if(($receipt->status ?? '') === 'reversed') style="text-decoration:line-through;color:#991b1b;" @endif>
-             Slip No# {{ $receipt->receipt_number }} <span style="font-size:13px;margin-left:4px;">⎙</span>
-           </a>
-           <span class="iq-pill" style="background:#f1f5f9;color:#475569;font-size:10px;padding:2px 6px;">Portal Payment</span>
-           @if(($receipt->status ?? '') === 'reversed')
-             <span class="iq-pill" style="background:#fee2e2;color:#991b1b;font-weight:bold;font-size:10px;padding:2px 6px;">REVERSED</span>
-           @endif
-           <span class="iq-receipt-date">▦ {{ \Carbon\Carbon::parse($receipt->received_on)->format('d M Y') }}</span>
-         </div>
-         <div class="iq-receipt-boxes">
-           <div class="iq-receipt-type">
-             <small>FEE TYPE</small>
-             <strong>{{ $receipt->fee_type_name ?: 'Monthly Fee' }}</strong>
-           </div>
-           <div class="iq-received">
-             <small>RECEIVED</small>
-             <strong>{{ \App\Services\Money::format($receipt->amount_minor) }} {{ $receipt->currency }}</strong>
-           </div>
-         </div>
+   {{-- UNIFIED FEE HISTORY SECTION FOR STUDENT --}}
+   <div class="iq-history-title" style="display: flex; justify-content: space-between; align-items: center; margin-top: 24px;">
+     <div style="display: flex; align-items: center; gap: 8px;">
+       <strong>◷ &nbsp; Fee History</strong>
+       @php
+         $totalFeeRecords = $feeHistory->total();
+       @endphp
+       <span class="iq-pill" style="background: #e0f2fe; color: #0369a1; font-weight: 600;">
+         {{ $totalFeeRecords }} {{ \Illuminate\Support\Str::plural('record', $totalFeeRecords) }} (Unified Portal &amp; MySkool Receipts)
+       </span>
+     </div>
+   </div>
+
+   {{-- FILTER BAR --}}
+   <form method="get" action="{{ url()->current() }}" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; margin: 12px 0;">
+     <div style="flex: 1; min-width: 160px;">
+       <input type="text" name="search" value="{{ request('search') }}" placeholder="🔍 Search Slip #, Month..." style="height: 30px; font-size: 12px; width: 100%; border: 1px solid #cbd5e1; border-radius: 4px; padding: 0 8px;">
+     </div>
+     <div>
+       <select name="source" style="height: 30px; font-size: 12px; border: 1px solid #cbd5e1; border-radius: 4px; padding: 0 8px; background: #fff;" onchange="this.form.submit()">
+         <option value="all" {{ request('source') === 'all' || !request('source') ? 'selected' : '' }}>All Sources</option>
+         <option value="portal" {{ request('source') === 'portal' ? 'selected' : '' }}>New Portal Only</option>
+         <option value="myskool" {{ request('source') === 'myskool' ? 'selected' : '' }}>Historical MySkool Only</option>
+       </select>
+     </div>
+     <button type="submit" class="btn purple" style="height: 30px; padding: 0 12px; font-size: 12px; border-radius: 4px; cursor: pointer;">Filter</button>
+     @if(request()->hasAny(['search', 'source']))
+       <a href="{{ url()->current() }}" style="font-size: 11px; color: #7367f0; text-decoration: none; padding: 4px 6px;">Clear</a>
+     @endif
+   </form>
+
+   {{-- UNIFIED RECEIPT TABLE --}}
+   <div style="overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff;">
+     <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+       <thead>
+         <tr style="background: #f1f5f9; color: #475569; text-align: left; border-bottom: 2px solid #e2e8f0;">
+           <th style="padding: 8px 10px;">SLIP NO#</th>
+           <th style="padding: 8px 10px;">FEE TYPE</th>
+           <th style="padding: 8px 10px;">DETAILS</th>
+           <th style="padding: 8px 10px;">TOTAL</th>
+           <th style="padding: 8px 10px;">RECEIVING DATE</th>
+           <th style="padding: 8px 10px;">RECEIVED BY</th>
+           <th style="padding: 8px 10px; text-align: right;">ACTIONS</th>
+         </tr>
+       </thead>
+       <tbody>
+         @forelse($feeHistory as $receipt)
+           <tr style="border-bottom: 1px solid #e2e8f0; {{ $receipt->is_reversed ? 'opacity: 0.6; background: #fff5f5;' : '' }}">
+             <td style="padding: 8px 10px;">
+               <span style="background: #ede9fe; color: #6d28d9; padding: 2px 8px; border-radius: 4px; font-weight: 700; cursor: pointer;" onclick='showReceiptDetails(@json($receipt->details_payload))' title="Click to view full receipt details">
+                 {{ $receipt->slip_number }}
+               </span>
+               @if($receipt->source === 'portal')
+                 <span style="font-size: 9px; background: #e0f2fe; color: #0369a1; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">Portal</span>
+               @else
+                 <span style="font-size: 9px; background: #fef3c7; color: #92400e; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">MySkool</span>
+               @endif
+               @if($receipt->is_reversed)
+                 <span style="font-size: 9px; background: #fee2e2; color: #991b1b; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">REVERSED</span>
+               @endif
+             </td>
+             <td style="padding: 8px 10px;">{{ $receipt->fee_types_str }}</td>
+             <td style="padding: 8px 10px;"><span style="background: #ede9fe; color: #6d28d9; padding: 1px 6px; border-radius: 4px; font-size: 11px;">{{ $receipt->months_str }}</span></td>
+             <td style="padding: 8px 10px; font-weight: bold; color: #1e293b;">{{ $receipt->currency }} {{ number_format($receipt->amount, 2) }}</td>
+             <td style="padding: 8px 10px;">{{ $receipt->received_on_formatted }}</td>
+             <td style="padding: 8px 10px;">
+               <div style="font-size: 11px; color: #475569;">{{ $receipt->received_by_name ?? '—' }}</div>
+               <div style="font-size: 10px; color: #94a3b8;">{{ $receipt->payment_method ?? 'Cash' }}</div>
+             </td>
+             <td style="padding: 8px 10px; text-align: right;">
+               <div style="display: inline-flex; gap: 4px; align-items: center;">
+                 {{-- Print Action --}}
+                 <a href="{{ $receipt->print_url }}" target="_blank" style="padding: 4px 8px; background: #7367f0; color: #fff; text-decoration: none; border-radius: 4px; font-size: 11px; display: inline-flex; align-items: center;" title="{{ $receipt->is_historical ? 'Print Historical Payment Record' : 'Print Official Receipt' }}">
+                   &#128438;
+                 </a>
+                 {{-- View Details Modal Action --}}
+                 <button type="button" onclick='showReceiptDetails(@json($receipt->details_payload))' style="padding: 4px 8px; background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 11px; cursor: pointer;" title="View Complete Itemized Breakdown">
+                   &#128065;
+                 </button>
+               </div>
+             </td>
+           </tr>
+         @empty
+           <tr>
+             <td colspan="7" style="text-align: center; padding: 22px; color: #94a3b8;">
+               No payment history records found for this student.
+             </td>
+           </tr>
+         @endforelse
+       </tbody>
+     </table>
+   </div>
+
+   {{-- PAGINATION --}}
+   @if($feeHistory->hasPages())
+     <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border: 1px solid #e2e8f0; border-top: none; background: #f8fafc; border-radius: 0 0 6px 6px;">
+       <div style="font-size: 12px; color: #64748b;">
+         Showing <b>{{ $feeHistory->firstItem() }}</b> to <b>{{ $feeHistory->lastItem() }}</b> of <b>{{ $feeHistory->total() }}</b> receipts
+       </div>
+       <div>
+         {{ $feeHistory->links() }}
        </div>
      </div>
-    @empty
-     <div class="iq-empty iq-empty-history">No allocated portal payments recorded for this student yet.</div>
-    @endforelse
-   </div>
-   @if(($stagedCollections ?? collect())->isNotEmpty() || ($stagedDues ?? collect())->isNotEmpty())
-   <div style="margin-top:24px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <strong style="color:#1e293b;font-size:14px;">📑 Historical MySkool Archive (October 22 Reviewed Staging — Read-Only)</strong>
-      <span style="background:#fef3c7;color:#92400e;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;">Legacy MySkool Collections</span>
-    </div>
-
-    @if(($stagedDues ?? collect())->isNotEmpty())
-    <div style="margin-bottom:16px;">
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;">Historical Outstanding Dues Lines ({{ $stagedDues->count() }}):</div>
-      <table style="width:100%;font-size:12px;border-collapse:collapse;background:#fff;border:1px solid #e2e8f0;border-radius:4px;">
-        <thead>
-          <tr style="background:#f1f5f9;text-align:left;color:#475569;">
-            <th style="padding:6px 8px;">Fee Particular</th>
-            <th style="padding:6px 8px;">Currency</th>
-            <th style="padding:6px 8px;">Amount</th>
-            <th style="padding:6px 8px;">PDF Page</th>
-          </tr>
-        </thead>
-        <tbody>
-          @foreach($stagedDues as $due)
-          <tr style="border-top:1px solid #e2e8f0;">
-            <td style="padding:6px 8px;">{{ $due->fee_particular }}</td>
-            <td style="padding:6px 8px;">{{ $due->currency ?: 'UNRESOLVED' }}</td>
-            <td style="padding:6px 8px;font-weight:600;">{{ number_format($due->outstanding_amount, 2) }} {{ $due->currency }}</td>
-            <td style="padding:6px 8px;color:#64748b;">{{ $due->source_pdf_page ? 'p.' . $due->source_pdf_page : '—' }}</td>
-          </tr>
-          @endforeach
-        </tbody>
-      </table>
-    </div>
-    @endif
-
-    @if(($stagedCollections ?? collect())->isNotEmpty())
-    <div>
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;">Historical MySkool Receipt Collection Lines ({{ $stagedCollections->count() }}):</div>
-      <table style="width:100%;font-size:12px;border-collapse:collapse;background:#fff;border:1px solid #e2e8f0;border-radius:4px;">
-        <thead>
-          <tr style="background:#f1f5f9;text-align:left;color:#475569;">
-            <th style="padding:6px 8px;">Slip No</th>
-            <th style="padding:6px 8px;">Particular</th>
-            <th style="padding:6px 8px;">Date</th>
-            <th style="padding:6px 8px;">Currency</th>
-            <th style="padding:6px 8px;">Amount</th>
-            <th style="padding:6px 8px;">Source</th>
-          </tr>
-        </thead>
-        <tbody>
-          @foreach($stagedCollections as $col)
-          <tr style="border-top:1px solid #e2e8f0;">
-            <td style="padding:6px 8px;font-weight:600;">{{ $col->slip_number ?: '—' }}</td>
-            <td style="padding:6px 8px;">{{ $col->fee_particular }}</td>
-            <td style="padding:6px 8px;color:#64748b;">{{ $col->payment_date_parsed ?: $col->payment_date_raw }}</td>
-            <td style="padding:6px 8px;">{{ $col->currency ?: 'UNRESOLVED' }}</td>
-            <td style="padding:6px 8px;font-weight:600;">{{ number_format($col->amount, 2) }} {{ $col->currency }}</td>
-            <td style="padding:6px 8px;color:#64748b;"><span class="iq-pill" style="background:#fef3c7;color:#92400e;font-size:9px;">MySkool Historical</span></td>
-          </tr>
-          @endforeach
-        </tbody>
-      </table>
-    </div>
-    @endif
-   </div>
    @endif
   </div>
  </div>
@@ -174,4 +182,111 @@
   <section class="panel"><h3>Add department enrollment</h3><form method="post" action="/manage-student/{{ $student->id }}/enrollments">@csrf<div class="formgrid"><div><label>Department</label><select class="input" name="department_id">@foreach(\Illuminate\Support\Facades\DB::table('departments')->get() as $d)<option value="{{ $d->id }}">{{ $d->name }}</option>@endforeach</select></div><div><label>Campus</label><select class="input" name="campus_id">@foreach(\Illuminate\Support\Facades\DB::table('campuses')->get() as $c)<option value="{{ $c->id }}">{{ $c->name }}</option>@endforeach</select></div><div><label>Grade / Class</label><input class="input" name="grade_label" required></div><div><label>Subject (Tuition)</label><input class="input" name="subject_name"></div><div><label>Quran class days</label><input class="input" type="number" min="1" max="7" name="class_days_per_week"></div><div><label>Currency</label><input class="input" name="currency" maxlength="3" value="SAR" required></div><div><label>Monthly Fee</label><input class="input" name="monthly_fee" type="number" min="0" step=".01"></div></div><button class="btn green">Save Enrollment and Fee</button></form></section></div>
  </details>
 </div>
+
+{{-- RECEIPT ITEMIZATION DETAILS DIALOG --}}
+<dialog id="receipt-details-dialog" style="border:none;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.3);padding:0;max-width:650px;width:95%;margin:auto;font-family:inherit;">
+ <div style="background:#7367f0;color:#fff;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-top-left-radius:8px;border-top-right-radius:8px;">
+  <strong style="font-size:16px;display:flex;align-items:center;gap:8px;">
+    <span>Receipt Slip #<span id="rd-slip"></span></span>
+    <span id="rd-source-badge" style="font-size:10px;padding:2px 8px;border-radius:12px;font-weight:700;"></span>
+  </strong>
+  <button type="button" onclick="document.getElementById('receipt-details-dialog').close()" style="background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;">&times;</button>
+ </div>
+ <div style="padding:20px;font-size:13px;color:#5e5873;max-height:80vh;overflow-y:auto;">
+  
+  {{-- META GRID --}}
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:12px;margin-bottom:14px;">
+    <div><small style="color:#64748b;display:block;">Payment Date</small><strong id="rd-date">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Total Amount</small><strong id="rd-total" style="color:#7367f0;">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Discount</small><strong id="rd-discount">0</strong></div>
+    <div><small style="color:#64748b;display:block;">Method</small><strong id="rd-method">Cash</strong></div>
+    <div><small style="color:#64748b;display:block;">Received By</small><strong id="rd-received-by">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Status</small><strong id="rd-status">Active</strong></div>
+  </div>
+
+  <div id="rd-notice-container"></div>
+
+  {{-- ITEMS TABLE --}}
+  <div style="font-weight:600;margin:12px 0 6px;color:#334155;">Underlying Item Allocations:</div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid #ebe9f1;border-radius:4px;overflow:hidden;">
+    <thead>
+      <tr style="background:#f1f5f9;color:#475569;text-align:left;">
+        <th style="padding:8px 10px;">Student</th>
+        <th style="padding:8px 10px;">Fee Particular</th>
+        <th style="padding:8px 10px;">Month</th>
+        <th style="padding:8px 10px;text-align:right;">Amount</th>
+      </tr>
+    </thead>
+    <tbody id="rd-items-tbody">
+    </tbody>
+  </table>
+
+  {{-- FOOTER BUTTONS --}}
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding-top:14px;border-top:1px solid #ebe9f1;">
+    <a id="rd-print-btn" href="#" target="_blank" class="btn purple" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:4px;font-size:12px;color:#fff;">
+      &#128438; Print Slip
+    </a>
+    <button type="button" onclick="document.getElementById('receipt-details-dialog').close()" style="background:#f1f5f9;border:1px solid #cbd5e1;padding:7px 16px;border-radius:4px;font-size:12px;cursor:pointer;color:#475569;font-weight:600;">
+      Close
+    </button>
+  </div>
+ </div>
+</dialog>
+
+<script>
+window.showReceiptDetails = function(payload) {
+    if (!payload) return;
+    document.getElementById('rd-slip').textContent = payload.slip_number || '—';
+    document.getElementById('rd-date').textContent = payload.received_on || '—';
+    document.getElementById('rd-total').textContent = payload.total_amount || '—';
+    document.getElementById('rd-discount').textContent = payload.discount || '0';
+    document.getElementById('rd-method').textContent = payload.payment_method || 'Cash';
+    document.getElementById('rd-received-by').textContent = payload.received_by || '—';
+    document.getElementById('rd-status').textContent = payload.status || 'Active';
+    
+    var badge = document.getElementById('rd-source-badge');
+    if (payload.source === 'portal') {
+        badge.textContent = 'Live Portal Receipt';
+        badge.style.background = '#e0f2fe';
+        badge.style.color = '#0369a1';
+    } else {
+        badge.textContent = 'Historical MySkool Record';
+        badge.style.background = '#fef3c7';
+        badge.style.color = '#92400e';
+    }
+
+    var noticeBox = document.getElementById('rd-notice-container');
+    if (payload.is_historical) {
+        noticeBox.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:8px 12px;margin:10px 0;font-size:11px;color:#92400e;line-height:1.4;"><strong>Historical MySkool Payment Record — Reconstructed from Imported Data</strong><br>This payment record was reconstructed from verified MySkool import data. It reflects legacy fee collections received prior to portal migration without mutating current ledger balances.</div>';
+    } else {
+        noticeBox.innerHTML = '';
+    }
+
+    var tbody = document.getElementById('rd-items-tbody');
+    tbody.innerHTML = '';
+    if (payload.items && payload.items.length > 0) {
+        payload.items.forEach(function(it) {
+            var tr = document.createElement('tr');
+            tr.innerHTML = '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><strong>' + (it.student_name || '—') + '</strong><br><small style="color:#64748b;">GR: ' + (it.gr_number || '—') + '</small></td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;">' + (it.fee_particular || 'Monthly Fee') + '</td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><span style="background:#ede9fe;color:#6d28d9;padding:1px 6px;border-radius:4px;font-size:11px;">' + (it.period || '—') + '</span></td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:700;">' + (it.currency ? it.currency + ' ' : '') + it.amount + '</td>';
+            tbody.appendChild(tr);
+        });
+    } else {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:12px;color:#94a3b8;">No itemized details recorded.</td></tr>';
+    }
+
+    var printBtn = document.getElementById('rd-print-btn');
+    if (payload.print_url) {
+        printBtn.href = payload.print_url;
+        printBtn.style.display = 'inline-flex';
+    } else {
+        printBtn.style.display = 'none';
+    }
+
+    document.getElementById('receipt-details-dialog').showModal();
+};
+</script>
+
 @endsection

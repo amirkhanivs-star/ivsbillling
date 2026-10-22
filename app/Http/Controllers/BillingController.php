@@ -87,11 +87,14 @@ class BillingController {
   $stagedDues = \Illuminate\Support\Facades\Schema::hasTable('qa_staged_dues')
    ? DB::table('qa_staged_dues')->where('batch_id', $activeBatch)->where('gr_number', $s->gr_number)->orderBy('source_row')->get()
    : collect();
+  $feeHistoryService = app(\App\Services\FeeHistoryService::class);
+  $feeHistory = $feeHistoryService->getStudentFeeHistory($student, request()->all(), auth()->user());
   return view('student-details', [
    'student' => $s,
    'enrollments' => $enrollments,
    'feeItems' => $feeItems,
    'receipts' => $receipts,
+   'feeHistory' => $feeHistory,
    'stagedCollections' => $stagedCollections,
    'stagedDues' => $stagedDues,
   ]);
@@ -409,7 +412,9 @@ class BillingController {
    ? DB::table('qa_staged_dues')->where('batch_id', $activeBatch)->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
    : collect();
 
-  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','dueGroups','scopes','registrationStatus','summaryMetrics','feeTypes','familyStudents','catalogRates','studentFeePlans','advanceCredits','historicalCollections','historicalDues'));
+  $feeHistoryService = app(\App\Services\FeeHistoryService::class);
+  $feeHistory = $family ? $feeHistoryService->getFamilyFeeHistory($family->id, $r->all(), $r->user()) : new \Illuminate\Pagination\LengthAwarePaginator([], 0, 20);
+  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','feeHistory','dueGroups','scopes','registrationStatus','summaryMetrics','feeTypes','familyStudents','catalogRates','studentFeePlans','advanceCredits','historicalCollections','historicalDues'));
  }
 
  public function createChallanFee(Request $r){
@@ -872,6 +877,22 @@ class BillingController {
   return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt',compact('p','family','items','branding','banner','remainingBalanceMinor'))
    ->setPaper('a4')
    ->stream($p->receipt_number.'.pdf');
+ }
+
+ public function historicalReceiptPdf(int $id, Request $r){
+  $feeHistoryService = app(\App\Services\FeeHistoryService::class);
+  $receipt = $feeHistoryService->getHistoricalReceiptDetails($id);
+  abort_unless($receipt, 404);
+  if (!in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
+   $this->assertAccess($r, $receipt->department_id, $receipt->campus_id);
+  }
+  $branding = DB::table('department_branding')->where('department_id', $receipt->department_id)->first();
+  $banner = $this->bannerDataUri($branding);
+  $family = $receipt->family;
+
+  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.historical-receipt', compact('receipt', 'family', 'branding', 'banner'))
+   ->setPaper('a4')
+   ->stream('historical-slip-' . $receipt->slip_number . '.pdf');
  }
  public function invoicePdf(int $invoice,Request $r){$i=DB::table('invoices')->where('id',$invoice)->first();abort_unless($i,404);if(!$r->hasValidSignature()){$this->assertAccess($r,$i->department_id,$i->campus_id);}return $this->renderInvoice($i);}
  private function renderInvoice(object $i){$family=DB::table('families')->where('id',$i->family_id)->first();$items=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')->where('item.invoice_id',$i->id)->select('item.*','s.name','s.gr_number')->get();$dept=DB::table('departments')->where('id',$i->department_id)->first();$branding=DB::table('department_branding')->where('department_id',$i->department_id)->first();$currentPeriod=DB::table('billing_runs')->where('id',$i->billing_run_id)->value('period_start');$previous=(int)DB::table('invoices as older')->join('billing_runs as b','b.id','=','older.billing_run_id')->where('older.id','<>',$i->id)->where('older.family_id',$i->family_id)->where('older.department_id',$i->department_id)->where('older.campus_id',$i->campus_id)->where('older.currency',$i->currency)->where('b.period_start','<',$currentPeriod)->selectRaw('COALESCE(SUM(older.total_minor-older.paid_minor),0) as dues')->value('dues');$history=[];$month=\Carbon\Carbon::parse($currentPeriod)->startOfMonth();

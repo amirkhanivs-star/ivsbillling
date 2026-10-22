@@ -430,16 +430,66 @@
             </div>
         @endif
 
-        {{-- BOTTOM CARD: NEW PORTAL PAYMENTS & HISTORICAL MYSKOOL ARCHIVE --}}
+                {{-- UNIFIED FEE HISTORY CARD --}}
         @if($family)
             <div class="myskool-card" style="margin-top: 16px;">
                 <div class="myskool-history-header" id="historyToggleBtn">
                     <div class="myskool-history-title">
-                        <span>New Portal Payments (Receipts)</span>
-                        <span style="font-size: 11px; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;">Live Portal Receipts</span>
+                        <span>Fee History</span>
+                        @php
+                            $totalFeeRecords = $feeHistory->total();
+                        @endphp
+                        <span style="font-size: 11px; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;">
+                            {{ $totalFeeRecords }} {{ \Illuminate\Support\Str::plural('Record', $totalFeeRecords) }} (Live Portal Receipts &amp; Historical MySkool Slips)
+                        </span>
                     </div>
                     <div class="myskool-history-chevron" id="historyChevron">&uarr;</div>
                 </div>
+
+                {{-- FILTER / SEARCH BAR --}}
+                <form method="get" action="{{ url()->current() }}" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 16px; background: #fafafc; border-bottom: 1px solid #ebe9f1;">
+                    <input type="hidden" name="family" value="{{ request('family', $family->family_code ?: $family->id) }}">
+                    
+                    {{-- Search Input --}}
+                    <div style="flex: 1; min-width: 170px;">
+                        <input type="text" name="search" value="{{ request('search') }}" placeholder="🔍 Search Slip #, Student, Month..." class="myskool-input" style="height: 32px; font-size: 12px; width: 100%; border: 1px solid #d8d6de; border-radius: 4px; padding: 0 10px;">
+                    </div>
+
+                    {{-- Source Filter --}}
+                    <div>
+                        <select name="source" style="height: 32px; font-size: 12px; border: 1px solid #d8d6de; border-radius: 4px; padding: 0 8px; background: #fff;" onchange="this.form.submit()">
+                            <option value="all" {{ request('source') === 'all' || !request('source') ? 'selected' : '' }}>All Sources</option>
+                            <option value="portal" {{ request('source') === 'portal' ? 'selected' : '' }}>New Portal Only</option>
+                            <option value="myskool" {{ request('source') === 'myskool' ? 'selected' : '' }}>Historical MySkool Only</option>
+                        </select>
+                    </div>
+
+                    {{-- Student Filter (if family has multiple students) --}}
+                    @if(($familyStudents ?? collect())->count() > 1)
+                    <div>
+                        <select name="student_gr" style="height: 32px; font-size: 12px; border: 1px solid #d8d6de; border-radius: 4px; padding: 0 8px; background: #fff;" onchange="this.form.submit()">
+                            <option value="">All Students</option>
+                            @foreach($familyStudents as $fst)
+                                <option value="{{ $fst->gr_number }}" {{ request('student_gr') == $fst->gr_number ? 'selected' : '' }}>{{ $fst->name }} ({{ $fst->gr_number }})</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    @endif
+
+                    {{-- Date From & To --}}
+                    <div>
+                        <input type="date" name="date_from" value="{{ request('date_from') }}" title="From Date" style="height: 32px; font-size: 11px; border: 1px solid #d8d6de; border-radius: 4px; padding: 0 6px;">
+                    </div>
+                    <div>
+                        <input type="date" name="date_to" value="{{ request('date_to') }}" title="To Date" style="height: 32px; font-size: 11px; border: 1px solid #d8d6de; border-radius: 4px; padding: 0 6px;">
+                    </div>
+
+                    <button type="submit" class="btn-ms-purple" style="height: 32px; padding: 0 12px; font-size: 12px; border-radius: 4px;">Filter</button>
+                    
+                    @if(request()->hasAny(['search', 'source', 'student_gr', 'date_from', 'date_to']))
+                        <a href="{{ url()->current() }}?family={{ urlencode(request('family', $family->family_code ?: (string)$family->id)) }}" style="font-size: 11px; color: #7367f0; text-decoration: none; padding: 4px 6px;">Clear</a>
+                    @endif
+                </form>
 
                 <div id="historyTableContainer" style="overflow-x: auto;">
                     <table class="myskool-table">
@@ -448,6 +498,7 @@
                                 <th>SLIP NO#</th>
                                 <th>FEE TYPE</th>
                                 <th>CLASS</th>
+                                <th>STUDENT</th>
                                 <th>DETAILS</th>
                                 <th>DISCOUNT</th>
                                 <th>TOTAL</th>
@@ -457,42 +508,54 @@
                             </tr>
                         </thead>
                         <tbody>
-                            @forelse($payments as $payment)
-                                @php
-                                    $isReversed = ($payment->status === 'reversed');
-                                    $monthsStr = !empty($payment->months) ? implode(', ', $payment->months) : ($payment->selected_period ? \Carbon\Carbon::parse($payment->selected_period.'-01')->format('M-Y') : 'General');
-                                    $classesStr = !empty($payment->classes) ? implode(', ', $payment->classes) : ($firstStudent->class_name ?? '11th (FED) - A');
-                                    $feeTypesStr = !empty($payment->fee_types) ? implode(', ', $payment->fee_types) : 'Monthly Fee';
-                                @endphp
-                                <tr style="{{ $isReversed ? 'opacity: 0.6; background: #fff5f5;' : '' }}">
+                            @forelse($feeHistory as $receipt)
+                                <tr style="{{ $receipt->is_reversed ? 'opacity: 0.6; background: #fff5f5;' : '' }}">
                                     <td>
-                                        <span class="ms-pill-lavender">{{ $payment->receipt_number }}</span>
-                                        @if($isReversed)
-                                            <span style="font-size: 9px; color: #ea5455; font-weight: 700; margin-left: 2px;">REVERSED</span>
+                                        <span class="ms-pill-lavender" style="font-weight: 700; cursor: pointer;" onclick='showReceiptDetails(@json($receipt->details_payload))' title="Click to view complete itemized breakdown">
+                                            {{ $receipt->slip_number }}
+                                        </span>
+                                        @if($receipt->source === 'portal')
+                                            <span style="font-size: 9px; background: #e0f2fe; color: #0369a1; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">Portal</span>
+                                        @else
+                                            <span style="font-size: 9px; background: #fef3c7; color: #92400e; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">MySkool</span>
+                                        @endif
+                                        @if($receipt->is_reversed)
+                                            <span style="font-size: 9px; background: #fee2e2; color: #991b1b; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">REVERSED</span>
                                         @endif
                                     </td>
-                                    <td>{{ $feeTypesStr }}</td>
-                                    <td>{{ $classesStr }}</td>
-                                    <td><span class="ms-pill-lavender">{{ $monthsStr }}</span></td>
-                                    <td>{{ (int)$payment->total_discount_minor > 0 ? $payment->currency . ' ' . number_format($payment->total_discount_minor / 100, 2) : '0' }}</td>
-                                    <td><b>{{ $payment->currency }} {{ number_format($payment->amount_minor / 100, 2) }}</b></td>
-                                    <td>{{ \Carbon\Carbon::parse($payment->received_on)->format('d M Y') }}</td>
+                                    <td>{{ $receipt->fee_types_str }}</td>
+                                    <td>{{ $receipt->classes_str }}</td>
                                     <td>
-                                        <div style="font-size: 11px; color: #5e5873;">{{ $payment->received_by_name ?? 'coordinatorivs92@gmail.com' }}</div>
-                                        <div style="font-size: 10px; color: #b9b9c3;">{{ $payment->method ?? 'Cash' }}</div>
+                                        <div style="font-weight: 600; color: #5e5873; max-width: 170px; white-space: normal; line-height: 1.3;">
+                                            {{ $receipt->students_str }}
+                                        </div>
+                                    </td>
+                                    <td><span class="ms-pill-lavender">{{ $receipt->months_str }}</span></td>
+                                    <td>{{ (int)$receipt->discount_minor > 0 ? $receipt->currency . ' ' . number_format($receipt->discount, 2) : '0' }}</td>
+                                    <td><b>{{ $receipt->currency }} {{ number_format($receipt->amount, 2) }}</b></td>
+                                    <td>{{ $receipt->received_on_formatted }}</td>
+                                    <td>
+                                        <div style="font-size: 11px; color: #5e5873;">{{ $receipt->received_by_name ?? '—' }}</div>
+                                        <div style="font-size: 10px; color: #b9b9c3;">{{ $receipt->payment_method ?? 'Cash' }}</div>
                                     </td>
                                     <td>
                                         <div class="ms-action-group">
-                                            <a href="/receipts/{{ $payment->id }}/pdf" target="_blank" class="btn-ms-square-action" style="background: var(--ms-purple); color: #fff; text-decoration: none;" title="Print Slip">
+                                            {{-- Print Action --}}
+                                            <a href="{{ $receipt->print_url }}" target="_blank" class="btn-ms-square-action" style="background: var(--ms-purple); color: #fff; text-decoration: none;" title="{{ $receipt->is_historical ? 'Print Historical Payment Record' : 'Print Official Receipt' }}">
                                                 &#128438;
                                             </a>
-                                            @if(!$isReversed)
+                                            {{-- View Details Modal Action --}}
+                                            <button type="button" class="btn-ms-square-action" onclick='showReceiptDetails(@json($receipt->details_payload))' style="background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1;" title="View Complete Itemized Breakdown">
+                                                &#128065;
+                                            </button>
+                                            {{-- Reversal Action (Portal Only, when permitted and not reversed) --}}
+                                            @if($receipt->can_reverse)
                                                 <button type="button" class="btn-ms-square-action danger action-trigger"
                                                     data-action="reverse"
-                                                    data-id="{{ $payment->id }}"
-                                                    data-currency="{{ $payment->currency }}"
-                                                    data-slip="{{ $payment->receipt_number }}"
-                                                    data-balance="{{ number_format($payment->amount_minor / 100, 2, '.', '') }}"
+                                                    data-id="{{ $receipt->id }}"
+                                                    data-currency="{{ $receipt->currency }}"
+                                                    data-slip="{{ $receipt->slip_number }}"
+                                                    data-balance="{{ number_format($receipt->amount_minor / 100, 2, '.', '') }}"
                                                     title="Reverse Receipt">
                                                     ✕
                                                 </button>
@@ -502,68 +565,30 @@
                                 </tr>
                             @empty
                                 <tr>
-                                    <td colspan="9" style="text-align: center; padding: 18px; color: #b9b9c3;">
-                                        No live portal fee payment receipts recorded yet.
+                                    <td colspan="10" style="text-align: center; padding: 22px; color: #b9b9c3;">
+                                        No fee payment receipts matching the criteria found.
                                     </td>
                                 </tr>
                             @endforelse
                         </tbody>
                     </table>
                 </div>
-            </div>
 
-            {{-- HISTORICAL MYSKOOL ARCHIVE SECTION --}}
-            @if(($historicalCollections ?? collect())->isNotEmpty() || ($historicalDues ?? collect())->isNotEmpty())
-                <div class="myskool-card" style="margin-top: 16px; border-left: 4px solid #f59e0b;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #ebe9f1; background: #fffbeb;">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <strong style="color: #92400e; font-size: 13px;">📑 Historical MySkool Archive (October 22 Staging — Read-Only)</strong>
-                            <span style="font-size: 10px; background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 12px; font-weight: 700; border: 1px solid #fde68a;">Legacy MySkool Collections</span>
+                {{-- PAGINATION --}}
+                @if($feeHistory->hasPages())
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-top: 1px solid #ebe9f1; background: #fafafc; flex-wrap: wrap; gap: 8px;">
+                        <div style="font-size: 12px; color: #6e6b7b;">
+                            Showing <b>{{ $feeHistory->firstItem() }}</b> to <b>{{ $feeHistory->lastItem() }}</b> of <b>{{ $feeHistory->total() }}</b> receipts
                         </div>
-                        <span style="font-size: 11px; color: #b45309;">Verified Source Staging Records</span>
+                        <div>
+                            {{ $feeHistory->links() }}
+                        </div>
                     </div>
-
-                    @if(($historicalCollections ?? collect())->isNotEmpty())
-                        <div style="overflow-x: auto; padding: 10px 14px;">
-                            <div style="font-size: 11px; font-weight: 600; color: #64748b; margin-bottom: 6px;">Historical MySkool Receipt Slips ({{ $historicalCollections->count() }}):</div>
-                            <table class="myskool-table" style="font-size: 11px;">
-                                <thead>
-                                    <tr style="background: #f8fafc;">
-                                        <th>SLIP NO#</th>
-                                        <th>GR</th>
-                                        <th>STUDENT</th>
-                                        <th>FEE PARTICULAR</th>
-                                        <th>PAYMENT DATE</th>
-                                        <th>CURRENCY</th>
-                                        <th>AMOUNT</th>
-                                        <th>METHOD</th>
-                                        <th>STATUS / SOURCE</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    @foreach($historicalCollections as $col)
-                                        <tr>
-                                            <td><span class="ms-pill-lavender" style="font-weight: 700;">{{ $col->slip_number ?: '—' }}</span></td>
-                                            <td><b>{{ $col->gr_number }}</b></td>
-                                            <td>{{ $col->student_name }}</td>
-                                            <td>{{ $col->fee_particular }}</td>
-                                            <td>{{ $col->payment_date_parsed ?: $col->payment_date_raw }}</td>
-                                            <td><b>{{ $col->currency ?: 'UNRESOLVED' }}</b></td>
-                                            <td><b>{{ $col->currency }} {{ number_format($col->amount, 2) }}</b></td>
-                                            <td>{{ $col->payment_method ?: 'Cash' }}</td>
-                                            <td><span class="ms-pill-lavender" style="background: #fef3c7; color: #92400e; font-size: 9px; font-weight: 600;">MySkool Historical (Read-Only)</span></td>
-                                        </tr>
-                                    @endforeach
-                                </tbody>
-                            </table>
-                        </div>
-                    @endif
-                </div>
-            @endif
+                @endif
+            </div>
         @endif
     </div>
-
-    {{-- RIGHT COLUMN: STUDENT PROFILE & RECEIVE PANEL --}}
+{{-- RIGHT COLUMN: STUDENT PROFILE & RECEIVE PANEL --}}
     <div class="myskool-right-col">
         <div class="myskool-card">
             {{-- PROFILE HEADER --}}
@@ -1504,4 +1529,111 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
 
  </div>
 </dialog>
+
+{{-- RECEIPT ITEMIZATION DETAILS DIALOG --}}
+<dialog id="receipt-details-dialog" style="border:none;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.3);padding:0;max-width:650px;width:95%;margin:auto;font-family:inherit;">
+ <div style="background:#7367f0;color:#fff;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-top-left-radius:8px;border-top-right-radius:8px;">
+  <strong style="font-size:16px;display:flex;align-items:center;gap:8px;">
+    <span>Receipt Slip #<span id="rd-slip"></span></span>
+    <span id="rd-source-badge" style="font-size:10px;padding:2px 8px;border-radius:12px;font-weight:700;"></span>
+  </strong>
+  <button type="button" onclick="document.getElementById('receipt-details-dialog').close()" style="background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;">&times;</button>
+ </div>
+ <div style="padding:20px;font-size:13px;color:#5e5873;max-height:80vh;overflow-y:auto;">
+  
+  {{-- META GRID --}}
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:12px;margin-bottom:14px;">
+    <div><small style="color:#64748b;display:block;">Payment Date</small><strong id="rd-date">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Total Amount</small><strong id="rd-total" style="color:#7367f0;">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Discount</small><strong id="rd-discount">0</strong></div>
+    <div><small style="color:#64748b;display:block;">Method</small><strong id="rd-method">Cash</strong></div>
+    <div><small style="color:#64748b;display:block;">Received By</small><strong id="rd-received-by">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Status</small><strong id="rd-status">Active</strong></div>
+  </div>
+
+  <div id="rd-notice-container"></div>
+
+  {{-- ITEMS TABLE --}}
+  <div style="font-weight:600;margin:12px 0 6px;color:#334155;">Underlying Item Allocations:</div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid #ebe9f1;border-radius:4px;overflow:hidden;">
+    <thead>
+      <tr style="background:#f1f5f9;color:#475569;text-align:left;">
+        <th style="padding:8px 10px;">Student</th>
+        <th style="padding:8px 10px;">Fee Particular</th>
+        <th style="padding:8px 10px;">Month</th>
+        <th style="padding:8px 10px;text-align:right;">Amount</th>
+      </tr>
+    </thead>
+    <tbody id="rd-items-tbody">
+    </tbody>
+  </table>
+
+  {{-- FOOTER BUTTONS --}}
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding-top:14px;border-top:1px solid #ebe9f1;">
+    <a id="rd-print-btn" href="#" target="_blank" class="btn-ms-purple" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:4px;font-size:12px;">
+      &#128438; Print Slip
+    </a>
+    <button type="button" onclick="document.getElementById('receipt-details-dialog').close()" style="background:#f1f5f9;border:1px solid #cbd5e1;padding:7px 16px;border-radius:4px;font-size:12px;cursor:pointer;color:#475569;font-weight:600;">
+      Close
+    </button>
+  </div>
+ </div>
+</dialog>
+
+<script>
+window.showReceiptDetails = function(payload) {
+    if (!payload) return;
+    document.getElementById('rd-slip').textContent = payload.slip_number || '—';
+    document.getElementById('rd-date').textContent = payload.received_on || '—';
+    document.getElementById('rd-total').textContent = payload.total_amount || '—';
+    document.getElementById('rd-discount').textContent = payload.discount || '0';
+    document.getElementById('rd-method').textContent = payload.payment_method || 'Cash';
+    document.getElementById('rd-received-by').textContent = payload.received_by || '—';
+    document.getElementById('rd-status').textContent = payload.status || 'Active';
+    
+    var badge = document.getElementById('rd-source-badge');
+    if (payload.source === 'portal') {
+        badge.textContent = 'Live Portal Receipt';
+        badge.style.background = '#e0f2fe';
+        badge.style.color = '#0369a1';
+    } else {
+        badge.textContent = 'Historical MySkool Record';
+        badge.style.background = '#fef3c7';
+        badge.style.color = '#92400e';
+    }
+
+    var noticeBox = document.getElementById('rd-notice-container');
+    if (payload.is_historical) {
+        noticeBox.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:8px 12px;margin:10px 0;font-size:11px;color:#92400e;line-height:1.4;"><strong>Historical MySkool Payment Record — Reconstructed from Imported Data</strong><br>This payment record was reconstructed from verified MySkool import data. It reflects legacy fee collections received prior to portal migration without mutating current ledger balances.</div>';
+    } else {
+        noticeBox.innerHTML = '';
+    }
+
+    var tbody = document.getElementById('rd-items-tbody');
+    tbody.innerHTML = '';
+    if (payload.items && payload.items.length > 0) {
+        payload.items.forEach(function(it) {
+            var tr = document.createElement('tr');
+            tr.innerHTML = '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><strong>' + (it.student_name || '—') + '</strong><br><small style="color:#64748b;">GR: ' + (it.gr_number || '—') + '</small></td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;">' + (it.fee_particular || 'Monthly Fee') + '</td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><span class="ms-pill-lavender">' + (it.period || '—') + '</span></td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:700;">' + (it.currency ? it.currency + ' ' : '') + it.amount + '</td>';
+            tbody.appendChild(tr);
+        });
+    } else {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:12px;color:#94a3b8;">No itemized details recorded.</td></tr>';
+    }
+
+    var printBtn = document.getElementById('rd-print-btn');
+    if (payload.print_url) {
+        printBtn.href = payload.print_url;
+        printBtn.style.display = 'inline-flex';
+    } else {
+        printBtn.style.display = 'none';
+    }
+
+    document.getElementById('receipt-details-dialog').showModal();
+};
+</script>
+
 @endsection
