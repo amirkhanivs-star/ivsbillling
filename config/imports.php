@@ -8,7 +8,9 @@ return [
     | Explicitly identifies the currently authorized import source version.
     | Future imports never silently fall back or select an old CSV or ZIP.
     */
-    'active_version' => env('ACTIVE_IMPORT_VERSION', 'v2_reviewed_20261022'),
+    'active_version' => env('ACTIVE_IMPORT_VERSION', 'v2_reviewed_20261022_revised'),
+    'active_batch_id' => env('ACTIVE_IMPORT_BATCH_ID', 'BATCH-20261022-PORTAL-V2-REVISED'),
+    'allow_opening_balance_posting' => env('ALLOW_OPENING_BALANCE_POSTING', false),
 
     /*
     |--------------------------------------------------------------------------

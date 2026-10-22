@@ -8,6 +8,7 @@ use Illuminate\Console\Command;
 class QaPreviewOpeningBalancesCommand extends Command
 {
     protected $signature = 'qa:preview-opening-balances
+                            {--batch-id= : Explicit import batch ID (defaults to active batch)}
                             {--conn= : Database connection to use (defaults to qa)}';
 
     protected $description = 'Generate a detailed currency-isolated preview of historical opening balances from qa_staged_dues';
@@ -20,15 +21,17 @@ class QaPreviewOpeningBalancesCommand extends Command
         $this->info('========================================================================');
 
         $conn = (string) ($this->option('conn') ?: config('database.default'));
-        $preview = $service->preview($conn);
+        $batchId = $this->option('batch-id') ? (string) $this->option('batch-id') : null;
+        $preview = $service->preview($conn, $batchId);
 
         if ($preview['status'] === 'empty') {
-            $this->warn($preview['message']);
+            $this->warn($preview['safety_status']['message'] ?? 'No staged dues found.');
             return self::SUCCESS;
         }
 
         $s = $preview['summary'];
         $this->line('');
+        $this->info("Import Batch ID:            {$preview['batch_id']}");
         $this->info("Total Staged Dues Rows:     {$s['total_staged_dues']}");
         $this->info("Eligible Rows for Invoices: {$s['eligible_rows']}");
         $this->warn("Excluded / Held Rows:       {$s['excluded_rows_count']}");
@@ -36,11 +39,12 @@ class QaPreviewOpeningBalancesCommand extends Command
 
         $this->line('');
         $this->info('--- Eligible Opening Balances by Currency ---');
-        $headers = ['Currency', 'Lines', 'Total Amount'];
+        $headers = ['Currency', 'Invoices', 'Lines', 'Total Amount'];
         $currRows = [];
         foreach ($preview['totals_by_currency'] as $curr => $data) {
             $currRows[] = [
                 $curr,
+                number_format($data['invoices_count']),
                 number_format($data['lines']),
                 number_format((float) $data['total_decimal'], 2) . " {$curr}",
             ];
@@ -68,6 +72,9 @@ class QaPreviewOpeningBalancesCommand extends Command
         $this->line("  - Unresolved Currency Rows:         {$ex['unresolved_currency_count']}");
         $this->line("  - Review-Hold Students' Dues:       {$ex['review_hold_student_count']}");
         $this->line("  - Historical-Hold Students' Dues:   {$ex['historical_hold_student_count']}");
+        $this->line("  - Unknown / Unverified Period Dues: {$ex['unknown_period_count']}");
+        $this->line("  - Ambiguous Department Evidence:    {$ex['ambiguous_department_count']}");
+        $this->line("  - Unmatched Department Enrollment:  {$ex['unmatched_enrollment_count']}");
         $this->line("  - Missing GR / Student Dues:        {$ex['missing_student_count']}");
         $this->line("  - Invalid / Non-Positive Amounts:   {$ex['invalid_amount_count']}");
         $this->line("  - Currency Mismatches:              {$ex['currency_mismatch_count']}");

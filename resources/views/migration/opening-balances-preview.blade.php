@@ -110,18 +110,25 @@
 
 <!-- Excluded Rows Detail -->
 @php $ex = $preview['exclusions']; @endphp
-<div class="panel wide" style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:18px;margin-bottom:25px;">
-    <h3 style="font-size:16px;font-weight:700;margin:0 0 10px;color:#2c2c2c;">Excluded & Held Dues Lines (461 Lines Kept Out of Ledger)</h3>
+    <h3 style="font-size:16px;font-weight:700;margin:0 0 10px;color:#2c2c2c;">Excluded & Held Dues Lines ({{ number_format($s['excluded_rows_count']) }} Lines Kept Out of Ledger)</h3>
     <p style="font-size:12px;color:#6e6b7b;margin-bottom:14px;">These rows remain safely staged in <code>qa_staged_dues</code> and are strictly excluded from opening-balance invoice generation.</p>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:15px;">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:15px;margin-bottom:15px;">
         <div style="background:#fff9e6;border:1px solid #ffeeba;border-radius:4px;padding:12px;">
-            <strong style="color:#856404;">⚠️ Unresolved Currency Rows: {{ $ex['unresolved_currency_count'] }}</strong>
+            <strong style="color:#856404;">⚠️ Unresolved Currency: {{ $ex['unresolved_currency_count'] }}</strong>
             <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">70 rows with blank currency or aliases like "SAE" awaiting currency determination.</p>
         </div>
         <div style="background:#fff4e5;border:1px solid #ffd8a8;border-radius:4px;padding:12px;">
-            <strong style="color:#d9480f;">🔒 Review-Hold Students' Dues: {{ $ex['review_hold_student_count'] }}</strong>
+            <strong style="color:#d9480f;">🔒 Review-Hold Students: {{ $ex['review_hold_student_count'] }}</strong>
             <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">391 dues lines belonging to the 72 provisional/review students on financial approval hold.</p>
+        </div>
+        <div style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;padding:12px;">
+            <strong style="color:#475569;">📅 Unknown Period: {{ $ex['unknown_period_count'] }}</strong>
+            <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">329 course/subject particulars lacking verified 4-digit calendar year (held for review; no invented Sep 2026).</p>
+        </div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:4px;padding:12px;">
+            <strong style="color:#334155;">🏢 Department Review: {{ $ex['ambiguous_department_count'] + $ex['unmatched_enrollment_count'] }}</strong>
+            <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">Ambiguous or unmatched department assignments held safely.</p>
         </div>
     </div>
 
