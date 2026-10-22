@@ -250,27 +250,131 @@ final class ReceivePaymentService
                 }
             }
 
-            // 2. ALLOCATE MONTHLY / REGULAR FEES
+            // 2. ALLOCATE REGULAR / MONTHLY / MULTI-ITEM FEES
             if ($monthlyPaymentMinor > 0) {
-                $monthlyQuery = DB::table('invoice_items as ii')
-                    ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
-                    ->where('i.family_id', $familyId)->where('i.campus_id', $campusId)
-                    ->where('i.department_id', $departmentId)->where('i.currency', $currency)
-                    ->where('ii.fee_type_id', '!=', $regFeeTypeId)
-                    ->where('ii.status', 'active')
-                    ->whereRaw('ii.paid_minor < ii.net_minor');
+                $selectedItemIds = array_filter(array_map('intval', (array) ($input['selected_item_ids'] ?? [])));
 
-                // If a specific month is selected, target only that month's obligations
-                if (!empty($input['selected_period'])) {
-                    $periodStart = $input['selected_period'] . '-01';
-                    $periodEnd = Carbon::parse($periodStart)->addMonth()->toDateString();
-                    $monthlyQuery->where('ii.period_start', '>=', $periodStart)
-                                 ->where('ii.period_start', '<', $periodEnd);
+                if (!empty($selectedItemIds)) {
+                    // Fetch specifically selected items
+                    $items = DB::table('invoice_items as ii')
+                        ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+                        ->whereIn('ii.id', $selectedItemIds)
+                        ->select('ii.*', 'i.family_id', 'i.campus_id', 'i.department_id', 'i.currency as invoice_currency', 'i.due_date', 'i.id as parent_invoice_id')
+                        ->lockForUpdate()
+                        ->get();
+
+                    if ($items->count() !== count($selectedItemIds)) {
+                        throw ValidationException::withMessages([
+                            'selected_item_ids' => 'One or more selected fee items could not be found or have been modified.',
+                        ]);
+                    }
+
+                    // Strict validation: Must belong to this family, campus, department, and currency
+                    foreach ($items as $item) {
+                        if ((int) $item->family_id !== $familyId) {
+                            throw ValidationException::withMessages([
+                                'selected_item_ids' => "Selected fee item #{$item->id} does not belong to family #{$familyId}.",
+                            ]);
+                        }
+                        if ((int) $item->campus_id !== $campusId || (int) $item->department_id !== $departmentId) {
+                            throw ValidationException::withMessages([
+                                'selected_item_ids' => "Selected fee item #{$item->id} does not belong to the selected campus and department.",
+                            ]);
+                        }
+                        if (strtoupper($item->invoice_currency) !== $currency || strtoupper($item->currency) !== $currency) {
+                            throw ValidationException::withMessages([
+                                'selected_item_ids' => "Cross-currency allocation is strictly prohibited. Selected fee item #{$item->id} is in {$item->currency}, but payment is in {$currency}.",
+                            ]);
+                        }
+                        if ($item->status !== 'active') {
+                            throw ValidationException::withMessages([
+                                'selected_item_ids' => "Selected fee item #{$item->id} is not active ({$item->status}).",
+                            ]);
+                        }
+                        if ((int) $item->paid_minor >= (int) $item->net_minor) {
+                            throw ValidationException::withMessages([
+                                'selected_item_ids' => "Selected fee item #{$item->id} is already fully paid.",
+                            ]);
+                        }
+                    }
+
+                    // Check total dues on selected items
+                    $totalSelectedDue = $items->sum(fn($it) => max(0, (int) $it->net_minor - (int) $it->paid_minor));
+
+                    // Rule 7 & 8: Check for overpayment / advance credit controls
+                    if ($monthlyPaymentMinor > $totalSelectedDue) {
+                        $excessMinor = $monthlyPaymentMinor - $totalSelectedDue;
+                        $otherUnpaidExists = DB::table('invoice_items as ii')
+                            ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+                            ->where('i.family_id', $familyId)
+                            ->where('i.campus_id', $campusId)
+                            ->where('i.department_id', $departmentId)
+                            ->where('i.currency', $currency)
+                            ->whereNotIn('ii.id', $selectedItemIds)
+                            ->where('ii.status', 'active')
+                            ->whereRaw('ii.paid_minor < ii.net_minor')
+                            ->exists();
+
+                        if ($otherUnpaidExists && empty($input['allow_advance_credit'])) {
+                            throw ValidationException::withMessages([
+                                'monthly_amount' => 'Payment exceeds selected items by ' . Money::format($excessMinor) . " {$currency}, while other unpaid eligible dues remain in this ledger. Select the remaining dues or explicitly confirm Advance Credit.",
+                            ]);
+                        }
+
+                        if (empty($input['allow_advance_credit'])) {
+                            throw ValidationException::withMessages([
+                                'monthly_amount' => 'Payment exceeds selected items by ' . Money::format($excessMinor) . " {$currency}. Explicit confirmation is required to record this overpayment as advance credit.",
+                            ]);
+                        }
+                    }
+
+                    // Sort items chronologically by period_start, then due_date, then id
+                    $monthlyItems = $items->sortBy([
+                        ['period_start', 'asc'],
+                        ['due_date', 'asc'],
+                        ['id', 'asc'],
+                    ])->values();
+                } else {
+                    // Fallback query across all unpaid obligations in ledger
+                    $monthlyQuery = DB::table('invoice_items as ii')
+                        ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+                        ->where('i.family_id', $familyId)->where('i.campus_id', $campusId)
+                        ->where('i.department_id', $departmentId)->where('i.currency', $currency)
+                        ->where('ii.fee_type_id', '!=', $regFeeTypeId)
+                        ->where('ii.status', 'active')
+                        ->whereRaw('ii.paid_minor < ii.net_minor');
+
+                    if (!empty($input['selected_period'])) {
+                        $periodStart = $input['selected_period'] . '-01';
+                        $periodEnd = Carbon::parse($periodStart)->addMonth()->toDateString();
+                        $monthlyQuery->where('ii.period_start', '>=', $periodStart)
+                                     ->where('ii.period_start', '<', $periodEnd);
+                    }
+
+                    $monthlyItems = $monthlyQuery->select('ii.*', 'i.due_date', 'i.id as parent_invoice_id')
+                        ->orderBy('ii.period_start')->orderBy('i.due_date')->orderBy('ii.id')
+                        ->lockForUpdate()->get();
+
+                    $totalDueAll = $monthlyItems->sum(fn($it) => max(0, (int) $it->net_minor - (int) $it->paid_minor));
+                    if ($monthlyPaymentMinor > $totalDueAll && empty($input['allow_advance_credit'])) {
+                        $allUnpaidDuesExist = DB::table('invoice_items as ii')
+                            ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+                            ->where('i.family_id', $familyId)
+                            ->where('i.campus_id', $campusId)
+                            ->where('i.department_id', $departmentId)
+                            ->where('i.currency', $currency)
+                            ->where('ii.status', 'active')
+                            ->whereRaw('ii.paid_minor < ii.net_minor')
+                            ->exists();
+
+                        if ($allUnpaidDuesExist) {
+                            $excessMinor = $monthlyPaymentMinor - $totalDueAll;
+                            throw ValidationException::withMessages([
+                                'monthly_amount' => 'Payment exceeds eligible dues by ' . Money::format($excessMinor) . " {$currency}. Other unpaid dues exist or explicit confirmation is required to record advance credit.",
+                            ]);
+                        }
+                    }
                 }
-
-                $monthlyItems = $monthlyQuery->select('ii.*', 'i.due_date', 'i.id as parent_invoice_id')
-                    ->orderBy('ii.period_start')->orderBy('i.due_date')->orderBy('ii.id')
-                    ->lockForUpdate()->get();
 
                 $monthlyLeft = $monthlyPaymentMinor;
                 foreach ($monthlyItems as $item) {
@@ -340,6 +444,8 @@ final class ReceivePaymentService
                     'unallocated_minor' => $unallocatedMinor,
                     'currency' => $currency,
                     'selected_period' => $input['selected_period'] ?? null,
+                    'selected_item_ids' => $selectedItemIds ?? [],
+                    'affected_invoices' => array_keys($affectedInvoices),
                 ]),
                 'created_at' => now(),
                 'updated_at' => now(),

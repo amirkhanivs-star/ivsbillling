@@ -15,6 +15,7 @@
     $grossTotalVal = $invoiceItems->sum(fn($it) => (int)$it->net_minor);
     $firstStudent = $invoiceItems->first() ?? ($family ? DB::table('students')->where('family_id', $family->id)->first() : null);
     $outstandingItems = $invoiceItems->filter(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor) > 0)->values();
+    $totalAdvanceCreditMinor = ($advanceCredits ?? collect())->sum('unallocated_minor');
 @endphp
 
 <div class="myskool-challan-wrapper">
@@ -24,7 +25,27 @@
         <span>Pending (Due) SAR {{ number_format($totalDuesVal / 100, 2) }}</span>
     </div>
 
-    {{-- LEFT COLUMN: SEARCH, OUTSTANDING TABLE & FEE HISTORY --}}
+    {{-- ADVANCE CREDIT BANNER (If family has unallocated credit balance) --}}
+    @if($totalAdvanceCreditMinor > 0)
+        <div style="grid-column: 1 / -1; background: #ecfdf5; border: 1px solid #10b981; border-radius: 6px; padding: 10px 16px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 18px;">💳</span>
+                <div>
+                    <strong style="color: #065f46; font-size: 13px;">Available Advance Credit Balance: {{ $advanceCredits->first()?->currency ?? 'SAR' }} {{ number_format($totalAdvanceCreditMinor / 100, 2) }}</strong>
+                    <div style="font-size: 11px; color: #047857; margin-top: 2px;">
+                        Held across {{ $advanceCredits->count() }} receipt(s): 
+                        @foreach($advanceCredits as $ac)
+                            <span style="font-family: monospace; font-weight: 600;">{{ $ac->receipt_number }}</span> ({{ $ac->currency }} {{ number_format($ac->unallocated_minor / 100, 2) }}){{ !$loop->last ? ', ' : '' }}
+                        @endforeach
+                        &bull; Will be automatically applied to future invoices upon generation or manual allocation.
+                    </div>
+                </div>
+            </div>
+            <span style="font-size: 11px; background: #10b981; color: #fff; padding: 3px 8px; border-radius: 12px; font-weight: 600;">Credit on Account</span>
+        </div>
+    @endif
+
+    {{-- LEFT COLUMN: SEARCH, OUTSTANDING TABLE & STATEMENT SECTIONS --}}
     <div class="myskool-left-col">
         {{-- TOP CARD: SEARCH + TOOLBAR + OUTSTANDING FEES TABLE --}}
         <div class="myskool-card">
@@ -57,10 +78,13 @@
                 <button type="button" class="btn-ms-purple" onclick="document.getElementById('fee-import-dialog').showModal()" style="margin-left:4px;" title="Import Outstanding or Collection CSV">⇪ Import Fees</button>
             </form>
 
-            {{-- CREATE FEE PANEL (Matching Screenshot 3) --}}
+            {{-- CREATE FEE PANEL (Enhanced with All 8 Fee Types, Rates & Live Preview) --}}
             <div id="create-fee-panel" class="create-fee-panel" style="display: none;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                    <h3 style="margin: 0; font-size: 15px; color: #5e5873; font-weight: 600;">Create Fee</h3>
+                    <div>
+                        <h3 style="margin: 0; font-size: 15px; color: #5e5873; font-weight: 600;">Create Fee Obligation</h3>
+                        <div style="font-size: 11px; color: #82868b; margin-top: 2px;">Generate approved monthly or one-time fee obligations with strict class catalog rates.</div>
+                    </div>
                     <button type="button" class="btn-ms-icon" style="color: #b9b9c3;" title="Settings">⚙</button>
                 </div>
 
@@ -76,13 +100,14 @@
                         @csrf
                         <input type="hidden" name="family_id" value="{{ $family->id }}">
 
+                        {{-- Student Selector --}}
                         @if(isset($familyStudents) && $familyStudents->count() > 1)
                         <div style="margin-bottom: 14px;">
                             <div style="font-size: 11px; color: #b9b9c3; font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Student(s)</div>
                             <div class="ms-chips-container" id="student-selector-chips">
                                 <button type="button" class="ms-chip active" data-student-id="all">All Students ({{ $familyStudents->count() }})</button>
                                 @foreach($familyStudents as $fst)
-                                    <button type="button" class="ms-chip" data-student-id="{{ $fst->id }}">{{ $fst->name }} ({{ $fst->grade_label ?: 'FS 1' }})</button>
+                                    <button type="button" class="ms-chip" data-student-id="{{ $fst->id }}" data-grade="{{ $fst->grade_label }}" data-currency="{{ $fst->currency }}" data-dept="{{ $fst->department_id }}">{{ $fst->name }} ({{ $fst->grade_label ?: 'FS 1' }})</button>
                                 @endforeach
                             </div>
                             <div id="hidden-student-inputs">
@@ -92,22 +117,28 @@
                             </div>
                         </div>
                         @elseif(isset($familyStudents) && $familyStudents->isNotEmpty())
-                            <input type="hidden" name="student_ids[]" value="{{ $familyStudents->first()->id }}">
+                            @php $singleStudent = $familyStudents->first(); @endphp
+                            <input type="hidden" name="student_ids[]" value="{{ $singleStudent->id }}">
+                            <div style="margin-bottom: 10px; font-size: 12px; color: #5e5873;">
+                                Student: <strong>{{ $singleStudent->name }}</strong> (GR: {{ $singleStudent->gr_number }}, Class: <strong>{{ $singleStudent->grade_label }}</strong>, Currency: <strong>{{ $singleStudent->currency }}</strong>)
+                            </div>
                         @endif
 
+                        {{-- All 8 Fee Types Selector --}}
                         <div style="margin-bottom: 16px;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                                <span style="font-size: 11px; color: #b9b9c3; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Select Fee Type</span>
-                                <span id="toggle-more-fee-types" style="font-size: 11px; color: #7367f0; cursor: pointer; font-weight: 500;">Show More</span>
+                                <span style="font-size: 11px; color: #b9b9c3; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Select Fee Type(s)</span>
+                                <span id="toggle-more-fee-types" style="font-size: 11px; color: #7367f0; cursor: pointer; font-weight: 500;">Show All (8)</span>
                             </div>
                             <div class="ms-chips-container" id="fee-types-selector-chips">
                                 @php
                                     $typesList = isset($feeTypes) ? $feeTypes : DB::table('fee_types')->orderBy('id')->get();
                                 @endphp
                                 @foreach($typesList as $idx => $ft)
-                                    <button type="button" class="ms-chip {{ $ft->code === 'monthly' ? 'active' : '' }} {{ $idx >= 7 ? 'cf-extra-type' : '' }}" 
-                                            data-fee-type-id="{{ $ft->id }}" 
-                                            style="{{ $idx >= 7 ? 'display: none;' : '' }}">
+                                    <button type="button" class="ms-chip {{ $ft->code === 'monthly' ? 'active' : '' }} {{ $idx >= 4 ? 'cf-extra-type' : '' }}" 
+                                            data-fee-type-id="{{ $ft->id }}"
+                                            data-code="{{ $ft->code }}"
+                                            style="{{ $idx >= 4 ? 'display: none;' : '' }}">
                                         {{ $ft->name }}
                                     </button>
                                 @endforeach
@@ -117,9 +148,10 @@
                             </div>
                         </div>
 
-                        <div style="display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; margin-bottom: 20px;">
+                        {{-- Month and Year Selection --}}
+                        <div style="display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; margin-bottom: 16px;">
                             <div style="flex: 1;">
-                                <div style="font-size: 11px; color: #b9b9c3; font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Select Months</div>
+                                <div style="font-size: 11px; color: #b9b9c3; font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Billing Month(s)</div>
                                 <div class="ms-chips-container" id="months-selector-chips">
                                     @php
                                         $currentMonth = (int)date('n');
@@ -135,13 +167,37 @@
                                 </div>
                             </div>
                             <div style="width: 140px;">
-                                <div style="font-size: 11px; color: #b9b9c3; font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Select Year *</div>
+                                <div style="font-size: 11px; color: #b9b9c3; font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Billing Year *</div>
                                 <select name="year" id="cf-year-select" class="myskool-input" style="height: 32px; background: #fff; font-size: 12px;">
                                     @for($y = (int)date('Y') - 1; $y <= (int)date('Y') + 2; $y++)
                                         <option value="{{ $y }}" @selected($y === (int)date('Y'))>{{ $y }}</option>
                                     @endfor
                                 </select>
                             </div>
+                        </div>
+
+                        {{-- LIVE CHARGES PREVIEW TABLE (Before Saving) --}}
+                        <div id="cf-charges-preview-card" style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; margin-bottom: 16px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                <strong style="font-size: 12px; color: #475569;">Charges Preview (Calculated from Approved Catalog Rates)</strong>
+                                <span id="cf-preview-count" style="font-size: 11px; color: #64748b;">1 charge planned</span>
+                            </div>
+                            <div id="cf-preview-table-container" style="max-height: 140px; overflow-y: auto;">
+                                <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
+                                    <thead>
+                                        <tr style="border-bottom: 1px solid #cbd5e1; text-align: left; color: #64748b;">
+                                            <th style="padding: 4px 6px;">Student</th>
+                                            <th style="padding: 4px 6px;">Fee Type</th>
+                                            <th style="padding: 4px 6px;">Period</th>
+                                            <th style="padding: 4px 6px; text-align: right;">Rate</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="cf-preview-tbody">
+                                        <!-- Dynamically generated rows -->
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div id="cf-preview-warning" style="display: none; margin-top: 8px; padding: 6px 10px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 4px; color: #dc2626; font-size: 11px;"></div>
                         </div>
 
                         <div style="display: flex; justify-content: flex-end; gap: 10px; padding-top: 10px; border-top: 1px solid #f0f0f0;">
@@ -152,7 +208,7 @@
                 @endif
             </div>
 
-            {{-- TOOLBAR BUTTONS ROW (Matching Image 1) --}}
+            {{-- TOOLBAR BUTTONS ROW --}}
             <div class="myskool-toolbar">
                 <div class="myskool-toolbar-left">
                     <button type="button" class="btn-ms-purple" style="min-width: 60px; height: 28px; font-size: 11px; padding: 0 12px;" onclick="alertNotice('Hold feature toggled')">Hold</button>
@@ -177,11 +233,14 @@
                 </div>
             </div>
 
-            {{-- OUTSTANDING FEES TABLE (Matching Image 1) --}}
+            {{-- OUTSTANDING FEES TABLE (Multi-Item Selection with Checkboxes) --}}
             <div style="overflow-x: auto;">
                 <table class="myskool-table" id="myskoolOutstandingTable">
                     <thead>
                         <tr>
+                            <th style="width: 38px; text-align: center;">
+                                <input type="checkbox" id="chk_select_all" title="Select / Deselect all outstanding items" style="cursor: pointer;">
+                            </th>
                             <th style="width: 55px;">GR</th>
                             <th style="min-width: 120px;">NAME</th>
                             <th style="min-width: 110px;">CLASS</th>
@@ -206,9 +265,27 @@
                                 data-period="{{ $periodKey }}" 
                                 data-period-label="{{ $periodLabel }}" 
                                 data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
+                                data-currency="{{ $item->currency }}"
+                                data-student="{{ $item->student_name }}"
+                                data-gr="{{ $item->gr_number }}"
+                                data-type="{{ $item->description ?: 'Monthly Fee' }}"
+                                data-dept="{{ $item->department_name ?? '' }}"
                                 data-discount="{{ number_format($item->discount_minor / 100, 2, '.', '') }}"
                                 data-discount-reason="{{ $item->discount_reason ?? '' }}"
                                 style="{{ $isSettled ? 'opacity: 0.6; background: #fafafc;' : '' }}">
+                                <td style="text-align: center;">
+                                    <input type="checkbox" class="js-item-checkbox" value="{{ $item->id }}" 
+                                           data-item-id="{{ $item->id }}"
+                                           data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
+                                           data-currency="{{ $item->currency }}"
+                                           data-period="{{ $periodKey }}"
+                                           data-period-label="{{ $periodLabel }}"
+                                           data-student="{{ $item->student_name }}"
+                                           data-gr="{{ $item->gr_number }}"
+                                           data-type="{{ $item->description ?: 'Monthly Fee' }}"
+                                           {{ $isSettled ? 'disabled' : '' }}
+                                           style="cursor: pointer;">
+                                </td>
                                 <td><b>{{ $item->gr_number }}</b></td>
                                 <td>
                                     <span style="color: var(--ms-purple); font-weight: 500;">{{ $item->student_name }}</span>
@@ -296,7 +373,7 @@
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="7" style="text-align: center; padding: 25px; color: #b9b9c3;">
+                                <td colspan="8" style="text-align: center; padding: 25px; color: #b9b9c3;">
                                     @if($family)
                                         No outstanding fee obligations for this family.
                                     @else
@@ -310,9 +387,52 @@
             </div>
         </div>
 
+        {{-- FUTURE SCHEDULED FEES CARD (Task 3: Visible as scheduled charges, not yet debt) --}}
+        @if(($studentFeePlans ?? collect())->isNotEmpty())
+            <div class="myskool-card" style="margin-top: 16px; border-left: 4px solid #3b82f6;">
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #ebe9f1; background: #eff6ff;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <strong style="color: #1e40af; font-size: 13px;">📅 Future Scheduled Fees (Active Student Fee Plans)</strong>
+                        <span style="font-size: 10px; background: #dbeafe; color: #1e40af; padding: 2px 8px; border-radius: 12px; font-weight: 700;">Scheduled Plan</span>
+                    </div>
+                    <span style="font-size: 11px; color: #3b82f6;">Charges will become debt once monthly billing runs</span>
+                </div>
+                <div style="overflow-x: auto; padding: 10px 14px;">
+                    <table class="myskool-table" style="font-size: 11px;">
+                        <thead>
+                            <tr style="background: #f8fafc;">
+                                <th>GR</th>
+                                <th>STUDENT</th>
+                                <th>CLASS</th>
+                                <th>FEE TYPE</th>
+                                <th>APPROVED RATE</th>
+                                <th>DISCOUNT</th>
+                                <th>FREQUENCY</th>
+                                <th>STATUS</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach($studentFeePlans as $plan)
+                                <tr>
+                                    <td><b>{{ $plan->gr_number }}</b></td>
+                                    <td><span style="color: var(--ms-purple); font-weight: 500;">{{ $plan->student_name }}</span></td>
+                                    <td>{{ $plan->grade_label }}</td>
+                                    <td><strong>{{ $plan->fee_type_name }}</strong></td>
+                                    <td><b>{{ $plan->currency }} {{ number_format($plan->amount_minor / 100, 2) }}</b></td>
+                                    <td>{{ $plan->discount_kind ? $plan->discount_kind . ' (' . $plan->discount_value . ')' : 'None' }}</td>
+                                    <td><span class="ms-pill-lavender">{{ ucfirst($plan->frequency ?? 'Monthly') }}</span></td>
+                                    <td><span style="color: #2563eb; font-weight: 600; font-size: 10px;">Scheduled (Not Invoiced)</span></td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        @endif
+
         {{-- BOTTOM CARD: NEW PORTAL PAYMENTS & HISTORICAL MYSKOOL ARCHIVE --}}
         @if($family)
-            <div class="myskool-card">
+            <div class="myskool-card" style="margin-top: 16px;">
                 <div class="myskool-history-header" id="historyToggleBtn">
                     <div class="myskool-history-title">
                         <span>New Portal Payments (Receipts)</span>
@@ -443,7 +563,7 @@
         @endif
     </div>
 
-    {{-- RIGHT COLUMN: STUDENT PROFILE & RECEIVE PANEL (Matching Image 1) --}}
+    {{-- RIGHT COLUMN: STUDENT PROFILE & RECEIVE PANEL --}}
     <div class="myskool-right-col">
         <div class="myskool-card">
             {{-- PROFILE HEADER --}}
@@ -472,12 +592,21 @@
                 </div>
             </div>
 
-            {{-- RECEIVING FORM --}}
+            {{-- RECEIVING FORM (With Multi-Item IDs, Live Allocation Breakdown & Advance Credit Toggle) --}}
             <form method="post" action="/challan/receive" id="myskoolReceiveForm" class="myskool-receive-form">
                 @csrf
                 <input type="hidden" name="family_id" value="{{ $family?->id }}">
                 <input type="hidden" name="idempotency_key" value="{{ (string) \Illuminate\Support\Str::uuid() }}">
                 <input type="hidden" name="selected_period" id="selected_period" value="{{ $defaultSelectedPeriod }}">
+                <div id="hidden-selected-items-inputs"></div>
+
+                {{-- Selected Items Summary Banner --}}
+                <div id="selected_items_summary" style="display: none; margin-bottom: 12px; font-size: 11px; padding: 8px 12px; background: #f3f0ff; border-radius: 6px; border: 1px solid #dcd7fa; color: var(--ms-purple);">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span id="selected_items_count" style="font-weight: 700;">0 items selected</span>
+                        <span id="selected_items_sum" style="font-weight: 700; color: #5b21b6;">SAR 0.00</span>
+                    </div>
+                </div>
 
                 {{-- Total Dues --}}
                 <div class="myskool-form-group">
@@ -511,6 +640,27 @@
                     <input class="myskool-input disabled" id="disp_remaining_balance" readonly value="{{ number_format($totalDuesVal / 100, 0, '.', '') }}">
                 </div>
 
+                {{-- LIVE ALLOCATION BREAKDOWN CARD (Requirement 9) --}}
+                <div id="allocation_breakdown_card" style="display: none; border: 1px solid #dcd7fa; border-radius: 6px; padding: 10px; background: #faf9ff; margin-bottom: 12px; font-size: 11px;">
+                    <div style="font-weight: 700; color: var(--ms-purple); margin-bottom: 6px; display: flex; justify-content: space-between;">
+                        <span>Allocation Breakdown</span>
+                        <span id="breakdown_currency_badge" style="font-size: 10px; background: #e0e7ff; color: #4338ca; padding: 1px 6px; border-radius: 10px;">SAR</span>
+                    </div>
+                    <div id="allocation_breakdown_list" style="display: flex; flex-direction: column; gap: 4px;"></div>
+                </div>
+
+                {{-- EXPLICIT ADVANCE CREDIT CONFIRMATION (Requirement 8) --}}
+                <div id="advance_credit_box" style="display: none; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 10px; margin-bottom: 12px; font-size: 11px;">
+                    <div style="font-weight: 700; color: #92400e; margin-bottom: 4px;">⚠️ Advance Credit Confirmation</div>
+                    <p style="margin: 0 0 6px 0; color: #78350f;" id="advance_credit_text">
+                        Payment exceeds selected dues. Overpayment will be recorded as advance credit.
+                    </p>
+                    <label style="display: flex; align-items: flex-start; gap: 6px; cursor: pointer; color: #92400e; font-size: 11px;">
+                        <input type="checkbox" name="allow_advance_credit" id="chk_allow_advance_credit" value="1" style="margin-top: 2px;">
+                        <span><strong>I explicitly confirm</strong> recording this overpayment as advance credit for future billing.</span>
+                    </label>
+                </div>
+
                 {{-- Collection Account --}}
                 <div class="myskool-form-group">
                     <label>
@@ -540,7 +690,7 @@
                     <textarea class="myskool-input" id="receive_note" name="note" rows="3" placeholder="Enter note" style="height: 65px; resize: vertical;"></textarea>
                 </div>
 
-                {{-- Registration Fee Receiving (Preserving Accounting Logic) --}}
+                {{-- Registration Fee Receiving --}}
                 @if(!empty($registrationStatus['has_obligation']) && empty($registrationStatus['is_fully_paid']) && empty($registrationStatus['is_exempted']))
                     <div style="background: #f8f7ff; border: 1px solid #dcd7fa; border-radius: 4px; padding: 6px 8px; margin-top: 4px;">
                         <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; margin: 0; cursor: pointer; color: var(--ms-purple);">
@@ -552,7 +702,7 @@
                 @endif
 
                 {{-- Receive Button --}}
-                <button type="submit" class="myskool-btn-receive" @disabled(!$family)>
+                <button type="submit" class="myskool-btn-receive" id="btn-submit-receive" @disabled(!$family)>
                     Receive
                 </button>
             </form>
@@ -560,7 +710,7 @@
     </div>
 </div>
 
-{{-- EXACT MYSKOOL DISCOUNT DRAWER (Matching Image 2 + Reason & Removal) --}}
+{{-- EXACT MYSKOOL DISCOUNT DRAWER --}}
 <div class="myskool-drawer-overlay" id="myskoolDiscountDrawer" hidden>
     <div class="myskool-drawer">
         <div class="myskool-drawer-header">
@@ -603,7 +753,7 @@
                 <input class="myskool-input disabled" id="drawer_net_balance" readonly value="300">
             </div>
 
-            {{-- Extra Installment Split block (hidden by default) --}}
+            {{-- Extra Installment Split block --}}
             <div class="myskool-drawer-field" id="drawer_installment_block" hidden>
                 <label>Split into Installments</label>
                 <div style="display: flex; gap: 6px; margin-bottom: 8px;">
@@ -635,7 +785,7 @@
                 <textarea class="myskool-input" id="drawer_reason" name="reason" rows="3" placeholder="Enter note or reason" style="height: 70px; resize: vertical;" required></textarea>
             </div>
 
-            {{-- 5. Save Button (Solid Green, matching Image 2) --}}
+            {{-- 5. Save Button --}}
             <button type="submit" class="btn-ms-save" id="drawerSaveBtn">
                 Save
             </button>
@@ -644,6 +794,14 @@
 </div>
 
 <div id="msToastContainer"></div>
+
+{{-- Pass Server Catalog Data to JS for Client-Side Rate Calculations --}}
+<script>
+window.IQRA_CATALOG_RATES = @json($catalogRates ?? []);
+window.IQRA_FAMILY_STUDENTS = @json($familyStudents ?? []);
+window.IQRA_FEE_TYPES = @json($feeTypes ?? []);
+window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
+</script>
 
 <script>
 (() => {
@@ -662,59 +820,235 @@
     });
   }
 
-  // Receive Form Live Balances
+  // Receive Form & Multi-Item Allocation Engine
   const totalDues = {{ $totalDuesVal / 100 }};
   const inputMonthly = document.getElementById('input_monthly_amount');
   const dispRemaining = document.getElementById('disp_remaining_balance');
   const regToggle = document.getElementById('reg_fee_toggle');
   const regAmount = document.getElementById('reg_fee_amount');
   const selectedPeriodInput = document.getElementById('selected_period');
+  const hiddenSelectedItems = document.getElementById('hidden-selected-items-inputs');
+  const selectedSummary = document.getElementById('selected_items_summary');
+  const selectedCount = document.getElementById('selected_items_count');
+  const selectedSum = document.getElementById('selected_items_sum');
+  const breakdownCard = document.getElementById('allocation_breakdown_card');
+  const breakdownList = document.getElementById('allocation_breakdown_list');
+  const advanceCreditBox = document.getElementById('advance_credit_box');
+  const advanceCreditText = document.getElementById('advance_credit_text');
+  const chkAllowAdvanceCredit = document.getElementById('chk_allow_advance_credit');
+  const btnSubmitReceive = document.getElementById('btn-submit-receive');
+  const chkSelectAll = document.getElementById('chk_select_all');
 
-  function updateReceiveBalances() {
+  const itemCheckboxes = Array.from(document.querySelectorAll('.js-item-checkbox'));
+  const feeRows = Array.from(document.querySelectorAll('.js-fee-row'));
+
+  function getSelectedItems() {
+    return itemCheckboxes.filter(cb => cb.checked).map(cb => {
+      const row = cb.closest('tr');
+      return {
+        id: cb.value,
+        balance: parseFloat(cb.dataset.balance) || 0,
+        currency: cb.dataset.currency,
+        period: cb.dataset.period,
+        periodLabel: cb.dataset.periodLabel,
+        student: cb.dataset.student,
+        gr: cb.dataset.gr,
+        type: cb.dataset.type,
+      };
+    });
+  }
+
+  function updateHiddenInputs(selected) {
+    if (!hiddenSelectedItems) return;
+    hiddenSelectedItems.innerHTML = '';
+    selected.forEach(item => {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'selected_item_ids[]';
+      input.value = item.id;
+      hiddenSelectedItems.appendChild(input);
+    });
+  }
+
+  function updateAllocationBreakdown() {
+    const selected = getSelectedItems();
+    updateHiddenInputs(selected);
+
     const monthlyVal = Number(inputMonthly?.value) || 0;
     const regVal = (regToggle && regToggle.checked && regAmount) ? (Number(regAmount.value) || 0) : 0;
     const paidTotal = monthlyVal + regVal;
+
     if (dispRemaining) {
       dispRemaining.value = Math.max(0, totalDues - paidTotal).toFixed(0);
     }
+
+    if (selected.length === 0) {
+      if (selectedSummary) selectedSummary.style.display = 'none';
+      if (breakdownCard) breakdownCard.style.display = 'none';
+      if (advanceCreditBox) advanceCreditBox.style.display = 'none';
+      return;
+    }
+
+    // Show Selected Summary
+    const totalSelectedBal = selected.reduce((acc, it) => acc + it.balance, 0);
+    const curr = selected[0]?.currency || 'SAR';
+    if (selectedSummary) {
+      selectedSummary.style.display = 'block';
+      selectedCount.textContent = `${selected.length} item(s) selected`;
+      selectedSum.textContent = `${curr} ${totalSelectedBal.toFixed(2)}`;
+    }
+
+    // Compute live allocation per item (chronological order)
+    if (breakdownCard && breakdownList) {
+      breakdownCard.style.display = 'block';
+      breakdownList.innerHTML = '';
+
+      let availablePayment = monthlyVal;
+      let totalAllocated = 0;
+
+      selected.forEach(item => {
+        const itemDue = item.balance;
+        const allocated = Math.min(availablePayment, itemDue);
+        availablePayment -= allocated;
+        totalAllocated += allocated;
+
+        const isFull = (allocated >= itemDue - 0.001);
+        const isPartial = (allocated > 0 && !isFull);
+        const isNone = (allocated === 0);
+
+        const rowDiv = document.createElement('div');
+        rowDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 3px 0; border-bottom: 1px dashed #e2e8f0;';
+        
+        let statusBadge = isFull 
+          ? `<span style="color: #15803d; font-weight: 600;">Fully Paid (${curr} ${allocated.toFixed(2)})</span>`
+          : (isPartial 
+              ? `<span style="color: #b45309; font-weight: 600;">Partial (${curr} ${allocated.toFixed(2)} / ${itemDue.toFixed(2)})</span>` 
+              : `<span style="color: #94a3b8;">Unpaid (0.00 / ${itemDue.toFixed(2)})</span>`);
+
+        rowDiv.innerHTML = `
+          <div>
+            <strong>${item.periodLabel}</strong> &middot; ${item.type}
+            <div style="font-size: 10px; color: #64748b;">${item.student} (GR: ${item.gr})</div>
+          </div>
+          <div style="text-align: right;">${statusBadge}</div>
+        `;
+        breakdownList.appendChild(rowDiv);
+      });
+
+      // Check for excess payment (Advance Credit)
+      if (availablePayment > 0.009) {
+        if (advanceCreditBox) {
+          advanceCreditBox.style.display = 'block';
+          if (advanceCreditText) {
+            advanceCreditText.innerHTML = `Receiving amount exceeds selected dues by <strong>${curr} ${availablePayment.toFixed(2)}</strong>. This excess will be recorded as advance credit for future billing.`;
+          }
+        }
+      } else {
+        if (advanceCreditBox) advanceCreditBox.style.display = 'none';
+      }
+    }
   }
 
-  if (inputMonthly) inputMonthly.addEventListener('input', updateReceiveBalances);
-  if (regAmount) regAmount.addEventListener('input', updateReceiveBalances);
-  if (regToggle) regToggle.addEventListener('change', updateReceiveBalances);
+  // Checkbox interactions with cross-currency prevention
+  itemCheckboxes.forEach(cb => {
+    cb.addEventListener('change', () => {
+      const selected = getSelectedItems();
+      if (selected.length > 1) {
+        const firstCurr = selected[0].currency;
+        const mismatched = selected.find(it => it.currency !== firstCurr);
+        if (mismatched) {
+          alertNotice(`Cross-currency allocation is not allowed. Items in ${mismatched.currency} cannot be combined with ${firstCurr}.`);
+          cb.checked = false;
+          return;
+        }
+      }
 
-  // Table Entry Picking (MySkool Style with Gray Selection Line)
-  const feeRows = Array.from(document.querySelectorAll('.js-fee-row'));
-  
+      // Sync row class
+      const row = cb.closest('tr');
+      if (row) {
+        if (cb.checked) row.classList.add('myskool-row-selected');
+        else row.classList.remove('myskool-row-selected');
+      }
+
+      // Auto-update receiving amount to selected sum if amount is empty or matches previous sum
+      const curSelected = getSelectedItems();
+      const sum = curSelected.reduce((acc, it) => acc + it.balance, 0);
+      if (inputMonthly) {
+        inputMonthly.value = sum > 0 ? sum.toFixed(2) : '';
+      }
+      if (selectedPeriodInput && curSelected.length > 0) {
+        selectedPeriodInput.value = curSelected[0].period;
+      }
+
+      updateAllocationBreakdown();
+    });
+  });
+
+  // Select All toggle
+  if (chkSelectAll) {
+    chkSelectAll.addEventListener('change', () => {
+      const isChecked = chkSelectAll.checked;
+      let firstCurr = null;
+
+      itemCheckboxes.forEach(cb => {
+        if (cb.disabled) return;
+        if (isChecked) {
+          if (!firstCurr) firstCurr = cb.dataset.currency;
+          if (cb.dataset.currency === firstCurr) {
+            cb.checked = true;
+            cb.closest('tr')?.classList.add('myskool-row-selected');
+          }
+        } else {
+          cb.checked = false;
+          cb.closest('tr')?.classList.remove('myskool-row-selected');
+        }
+      });
+
+      const curSelected = getSelectedItems();
+      const sum = curSelected.reduce((acc, it) => acc + it.balance, 0);
+      if (inputMonthly) inputMonthly.value = sum > 0 ? sum.toFixed(2) : '';
+      updateAllocationBreakdown();
+    });
+  }
+
+  // Row click selection
   feeRows.forEach(row => {
     row.addEventListener('click', e => {
-      // Don't trigger row selection if clicking an action button or link
       if (e.target.closest('.action-trigger') || e.target.closest('button') || e.target.closest('a') || e.target.closest('input')) {
         return;
       }
       if (row.classList.contains('is-settled')) return;
 
-      row.classList.toggle('myskool-row-selected');
-      
-      const selectedRows = feeRows.filter(r => r.classList.contains('myskool-row-selected'));
-      let selectedSum = 0;
-      let firstPeriod = '';
-      
-      selectedRows.forEach(r => {
-        selectedSum += Number(r.dataset.balance) || 0;
-        if (!firstPeriod && r.dataset.period) firstPeriod = r.dataset.period;
-      });
-
-      if (selectedRows.length > 0) {
-        if (inputMonthly) inputMonthly.value = selectedSum.toFixed(2);
-        if (selectedPeriodInput) selectedPeriodInput.value = firstPeriod;
-      } else {
-        if (inputMonthly) inputMonthly.value = '';
-        if (selectedPeriodInput) selectedPeriodInput.value = '';
+      const cb = row.querySelector('.js-item-checkbox');
+      if (cb && !cb.disabled) {
+        cb.checked = !cb.checked;
+        cb.dispatchEvent(new Event('change'));
       }
-      updateReceiveBalances();
     });
   });
+
+  if (inputMonthly) inputMonthly.addEventListener('input', updateAllocationBreakdown);
+  if (regAmount) regAmount.addEventListener('input', updateAllocationBreakdown);
+  if (regToggle) regToggle.addEventListener('change', updateAllocationBreakdown);
+
+  // Form submit confirmation check for advance credit
+  const receiveForm = document.getElementById('myskoolReceiveForm');
+  if (receiveForm) {
+    receiveForm.addEventListener('submit', e => {
+      const selected = getSelectedItems();
+      const totalSelectedDue = selected.reduce((acc, it) => acc + it.balance, 0);
+      const monthlyVal = Number(inputMonthly?.value) || 0;
+
+      if (selected.length > 0 && monthlyVal > totalSelectedDue + 0.009) {
+        if (chkAllowAdvanceCredit && !chkAllowAdvanceCredit.checked) {
+          e.preventDefault();
+          alertNotice('Explicit confirmation is required before creating Advance Credit. Please check the advance credit confirmation checkbox.');
+          chkAllowAdvanceCredit.focus();
+          return false;
+        }
+      }
+    });
+  }
 
   // Fee History Accordion Toggle
   const historyToggle = document.getElementById('historyToggleBtn');
@@ -729,7 +1063,7 @@
     });
   }
 
-  // Drawer Elements (Matching Image 2 + Extended with Discount Reason & Removal)
+  // Drawer Elements (Discount Drawer)
   const drawerOverlay = document.getElementById('myskoolDiscountDrawer');
   const drawerHeading = document.getElementById('drawerHeading');
   const drawerCloseBtn = document.getElementById('drawerCloseBtn');
@@ -748,238 +1082,104 @@
   const drawerExistReason = document.getElementById('drawer_existing_discount_reason');
   const drawerRemoveBtn = document.getElementById('drawerRemoveDiscBtn');
 
-  const discountBlock = document.getElementById('drawer_discount_block');
-  const netBlock = document.getElementById('drawer_net_block');
-  const instBlock = document.getElementById('drawer_installment_block');
+  let currentActiveAction = 'discount';
+  let originalItemBalance = 0;
 
-  let activeItemBalance = 0;
-  let activeCurrency = 'SAR';
-  let activeRowEl = null;
-
-  function openActionDrawer(btn) {
-    if (!drawerOverlay) return;
-    const action = btn.dataset.action;
-    const balance = Number(btn.dataset.balance) || 0;
-    const existingDiscount = Number(btn.dataset.discount) || 0;
-    const existingReason = btn.dataset.discountReason || '';
-    activeCurrency = btn.dataset.currency || 'SAR';
-
-    activeItemBalance = balance;
-    activeRowEl = btn.closest('tr');
-
-    drawerItemId.value = btn.dataset.id || '';
-    drawerPaymentId.value = btn.dataset.id || '';
-    drawerCurBal.value = activeCurrency + ' ' + balance.toFixed(0);
-    drawerReason.value = '';
-    if (drawerReasonCat) drawerReasonCat.value = '';
-
-    // Reset visibility
-    discountBlock.hidden = false;
-    netBlock.hidden = false;
-    instBlock.hidden = true;
-    if (drawerReasonCatBlock) drawerReasonCatBlock.hidden = false;
-    if (drawerExistBox) drawerExistBox.style.display = 'none';
-    drawerSaveBtn.style.background = 'var(--ms-green)';
-    drawerSaveBtn.textContent = 'Save';
-
-    if (action === 'discount') {
-      drawerHeading.textContent = 'Discount';
-      drawerForm.action = '/challan/discount';
-      drawerDiscInput.required = true;
-      drawerDiscInput.max = balance + existingDiscount;
-      drawerReason.placeholder = 'Enter discount reason or select preset';
-
-      if (existingDiscount > 0) {
-        if (drawerExistBox) drawerExistBox.style.display = 'block';
-        if (drawerExistVal) drawerExistVal.textContent = activeCurrency + ' ' + existingDiscount.toFixed(2);
-        if (drawerExistReason) drawerExistReason.textContent = existingReason ? ('Reason: ' + existingReason) : '';
-        drawerDiscInput.value = existingDiscount.toFixed(0);
-        drawerReason.value = existingReason;
-      } else {
-        drawerDiscInput.value = '';
-      }
-      drawerNetBal.value = activeCurrency + ' ' + balance.toFixed(0);
-    } else if (action === 'installment') {
-      drawerHeading.textContent = 'Installment Plan';
-      drawerForm.action = '/challan/installment';
-      discountBlock.hidden = true;
-      netBlock.hidden = true;
-      instBlock.hidden = false;
-      if (drawerReasonCatBlock) drawerReasonCatBlock.hidden = true;
-      buildInstallments(2);
-    } else if (action === 'exempt') {
-      drawerHeading.textContent = 'Exempt Fee';
-      drawerForm.action = '/challan/exempt';
-      drawerDiscInput.value = balance.toFixed(0);
-      drawerNetBal.value = activeCurrency + ' 0';
-      if (drawerReasonCatBlock) drawerReasonCatBlock.hidden = true;
-      drawerReason.placeholder = 'Enter exemption justification';
-    } else if (action === 'void') {
-      drawerHeading.textContent = 'Void Fee';
-      drawerForm.action = '/challan/void';
-      discountBlock.hidden = true;
-      netBlock.hidden = true;
-      if (drawerReasonCatBlock) drawerReasonCatBlock.hidden = true;
-      drawerSaveBtn.style.background = 'var(--ms-red)';
-      drawerSaveBtn.textContent = 'Confirm Void';
-      drawerReason.placeholder = 'Enter reason to void obligation';
-    } else if (action === 'reverse') {
-      drawerHeading.textContent = 'Reverse Receipt ' + (btn.dataset.slip || '');
-      drawerForm.action = '/challan/reverse-receipt';
-      discountBlock.hidden = true;
-      netBlock.hidden = true;
-      if (drawerReasonCatBlock) drawerReasonCatBlock.hidden = true;
-      drawerSaveBtn.style.background = 'var(--ms-red)';
-      drawerSaveBtn.textContent = 'Confirm Reversal';
-      drawerReason.placeholder = 'Enter reversal reason';
-    }
-
-    drawerOverlay.hidden = false;
+  function closeDrawer() {
+    if (drawerOverlay) drawerOverlay.hidden = true;
+    if (drawerForm) drawerForm.reset();
   }
 
-  document.querySelectorAll('.action-trigger').forEach(b => b.addEventListener('click', () => openActionDrawer(b)));
-  if (drawerCloseBtn) drawerCloseBtn.addEventListener('click', () => { drawerOverlay.hidden = true; });
-  if (drawerOverlay) drawerOverlay.addEventListener('click', e => { if (e.target === drawerOverlay) drawerOverlay.hidden = true; });
-
-  // Preset discount reason select populates note
-  if (drawerReasonCat && drawerReason) {
-    drawerReasonCat.addEventListener('change', () => {
-      if (drawerReasonCat.value) {
-        drawerReason.value = drawerReasonCat.value;
-      }
+  if (drawerCloseBtn) drawerCloseBtn.addEventListener('click', closeDrawer);
+  if (drawerOverlay) {
+    drawerOverlay.addEventListener('click', e => {
+      if (e.target === drawerOverlay) closeDrawer();
     });
   }
 
-  // Live Net Balance calculation in Discount Drawer
-  if (drawerDiscInput) {
-    drawerDiscInput.addEventListener('input', () => {
-      const discVal = Number(drawerDiscInput.value) || 0;
-      const net = Math.max(0, activeItemBalance - discVal);
-      drawerNetBal.value = activeCurrency + ' ' + net.toFixed(0);
-    });
+  function updateDrawerNetBalance() {
+    const disc = parseFloat(drawerDiscInput?.value || 0);
+    const net = Math.max(0, originalItemBalance - disc);
+    if (drawerNetBal) drawerNetBal.value = net.toFixed(2);
   }
 
-  // Remove discount action handler
-  if (drawerRemoveBtn) {
-    drawerRemoveBtn.addEventListener('click', async () => {
-      if (!confirm('Are you sure you want to remove the discount on this fee obligation?')) return;
-      drawerRemoveBtn.disabled = true;
-      drawerRemoveBtn.textContent = 'Removing...';
-      try {
-        const formData = new FormData();
-        formData.append('_token', '{{ csrf_token() }}');
-        formData.append('invoice_item_id', drawerItemId.value);
-        formData.append('remove_discount', '1');
-        formData.append('reason', drawerReason.value || 'Discount removed');
+  if (drawerDiscInput) drawerDiscInput.addEventListener('input', updateDrawerNetBalance);
 
-        const response = await fetch('/challan/discount', {
-          method: 'POST',
-          body: formData,
-          headers: {
-            'X-Requested-With': 'XMLHttpRequest',
-            'Accept': 'application/json'
+  // Discount Action Triggers
+  document.querySelectorAll('.action-trigger').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const action = btn.dataset.action;
+      const itemId = btn.dataset.id;
+      const balance = parseFloat(btn.dataset.balance || 0);
+      const currency = btn.dataset.currency || 'SAR';
+      const existingDiscount = parseFloat(btn.dataset.discount || 0);
+      const existingReason = btn.dataset.discountReason || '';
+
+      currentActiveAction = action;
+      originalItemBalance = balance;
+
+      if (drawerItemId) drawerItemId.value = itemId;
+      if (drawerCurBal) drawerCurBal.value = `${balance.toFixed(2)} ${currency}`;
+      if (drawerNetBal) drawerNetBal.value = `${balance.toFixed(2)} ${currency}`;
+
+      if (action === 'discount') {
+        if (drawerHeading) drawerHeading.textContent = 'Discount';
+        if (drawerForm) drawerForm.action = '/challan/discount';
+        if (drawerReasonCatBlock) drawerReasonCatBlock.style.display = 'block';
+        if (drawerExistBox) {
+          if (existingDiscount > 0) {
+            drawerExistBox.style.display = 'block';
+            if (drawerExistVal) drawerExistVal.textContent = `${currency} ${existingDiscount.toFixed(2)}`;
+            if (drawerExistReason) drawerExistReason.textContent = existingReason ? `Reason: ${existingReason}` : '';
+          } else {
+            drawerExistBox.style.display = 'none';
           }
-        });
-
-        if (response.ok) {
-          const res = await response.json();
-          drawerOverlay.hidden = true;
-          showToast(res.notice || 'Discount removed successfully', 'success');
-          setTimeout(() => location.reload(), 500);
-        } else {
-          const err = await response.json();
-          showToast(err.message || 'Failed to remove discount', 'error');
-          drawerRemoveBtn.disabled = false;
-          drawerRemoveBtn.textContent = '✕ Remove Discount';
         }
-      } catch (err) {
-        drawerForm.submit();
-      }
-    });
-  }
-
-  // Installment Split Builder
-  window.buildInstallments = function(parts) {
-    const container = document.getElementById('drawer_installment_rows');
-    if (!container) return;
-    container.innerHTML = '';
-    const partAmt = (activeItemBalance / parts).toFixed(0);
-    const today = new Date();
-
-    for (let i = 0; i < parts; i++) {
-      const d = new Date(today);
-      d.setDate(d.getDate() + (i + 1) * 30);
-      const dateStr = d.toISOString().split('T')[0];
-
-      const r = document.createElement('div');
-      r.style.display = 'flex';
-      r.style.gap = '6px';
-      r.style.marginBottom = '6px';
-      r.innerHTML = `
-        <input class="myskool-input" type="number" step=".01" min="1" name="installments[${i}][amount]" value="${partAmt}" required style="flex: 1;" placeholder="Amount">
-        <input class="myskool-input" type="date" name="installments[${i}][due_date]" value="${dateStr}" required style="flex: 1;">
-      `;
-      container.appendChild(r);
-    }
-  };
-
-  // AJAX Drawer Submission with Toast
-  if (drawerForm) {
-    drawerForm.addEventListener('submit', async e => {
-      e.preventDefault();
-      drawerSaveBtn.disabled = true;
-      drawerSaveBtn.textContent = 'Saving...';
-
-      const formData = new FormData(drawerForm);
-      try {
-        const response = await fetch(drawerForm.action, {
-          method: 'POST',
-          body: formData,
-          headers: {
-            'X-Requested-With': 'XMLHttpRequest',
-            'Accept': 'application/json'
-          }
-        });
-
-        if (response.ok) {
-          const res = await response.json();
-          drawerOverlay.hidden = true;
-          showToast(res.notice || 'Action saved successfully', 'success');
-
-          // Live update row balance
-          if (activeRowEl && res.balance_minor !== undefined) {
-            const pill = activeRowEl.querySelector('.row-balance-pill');
-            if (pill) pill.textContent = (res.balance_minor / 100).toFixed(0);
-          }
-
-          setTimeout(() => location.reload(), 600);
-        } else {
-          const err = await response.json();
-          showToast(err.message || 'Operation failed', 'error');
-          drawerSaveBtn.disabled = false;
-          drawerSaveBtn.textContent = 'Save';
+        if (drawerOverlay) drawerOverlay.hidden = false;
+        drawerDiscInput?.focus();
+      } else if (action === 'reverse') {
+        const slip = btn.dataset.slip;
+        const confirmRev = confirm(`Are you sure you want to REVERSE receipt #${slip} for ${currency} ${balance.toFixed(2)}?\n\nThis will restore all paid items to outstanding dues.`);
+        if (confirmRev) {
+          const revForm = document.createElement('form');
+          revForm.method = 'POST';
+          revForm.action = '/challan/reverse-receipt';
+          revForm.innerHTML = `
+            <input type="hidden" name="_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="payment_id" value="${itemId}">
+            <input type="hidden" name="reason" value="User reversed receipt via portal">
+          `;
+          document.body.appendChild(revForm);
+          revForm.submit();
         }
-      } catch (err) {
-        drawerForm.submit();
+      } else if (action === 'void') {
+        const confirmVoid = confirm(`Are you sure you want to VOID this fee item?\n\nThis action cannot be undone.`);
+        if (confirmVoid) {
+          const voidForm = document.createElement('form');
+          voidForm.method = 'POST';
+          voidForm.action = '/challan/void';
+          voidForm.innerHTML = `
+            <input type="hidden" name="_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="invoice_item_id" value="${itemId}">
+            <input type="hidden" name="reason" value="Fee voided via portal">
+          `;
+          document.body.appendChild(voidForm);
+          voidForm.submit();
+        }
       }
     });
-  }
+  });
 
-  function showToast(msg, type = 'success') {
-    const c = document.getElementById('msToastContainer');
-    if (!c) return;
-    const t = document.createElement('div');
-    t.className = 'ms-toast ' + type;
-    t.textContent = msg;
-    c.appendChild(t);
-    setTimeout(() => t.remove(), 3500);
-  }
-
-    // Create Fee Panel & Chips Interactivity
+  // CREATE FEE ENGINE: Enhanced with live rate lookup and preview
   const btnOpenCreateFee = document.getElementById('btn-open-create-fee');
   const createFeePanel = document.getElementById('create-fee-panel');
   const btnCancelCreateFee = document.getElementById('btn-cancel-create-fee');
   const toggleMoreFeeTypes = document.getElementById('toggle-more-fee-types');
+  const previewTbody = document.getElementById('cf-preview-tbody');
+  const previewCount = document.getElementById('cf-preview-count');
+  const previewWarning = document.getElementById('cf-preview-warning');
+  const btnSubmitCreateFee = document.getElementById('btn-submit-create-fee');
 
   if (btnOpenCreateFee && createFeePanel) {
     btnOpenCreateFee.addEventListener('click', function(e) {
@@ -988,6 +1188,7 @@
       createFeePanel.style.display = isHidden ? 'block' : 'none';
       if (isHidden) {
         createFeePanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        updateCreateFeePreview();
       }
     });
   }
@@ -1005,109 +1206,208 @@
       document.querySelectorAll('.cf-extra-type').forEach(el => {
         el.style.display = expanded ? 'inline-block' : 'none';
       });
-      toggleMoreFeeTypes.textContent = expanded ? 'Show Less' : 'Show More';
+      toggleMoreFeeTypes.textContent = expanded ? 'Show Less' : 'Show All (8)';
     });
   }
 
-  // Fee Type Chips selection
-  const feeTypeChips = document.querySelectorAll('#fee-types-selector-chips .ms-chip');
-  const hiddenFeeTypeInputs = document.getElementById('hidden-fee-type-inputs');
-  feeTypeChips.forEach(chip => {
+  function resolveStudentFeeRate(student, feeTypeId, feeTypeCode) {
+    // 1. Check student-specific active plan
+    const studentPlans = window.IQRA_STUDENT_FEE_PLANS || [];
+    const plan = studentPlans.find(p => p.student_id === student.id && p.fee_type_id == feeTypeId && p.is_active);
+    if (plan && plan.amount_minor > 0) {
+      return { amount: plan.amount_minor / 100, source: 'Student Plan', isOneTime: plan.frequency === 'one_time' };
+    }
+
+    // If monthly fee and enrollment has monthly_fee_minor
+    if (feeTypeCode === 'monthly' && student.monthly_fee_minor > 0) {
+      return { amount: student.monthly_fee_minor / 100, source: 'Enrollment Rate', isOneTime: false };
+    }
+
+    // 2. Check approved catalog rates
+    const catalog = window.IQRA_CATALOG_RATES || [];
+    const catRate = catalog.find(r => 
+      r.fee_type_id == feeTypeId && 
+      r.department_id == student.department_id && 
+      r.class_label === student.grade_label && 
+      r.currency === student.currency
+    );
+
+    if (catRate && catRate.amount_minor > 0) {
+      return { amount: catRate.amount_minor / 100, source: 'Class Catalog', isOneTime: catRate.frequency === 'one_time' || feeTypeCode !== 'monthly' };
+    }
+
+    return null;
+  }
+
+  function updateCreateFeePreview() {
+    if (!previewTbody) return;
+    previewTbody.innerHTML = '';
+    if (previewWarning) previewWarning.style.display = 'none';
+
+    // Get selected students
+    const activeStudentChips = Array.from(document.querySelectorAll('#student-selector-chips .ms-chip.active'));
+    let targetStudents = [];
+    const allStudents = window.IQRA_FAMILY_STUDENTS || [];
+
+    if (activeStudentChips.length === 0 || activeStudentChips.some(c => c.dataset.studentId === 'all')) {
+      targetStudents = allStudents;
+    } else {
+      const selIds = activeStudentChips.map(c => parseInt(c.dataset.studentId));
+      targetStudents = allStudents.filter(s => selIds.includes(s.id));
+    }
+
+    // Get selected fee types
+    const activeTypeChips = Array.from(document.querySelectorAll('#fee-types-selector-chips .ms-chip.active'));
+    const selectedTypes = activeTypeChips.map(c => ({
+      id: parseInt(c.dataset.feeTypeId),
+      code: c.dataset.code,
+      name: c.textContent.trim()
+    }));
+
+    // Get selected months
+    const activeMonthChips = Array.from(document.querySelectorAll('#months-selector-chips .ms-chip.active'));
+    const selectedMonths = activeMonthChips.map(c => parseInt(c.dataset.monthVal));
+    const yearSelect = document.getElementById('cf-year-select');
+    const selectedYear = yearSelect?.value || new Date().getFullYear();
+
+    const monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    let rowsCount = 0;
+    let missingRates = [];
+    let totalPlannedMinor = 0;
+
+    targetStudents.forEach(student => {
+      selectedTypes.forEach(ft => {
+        const rateInfo = resolveStudentFeeRate(student, ft.id, ft.code);
+        if (!rateInfo) {
+          missingRates.push(`${student.name} (${student.grade_label}, ${student.currency}): No approved rate for '${ft.name}'`);
+          return;
+        }
+
+        const isOneTime = rateInfo.isOneTime;
+        const periods = isOneTime ? [selectedMonths[0] || 1] : selectedMonths;
+
+        periods.forEach(m => {
+          rowsCount++;
+          const periodStr = isOneTime ? `One-Time (${monthNames[m]} ${selectedYear})` : `${monthNames[m]} ${selectedYear}`;
+          const tr = document.createElement('tr');
+          tr.style.borderBottom = '1px solid #f1f5f9';
+          tr.innerHTML = `
+            <td style="padding: 4px 6px;"><strong>${student.name}</strong><br><span style="color:#94a3b8;font-size:9px;">${student.grade_label}</span></td>
+            <td style="padding: 4px 6px;"><strong>${ft.name}</strong><br><span style="color:#64748b;font-size:9px;">${rateInfo.source}</span></td>
+            <td style="padding: 4px 6px;"><span class="ms-pill-lavender" style="font-size:9px;">${periodStr}</span></td>
+            <td style="padding: 4px 6px; text-align: right; font-weight: 600;">${student.currency} ${rateInfo.amount.toFixed(2)}</td>
+          `;
+          previewTbody.appendChild(tr);
+        });
+      });
+    });
+
+    if (previewCount) {
+      previewCount.textContent = `${rowsCount} fee obligation(s) planned`;
+    }
+
+    if (missingRates.length > 0) {
+      if (previewWarning) {
+        previewWarning.style.display = 'block';
+        previewWarning.innerHTML = `<strong>Cannot proceed: Missing approved rates:</strong><br>${missingRates.join('<br>')}`;
+      }
+      if (btnSubmitCreateFee) btnSubmitCreateFee.disabled = true;
+    } else {
+      if (btnSubmitCreateFee) btnSubmitCreateFee.disabled = (rowsCount === 0);
+    }
+  }
+
+  // Hook Create Fee Selectors
+  document.querySelectorAll('#fee-types-selector-chips .ms-chip').forEach(chip => {
     chip.addEventListener('click', function() {
       this.classList.toggle('active');
-      const activeChips = document.querySelectorAll('#fee-types-selector-chips .ms-chip.active');
-      if (activeChips.length === 0) {
-        this.classList.add('active'); // keep at least one
-      }
+      const actives = document.querySelectorAll('#fee-types-selector-chips .ms-chip.active');
+      if (actives.length === 0) this.classList.add('active');
+
+      const hiddenFeeTypeInputs = document.getElementById('hidden-fee-type-inputs');
       if (hiddenFeeTypeInputs) {
         hiddenFeeTypeInputs.innerHTML = '';
         document.querySelectorAll('#fee-types-selector-chips .ms-chip.active').forEach(c => {
           const inp = document.createElement('input');
           inp.type = 'hidden';
           inp.name = 'fee_type_ids[]';
-          inp.value = c.getAttribute('data-fee-type-id');
+          inp.value = c.dataset.feeTypeId;
           hiddenFeeTypeInputs.appendChild(inp);
         });
       }
+      updateCreateFeePreview();
     });
   });
 
-  // Month Chips selection
-  const monthChips = document.querySelectorAll('#months-selector-chips .ms-chip');
-  const hiddenMonthInputs = document.getElementById('hidden-month-inputs');
-  monthChips.forEach(chip => {
+  document.querySelectorAll('#months-selector-chips .ms-chip').forEach(chip => {
     chip.addEventListener('click', function() {
       this.classList.toggle('active');
-      const activeMonths = document.querySelectorAll('#months-selector-chips .ms-chip.active');
-      if (activeMonths.length === 0) {
-        this.classList.add('active'); // keep at least one
-      }
+      const actives = document.querySelectorAll('#months-selector-chips .ms-chip.active');
+      if (actives.length === 0) this.classList.add('active');
+
+      const hiddenMonthInputs = document.getElementById('hidden-month-inputs');
       if (hiddenMonthInputs) {
         hiddenMonthInputs.innerHTML = '';
         document.querySelectorAll('#months-selector-chips .ms-chip.active').forEach(c => {
           const inp = document.createElement('input');
           inp.type = 'hidden';
           inp.name = 'months[]';
-          inp.value = c.getAttribute('data-month-val');
+          inp.value = c.dataset.monthVal;
           hiddenMonthInputs.appendChild(inp);
         });
       }
+      updateCreateFeePreview();
     });
   });
 
-  // Student Chips selection (if multi-student family)
-  const studentChips = document.querySelectorAll('#student-selector-chips .ms-chip');
-  const hiddenStudentInputs = document.getElementById('hidden-student-inputs');
-  if (studentChips.length && hiddenStudentInputs) {
-    const allStudentsList = Array.from(studentChips).filter(c => c.getAttribute('data-student-id') !== 'all').map(c => c.getAttribute('data-student-id'));
+  const yearSelect = document.getElementById('cf-year-select');
+  if (yearSelect) yearSelect.addEventListener('change', updateCreateFeePreview);
 
-    studentChips.forEach(chip => {
-      chip.addEventListener('click', function() {
-        const sId = this.getAttribute('data-student-id');
-        if (sId === 'all') {
-          studentChips.forEach(c => c.classList.remove('active'));
-          this.classList.add('active');
-          hiddenStudentInputs.innerHTML = '';
-          allStudentsList.forEach(id => {
+  document.querySelectorAll('#student-selector-chips .ms-chip').forEach(chip => {
+    chip.addEventListener('click', function() {
+      const sId = this.dataset.studentId;
+      const allChips = document.querySelectorAll('#student-selector-chips .ms-chip');
+      const hiddenStudentInputs = document.getElementById('hidden-student-inputs');
+
+      if (sId === 'all') {
+        allChips.forEach(c => c.classList.remove('active'));
+        this.classList.add('active');
+      } else {
+        const allChip = document.querySelector('#student-selector-chips .ms-chip[data-student-id="all"]');
+        if (allChip) allChip.classList.remove('active');
+        this.classList.toggle('active');
+        const actives = document.querySelectorAll('#student-selector-chips .ms-chip.active');
+        if (actives.length === 0 && allChip) allChip.classList.add('active');
+      }
+
+      if (hiddenStudentInputs) {
+        hiddenStudentInputs.innerHTML = '';
+        const actives = document.querySelectorAll('#student-selector-chips .ms-chip.active');
+        if (actives.length === 1 && actives[0].dataset.studentId === 'all') {
+          (window.IQRA_FAMILY_STUDENTS || []).forEach(st => {
             const inp = document.createElement('input');
             inp.type = 'hidden';
             inp.name = 'student_ids[]';
-            inp.value = id;
+            inp.value = st.id;
             hiddenStudentInputs.appendChild(inp);
           });
         } else {
-          const allChip = document.querySelector('#student-selector-chips .ms-chip[data-student-id="all"]');
-          if (allChip) allChip.classList.remove('active');
-          this.classList.toggle('active');
-          const actives = document.querySelectorAll('#student-selector-chips .ms-chip.active');
-          if (actives.length === 0 && allChip) {
-            allChip.classList.add('active');
-            hiddenStudentInputs.innerHTML = '';
-            allStudentsList.forEach(id => {
-              const inp = document.createElement('input');
-              inp.type = 'hidden';
-              inp.name = 'student_ids[]';
-              inp.value = id;
-              hiddenStudentInputs.appendChild(inp);
-            });
-          } else {
-            hiddenStudentInputs.innerHTML = '';
-            actives.forEach(c => {
-              const inp = document.createElement('input');
-              inp.type = 'hidden';
-              inp.name = 'student_ids[]';
-              inp.value = c.getAttribute('data-student-id');
-              hiddenStudentInputs.appendChild(inp);
-            });
-          }
+          actives.forEach(c => {
+            const inp = document.createElement('input');
+            inp.type = 'hidden';
+            inp.name = 'student_ids[]';
+            inp.value = c.dataset.studentId;
+            hiddenStudentInputs.appendChild(inp);
+          });
         }
-      });
+      }
+      updateCreateFeePreview();
     });
-  }
+  });
 
-  // Create Fee AJAX Submit with Toast
+  // Form Submit Handler for Create Fee
   const formCreateFee = document.getElementById('form-create-fee');
-  const btnSubmitCreateFee = document.getElementById('btn-submit-create-fee');
   if (formCreateFee) {
     formCreateFee.addEventListener('submit', async function(e) {
       e.preventDefault();
@@ -1129,11 +1429,11 @@
 
         if (resp.ok) {
           const data = await resp.json();
-          showToast(data.message || 'Fee created successfully', 'success');
+          alertNotice(data.message || 'Fee created successfully');
           setTimeout(() => location.reload(), 600);
         } else {
           const err = await resp.json();
-          showToast(err.message || 'Failed to create fee', 'error');
+          alertNotice(err.message || 'Failed to create fee');
           if (btnSubmitCreateFee) {
             btnSubmitCreateFee.disabled = false;
             btnSubmitCreateFee.textContent = 'Save';
@@ -1144,6 +1444,9 @@
       }
     });
   }
+
+  // Initialize breakdown on load if pre-selected
+  updateAllocationBreakdown();
 
   window.alertNotice = function(msg) {
     showToast(msg, 'success');
