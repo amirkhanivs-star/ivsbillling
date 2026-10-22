@@ -89,6 +89,15 @@ $baseDir = dirname(__DIR__);
 $docsDir = $baseDir . DIRECTORY_SEPARATOR . 'docs';
 $storageImportsDir = $baseDir . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'imports';
 
+// SAFETY GUARD: Legacy CSV preprocessing is deactivated.
+fwrite(STDERR, "========================================================================\n");
+fwrite(STDERR, "LEGACY CONVERTER DEACTIVATED (Phase 3C.1 Cleanup):\n");
+fwrite(STDERR, "Legacy CSVs have been moved to storage/app/private/archive_20261022_legacy_csvs/\n");
+fwrite(STDERR, "The active authoritative QA source is: storage/app/imports/UPdated school record for portal.xlsx\n");
+fwrite(STDERR, "Run 'php artisan qa:import-reviewed-workbook' to ingest reviewed portal data.\n");
+fwrite(STDERR, "========================================================================\n");
+exit(1);
+
 // Parse CLI options
 $options = getopt('', ['contacts:', 'import']);
 $contactsFile = $options['contacts'] ?? null;

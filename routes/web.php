@@ -48,4 +48,6 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/migration/gr-reconciliation/resolve', [\App\Http\Controllers\MigrationReviewController::class, 'grReconciliationResolve'])->name('migration.gr_reconciliation.resolve');
  Route::get('/migration/exceptions', [\App\Http\Controllers\MigrationReviewController::class, 'exceptionsIndex'])->name('migration.exceptions');
  Route::get('/migration/exceptions/export', [\App\Http\Controllers\MigrationReviewController::class, 'exportExceptions'])->name('migration.exceptions.export');
+ Route::get('/migration/qa-collections', [\App\Http\Controllers\MigrationReviewController::class, 'qaCollectionsIndex'])->name('migration.qa_collections');
+ Route::get('/migration/qa-dues', [\App\Http\Controllers\MigrationReviewController::class, 'qaDuesIndex'])->name('migration.qa_dues');
 });

@@ -92,6 +92,70 @@
      <div class="iq-empty iq-empty-history">No allocated payments recorded for this student yet.</div>
     @endforelse
    </div>
+   @if(($stagedCollections ?? collect())->isNotEmpty() || ($stagedDues ?? collect())->isNotEmpty())
+   <div style="margin-top:24px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <strong style="color:#1e293b;font-size:14px;">📑 Historical Reviewed Staging (October 22 Workbook — Read-Only)</strong>
+      <span style="background:#e0e7ff;color:#3730a3;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;">QA Staging Audit</span>
+    </div>
+
+    @if(($stagedDues ?? collect())->isNotEmpty())
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;">Outstanding Dues Lines ({{ $stagedDues->count() }}):</div>
+      <table style="width:100%;font-size:12px;border-collapse:collapse;background:#fff;border:1px solid #e2e8f0;border-radius:4px;">
+        <thead>
+          <tr style="background:#f1f5f9;text-align:left;color:#475569;">
+            <th style="padding:6px 8px;">Fee Particular</th>
+            <th style="padding:6px 8px;">Currency</th>
+            <th style="padding:6px 8px;">Amount</th>
+            <th style="padding:6px 8px;">PDF Page</th>
+          </tr>
+        </thead>
+        <tbody>
+          @foreach($stagedDues as $due)
+          <tr style="border-top:1px solid #e2e8f0;">
+            <td style="padding:6px 8px;">{{ $due->fee_particular }}</td>
+            <td style="padding:6px 8px;">{{ $due->currency ?: 'UNRESOLVED' }}</td>
+            <td style="padding:6px 8px;font-weight:600;">{{ number_format($due->outstanding_amount, 2) }}</td>
+            <td style="padding:6px 8px;color:#64748b;">{{ $due->source_pdf_page ? 'p.' . $due->source_pdf_page : '—' }}</td>
+          </tr>
+          @endforeach
+        </tbody>
+      </table>
+    </div>
+    @endif
+
+    @if(($stagedCollections ?? collect())->isNotEmpty())
+    <div>
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;">Receipt Collection Lines ({{ $stagedCollections->count() }}):</div>
+      <table style="width:100%;font-size:12px;border-collapse:collapse;background:#fff;border:1px solid #e2e8f0;border-radius:4px;">
+        <thead>
+          <tr style="background:#f1f5f9;text-align:left;color:#475569;">
+            <th style="padding:6px 8px;">Slip No</th>
+            <th style="padding:6px 8px;">Particular</th>
+            <th style="padding:6px 8px;">Date</th>
+            <th style="padding:6px 8px;">Currency</th>
+            <th style="padding:6px 8px;">Amount</th>
+            <th style="padding:6px 8px;">PDF Page</th>
+          </tr>
+        </thead>
+        <tbody>
+          @foreach($stagedCollections as $col)
+          <tr style="border-top:1px solid #e2e8f0;">
+            <td style="padding:6px 8px;font-weight:600;">{{ $col->slip_number ?: '—' }}</td>
+            <td style="padding:6px 8px;">{{ $col->fee_particular }}</td>
+            <td style="padding:6px 8px;color:#64748b;">{{ $col->payment_date_parsed ?: $col->payment_date_raw }}</td>
+            <td style="padding:6px 8px;">{{ $col->currency ?: 'UNRESOLVED' }}</td>
+            <td style="padding:6px 8px;font-weight:600;">{{ number_format($col->amount, 2) }}</td>
+            <td style="padding:6px 8px;color:#64748b;">{{ $col->source_pdf_page ? 'p.' . $col->source_pdf_page : '—' }}</td>
+          </tr>
+          @endforeach
+        </tbody>
+      </table>
+    </div>
+    @endif
+   </div>
+   @endif
   </div>
  </div>
  <details class="iq-admin-details"><summary>Additional student management and enrollment</summary>

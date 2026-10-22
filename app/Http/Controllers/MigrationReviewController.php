@@ -39,10 +39,17 @@ class MigrationReviewController
             ->limit(10)
             ->get();
 
+        $activeKey = config('imports.active_version', 'v2_reviewed_20261022');
+        $activeImport = config("imports.versions.{$activeKey}");
+        $historicalImport = config("imports.versions.v1_historical_staging");
+
         return view('migration.dashboard', [
             'metrics' => $metrics,
             'recentLogs' => $recentLogs,
             'user' => $request->user(),
+            'activeImportKey' => $activeKey,
+            'activeImport' => $activeImport,
+            'historicalImport' => $historicalImport,
         ]);
     }
 
@@ -475,5 +482,92 @@ class MigrationReviewController
         $response->headers->set('Content-Disposition', 'attachment; filename="' . $filename . '"');
 
         return $response;
+    }
+
+    private function qaConnection(): string
+    {
+        return config('database.default') === 'sqlite' ? 'sqlite' : 'qa';
+    }
+
+    /**
+     * Staged Collections Review (Sheet 03_COLLECTION_PRESENT_ONLY).
+     */
+    public function qaCollectionsIndex(Request $request)
+    {
+        $this->authorizeAdmin($request);
+        $conn = $this->qaConnection();
+
+        $query = DB::connection($conn)->table('qa_staged_collections');
+
+        if ($term = trim((string) $request->query('q', ''))) {
+            $query->where(function ($w) use ($term) {
+                $w->where('gr_number', 'like', "%{$term}%")
+                  ->orWhere('student_name', 'like', "%{$term}%")
+                  ->orWhere('slip_number', 'like', "%{$term}%")
+                  ->orWhere('family_code', 'like', "%{$term}%")
+                  ->orWhere('fee_particular', 'like', "%{$term}%");
+            });
+        }
+
+        if ($currency = $request->query('currency')) {
+            $query->where('currency', $currency);
+        }
+
+        if ($request->has('unresolved') && $request->query('unresolved') !== '') {
+            $query->where('is_currency_unresolved', (bool) $request->query('unresolved'));
+        }
+
+        $records = $query->orderBy('source_row')->paginate(25)->withQueryString();
+        $totalCount = DB::connection($conn)->table('qa_staged_collections')->count();
+        $unresolvedCount = DB::connection($conn)->table('qa_staged_collections')->where('is_currency_unresolved', true)->count();
+        $currencies = DB::connection($conn)->table('qa_staged_collections')->whereNotNull('currency')->where('currency', '!=', '')->distinct()->pluck('currency');
+
+        return view('migration.qa-collections', [
+            'records' => $records,
+            'totalCount' => $totalCount,
+            'unresolvedCount' => $unresolvedCount,
+            'currencies' => $currencies,
+        ]);
+    }
+
+    /**
+     * Staged Dues / Outstanding Review (Sheet 05_OUTSTANDING_PRESENT_ONLY).
+     */
+    public function qaDuesIndex(Request $request)
+    {
+        $this->authorizeAdmin($request);
+        $conn = $this->qaConnection();
+
+        $query = DB::connection($conn)->table('qa_staged_dues');
+
+        if ($term = trim((string) $request->query('q', ''))) {
+            $query->where(function ($w) use ($term) {
+                $w->where('gr_number', 'like', "%{$term}%")
+                  ->orWhere('student_name', 'like', "%{$term}%")
+                  ->orWhere('family_code_final', 'like', "%{$term}%")
+                  ->orWhere('fee_particular', 'like', "%{$term}%")
+                  ->orWhere('class_in_dues_report', 'like', "%{$term}%");
+            });
+        }
+
+        if ($currency = $request->query('currency')) {
+            $query->where('currency', $currency);
+        }
+
+        if ($request->has('unresolved') && $request->query('unresolved') !== '') {
+            $query->where('is_currency_unresolved', (bool) $request->query('unresolved'));
+        }
+
+        $records = $query->orderBy('source_row')->paginate(25)->withQueryString();
+        $totalCount = DB::connection($conn)->table('qa_staged_dues')->count();
+        $unresolvedCount = DB::connection($conn)->table('qa_staged_dues')->where('is_currency_unresolved', true)->count();
+        $currencies = DB::connection($conn)->table('qa_staged_dues')->whereNotNull('currency')->where('currency', '!=', '')->distinct()->pluck('currency');
+
+        return view('migration.qa-dues', [
+            'records' => $records,
+            'totalCount' => $totalCount,
+            'unresolvedCount' => $unresolvedCount,
+            'currencies' => $currencies,
+        ]);
     }
 }

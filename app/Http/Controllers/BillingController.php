@@ -49,7 +49,7 @@ class BillingController {
    $q->whereExists(function($sub)use($r){$sub->selectRaw('1')->from('enrollments as e')->whereColumn('e.student_id','s.id')->where('e.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($x)=>$x->where('e.department_id',$r->user()->department_id));});
   }
   if($term=trim((string)$r->query('q',''))){$q->where(fn($w)=>$w->where('s.name','like','%'.$term.'%')->orWhere('s.gr_number','like','%'.$term.'%')->orWhere('f.family_code','like','%'.$term.'%')->orWhere('sd.father_name','like','%'.$term.'%'));}
-  if($status=$r->query('status')){if(in_array($status,['present','suspended','left'],true))$q->where('s.status',$status);}
+  if($status=$r->query('status')){if(in_array($status,['present','suspended','left','review_hold','historical_hold'],true))$q->where('s.status',$status);}
   return view('students',['students'=>$q->orderBy('s.id')->paginate(25)->withQueryString()]);
  }
  public function showStudent(int $student){
@@ -80,7 +80,20 @@ class BillingController {
    ->select('p.id','p.receipt_number','p.received_on','p.currency','p.status','pa.amount_minor',\Illuminate\Support\Facades\DB::raw("COALESCE(ft.name, ii.description, 'Monthly Fee') as fee_type_name"),'ii.period_start as item_period')
    ->orderByDesc('p.received_on')
    ->limit(100)->get();
-  return view('student-details',['student'=>$s,'enrollments'=>$enrollments,'feeItems'=>$feeItems,'receipts'=>$receipts]);
+  $stagedCollections = \Illuminate\Support\Facades\Schema::hasTable('qa_staged_collections')
+   ? DB::table('qa_staged_collections')->where('gr_number', $s->gr_number)->orderBy('source_row')->get()
+   : collect();
+  $stagedDues = \Illuminate\Support\Facades\Schema::hasTable('qa_staged_dues')
+   ? DB::table('qa_staged_dues')->where('gr_number', $s->gr_number)->orderBy('source_row')->get()
+   : collect();
+  return view('student-details', [
+   'student' => $s,
+   'enrollments' => $enrollments,
+   'feeItems' => $feeItems,
+   'receipts' => $receipts,
+   'stagedCollections' => $stagedCollections,
+   'stagedDues' => $stagedDues,
+  ]);
  }
  private function authorizeStudentWrite(Request $r,int $student):object{
   abort_unless(in_array($r->user()->role,['super_admin','finance_admin','department_manager'],true),403);

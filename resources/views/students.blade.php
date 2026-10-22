@@ -8,7 +8,7 @@
   <a href="{{ route('student.admission.create') }}" class="btn green">＋ Admission</a>
   <button type="button" class="btn" onclick="document.getElementById('import-dialog').showModal()" style="min-width:115px;background:#7367f0;color:#fff;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-weight:600;cursor:pointer;">⇪ Import</button>
   <input class="input iqra-search" name="q" value="{{ request('q') }}" placeholder="Search by name, father, GR or family number">
-  <select class="input" name="status"><option value="">All statuses</option>@foreach(['present'=>'Present','suspended'=>'Suspended','left'=>'Left'] as $key=>$label)<option value="{{ $key }}" @selected(request('status')===$key)>{{ $label }}</option>@endforeach</select>
+  <select class="input" name="status"><option value="">All statuses</option>@foreach(['present'=>'Present','review_hold'=>'Review Hold (72)','historical_hold'=>'Historical Review (18)','suspended'=>'Suspended','left'=>'Left'] as $key=>$label)<option value="{{ $key }}" @selected(request('status')===$key)>{{ $label }}</option>@endforeach</select>
   <button class="btn">Filter</button>
  </form>
  <div class="table-wrap"><table class="table iqra-student-table"><thead><tr><th>S.NO</th><th>NAME</th><th>FATHER NAME</th><th>CONTACT</th><th>CLASS</th><th>FEES</th><th>STATUS</th><th>ACTIONS</th></tr></thead><tbody>

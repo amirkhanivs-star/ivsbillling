@@ -1,18 +1,35 @@
 @extends('layouts.app')
 @section('title', 'Migration Review Dashboard')
 @section('content')
-<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
     <div>
-        <h2 style="font-size:22px;font-weight:700;color:#2c2c2c;margin:0;">Phase 3A: Migration & Reconciliation Review</h2>
-        <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Review student identity, sibling groups, campus/department classifications, and historical GRs.</p>
+        <h2 style="font-size:22px;font-weight:700;color:#2c2c2c;margin:0;">Migration Review Dashboard</h2>
+        <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Historical baseline verification, student identity, campus/department assignments, and staging approval audit.</p>
     </div>
     <div style="display:flex;gap:10px;">
         <span style="background:#e8fadf;color:#28c76f;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px;">
-            <span style="width:8px;height:8px;background:#28c76f;border-radius:50%;"></span> Isolated Database: iqra_billing_clean
+            <span style="width:8px;height:8px;background:#28c76f;border-radius:50%;"></span> Historical Baseline: iqra_billing_clean
         </span>
         <span style="background:#fceaea;color:#ea5455;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;">
             Ledger Postings: 0 (Protected)
         </span>
+    </div>
+</div>
+
+<div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:14px 18px;margin-bottom:22px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+    <div>
+        <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-weight:700;color:#3730a3;font-size:14px;">📁 Historical Staging Baseline: October 19, 2026 (4,340 Students)</span>
+            <span style="background:#c7d2fe;color:#312e81;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;">READ-ONLY BASELINE</span>
+        </div>
+        <p style="margin:4px 0 0;font-size:12px;color:#4338ca;">
+            The metrics below represent the approved October 19 staging export (<code>iqra_billing_clean</code>). All legacy CSV files are archived in <code>storage/app/private/archive_20261022_legacy_csvs/</code>.
+        </p>
+    </div>
+    <div style="font-size:12px;color:#4338ca;background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #c7d2fe;">
+        <div><strong style="color:#1e1b4b;">Active QA Pipeline Version:</strong> <code>{{ $activeImportKey ?? 'v2_reviewed_20261022' }}</code></div>
+        <div style="font-size:11px;color:#4b5563;margin-top:2px;">Source: <code>{{ $activeImport['relative_path'] ?? 'storage/app/imports/UPdated school record for portal.xlsx' }}</code></div>
+        <div style="font-size:11px;color:#059669;margin-top:2px;">Target: <strong>iqra_billing_qa</strong> (Strictly Isolated)</div>
     </div>
 </div>
 
@@ -102,6 +119,45 @@
         <div style="display:flex;gap:10px;margin-top:8px;">
             <a href="/migration/exceptions" style="font-size:12px;color:var(--ms-purple,#7367f0);font-weight:600;text-decoration:none;">Inspect →</a>
             <a href="/migration/exceptions/export" style="font-size:12px;color:#28c76f;font-weight:600;text-decoration:none;">Export CSV ⤓</a>
+        </div>
+    </div>
+</div>
+
+<!-- October 22 Reviewed QA Financial Staging (Read-Only) -->
+<div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:20px;margin-bottom:25px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <div>
+            <h3 style="font-size:16px;font-weight:700;color:#2c2c2c;margin:0;">October 22 Reviewed QA Financial Staging (Read-Only)</h3>
+            <p style="color:#6e6b7b;font-size:12px;margin:2px 0 0;">Isolated staging tables in <code>iqra_billing_qa</code>. Zero financial ledger postings created.</p>
+        </div>
+        <span style="background:#e8fadf;color:#28c76f;padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;">Phase 3C.1 Staged</span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:15px;">
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="font-size:14px;color:#1e293b;">03_COLLECTION_PRESENT_ONLY</strong>
+                <span style="font-size:16px;">🧾</span>
+            </div>
+            <div style="font-size:20px;font-weight:700;color:#334155;margin:8px 0 4px;">37,976 <span style="font-size:12px;color:#64748b;font-weight:normal;">rows</span></div>
+            <div style="font-size:12px;color:#64748b;margin-bottom:10px;">
+                Historical receipt details with PDF page/slip references.<br>
+                Unresolved Currencies: <strong style="color:#f59e0b;">8 rows</strong> (flagged).
+            </div>
+            <a href="/migration/qa-collections" style="color:#7367f0;font-size:12px;font-weight:600;text-decoration:none;">Search & Review Collections →</a>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="font-size:14px;color:#1e293b;">05_OUTSTANDING_PRESENT_ONLY</strong>
+                <span style="font-size:16px;">📑</span>
+            </div>
+            <div style="font-size:20px;font-weight:700;color:#334155;margin:8px 0 4px;">11,473 <span style="font-size:12px;color:#64748b;font-weight:normal;">rows</span></div>
+            <div style="font-size:12px;color:#64748b;margin-bottom:10px;">
+                Historical residual dues balances by fee particular.<br>
+                Unresolved Currencies: <strong style="color:#f59e0b;">70 rows</strong> (flagged).
+            </div>
+            <a href="/migration/qa-dues" style="color:#7367f0;font-size:12px;font-weight:600;text-decoration:none;">Search & Review Dues →</a>
         </div>
     </div>
 </div>
