@@ -411,14 +411,22 @@ class BillingController {
    ->where('e.status','active');
 
   if(!empty($d['student_ids'])){
+   $held=DB::table('students')->whereIn('id',$d['student_ids'])->whereIn('status',['review_hold','historical_hold'])->first();
+   if($held){
+    $msg=$held->status==='review_hold'
+     ?"Student GR {$held->gr_number} is on financial review hold and cannot be billed until approvals are finalized."
+     :"Student GR {$held->gr_number} is a historical record and cannot receive new monthly bills.";
+    throw \Illuminate\Validation\ValidationException::withMessages(['student_ids'=>$msg]);
+   }
    $studentsQuery->whereIn('s.id',$d['student_ids']);
   }
 
-  $students=$studentsQuery->select('s.*','e.id as enrollment_id','e.campus_id','e.department_id','e.currency','e.grade_label','e.monthly_fee_minor')->get();
+  $students=$studentsQuery->whereNotIn('s.status',['review_hold','historical_hold','suspended','left'])
+   ->select('s.*','e.id as enrollment_id','e.campus_id','e.department_id','e.currency','e.grade_label','e.monthly_fee_minor')->get();
 
   if($students->isEmpty()){
    throw \Illuminate\Validation\ValidationException::withMessages([
-    'student_ids'=>'No active student enrollments found for this family.'
+    'student_ids'=>'No active billable student enrollments found for this family.'
    ]);
   }
 

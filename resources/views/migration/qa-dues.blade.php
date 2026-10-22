@@ -63,7 +63,7 @@
                 @forelse($records as $r)
                 <tr style="{{ $r->is_currency_unresolved ? 'background:#fff9e6;' : '' }}">
                     <td><small style="color:#b9b9c3;">#{{ $r->source_row }}</small></td>
-                    <td><a href="/manage-student/{{ \Illuminate\Support\Facades\DB::connection(config('database.default') === 'sqlite' ? 'sqlite' : 'qa')->table('students')->where('gr_number', $r->gr_number)->value('id') }}" style="color:#7367f0;font-weight:600;text-decoration:none;">{{ $r->gr_number }}</a></td>
+                    <td><a href="/manage-student/{{ \Illuminate\Support\Facades\DB::table('students')->where('gr_number', $r->gr_number)->value('id') }}" style="color:#7367f0;font-weight:600;text-decoration:none;">{{ $r->gr_number }}</a></td>
                     <td>{{ $r->student_name ?: $r->registration_name ?: '—' }}</td>
                     <td><small>{{ $r->family_code_final ?: $r->family_code_registration ?: '—' }}</small></td>
                     <td><small>{{ $r->class_in_dues_report ?: '—' }}</small></td>

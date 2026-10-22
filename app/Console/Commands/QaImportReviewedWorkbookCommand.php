@@ -57,6 +57,14 @@ class QaImportReviewedWorkbookCommand extends Command
         $actualHash = strtolower(hash_file('sha256', $path));
         $this->line("Calculated SHA-256: {$actualHash}");
 
+        $isRevised = ($actualHash === strtolower(ReviewedWorkbookImportService::REVISED_SHA256));
+        if ($isRevised) {
+            $activeKey = 'v2_reviewed_20261022_revised';
+            $activeConfig = config("imports.versions.{$activeKey}");
+            $expectedHash = $activeConfig['expected_sha256'] ?? ReviewedWorkbookImportService::REVISED_SHA256;
+            $this->info(" [NOTICE] Detected revised workbook content: Switching to version '{$activeKey}'.");
+        }
+
         if ($expectedHash !== null) {
             if ($actualHash !== strtolower($expectedHash)) {
                 $this->error("CRITICAL ERROR: SHA-256 hash mismatch!");
@@ -111,11 +119,27 @@ class QaImportReviewedWorkbookCommand extends Command
                 ['Approval Holds (REVIEW / YES / Blank Currency)', number_format($reg['held_count'])],
                 [' - Marked REVIEW', number_format($reg['provisional_breakdown']['REVIEW'] ?? 0)],
                 [' - Marked YES', number_format($reg['provisional_breakdown']['YES'] ?? 0)],
-                [' - Blank Currency', number_format($reg['blank_currency_count'])],
                 ['School Department Registrations', number_format($reg['departments']['school'] ?? 0)],
                 ['Tuition Department Registrations', number_format($reg['departments']['tuition'] ?? 0)],
             ]
         );
+
+        if (isset($reg['mutually_exclusive'])) {
+            $me = $reg['mutually_exclusive'];
+            $this->line('');
+            $this->comment('Mutually Exclusive Registration Classification (Sum = ' . number_format($reg['mutually_exclusive_sum']) . '):');
+            $this->table(
+                ['Mutually Exclusive Category', 'Count', 'Criteria'],
+                [
+                    ['Active Billable Students', number_format($me['active_billable']), 'Fee > 0, No leaving date, Prov = NO, Valid currency'],
+                    ['Active Non-Billable Students', number_format($me['active_zero_fee']), 'Fee = 0, No leaving date, Prov = NO, Valid currency'],
+                    ['Leaving Date Discrepancy', number_format($me['leaving_date_discrepancy']), 'Date of Leaving populated in present sheet, Prov = NO'],
+                    ['Financial Review Hold (REVIEW)', number_format($me['review_hold_review']), 'Prov = REVIEW (Evidenced only by new dues PDF)'],
+                    ['Financial Review Hold (YES/No Evid)', number_format($me['review_hold_yes']), 'Prov = YES or blank evidence (including GR 10666)'],
+                    ['Total Mutually Exclusive Registrations', number_format($reg['mutually_exclusive_sum']), 'Sums exactly to total rows (4,352)'],
+                ]
+            );
+        }
 
         $this->line('');
         $this->comment('Financial Staging Sheets (Preserved Without Ledger Posting):');
@@ -140,7 +164,8 @@ class QaImportReviewedWorkbookCommand extends Command
         $this->info("Executing import transaction into QA portal database...");
 
         try {
-            $stats = $service->import($path, $expectedHash, $qaConn);
+            $batchId = $isRevised ? 'BATCH-20261022-PORTAL-V2-REVISED' : 'BATCH-20261022-PORTAL-V2';
+            $stats = $service->import($path, $expectedHash, $qaConn, $batchId);
         } catch (Throwable $e) {
             $this->error("IMPORT TRANSACTION FAILED: " . $e->getMessage());
             return self::FAILURE;

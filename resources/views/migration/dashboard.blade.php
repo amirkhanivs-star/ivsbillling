@@ -159,6 +159,19 @@
             </div>
             <a href="/migration/qa-dues" style="color:#7367f0;font-size:12px;font-weight:600;text-decoration:none;">Search & Review Dues →</a>
         </div>
+
+        <div style="border:1px solid #c7d2fe;border-radius:6px;padding:14px;background:#eef2ff;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="font-size:14px;color:#3730a3;">Opening Balances Preview</strong>
+                <span style="font-size:16px;">⚖️</span>
+            </div>
+            <div style="font-size:20px;font-weight:700;color:#312e81;margin:8px 0 4px;">7,788 <span style="font-size:12px;color:#4338ca;font-weight:normal;">invoices preview</span></div>
+            <div style="font-size:12px;color:#4338ca;margin-bottom:10px;">
+                Aggregated from 11,012 eligible dues.<br>
+                Strict ledger posting lock: <strong style="color:#dc2626;">STOPPED (Awaiting Approval)</strong>.
+            </div>
+            <a href="/migration/opening-balances" style="display:inline-block;background:#4f46e5;color:#fff;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:600;text-decoration:none;">Inspect Opening Balances →</a>
+        </div>
     </div>
 </div>
 

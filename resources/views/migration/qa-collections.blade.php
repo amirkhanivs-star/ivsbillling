@@ -65,7 +65,7 @@
                 <tr style="{{ $r->is_currency_unresolved ? 'background:#fff9e6;' : '' }}">
                     <td><small style="color:#b9b9c3;">#{{ $r->source_row }}</small></td>
                     <td><strong>{{ $r->slip_number ?: '—' }}</strong></td>
-                    <td><a href="/manage-student/{{ \Illuminate\Support\Facades\DB::connection(config('database.default') === 'sqlite' ? 'sqlite' : 'qa')->table('students')->where('gr_number', $r->gr_number)->value('id') }}" style="color:#7367f0;font-weight:600;text-decoration:none;">{{ $r->gr_number }}</a></td>
+                    <td><a href="/manage-student/{{ \Illuminate\Support\Facades\DB::table('students')->where('gr_number', $r->gr_number)->value('id') }}" style="color:#7367f0;font-weight:600;text-decoration:none;">{{ $r->gr_number }}</a></td>
                     <td>{{ $r->student_name ?: $r->registration_name ?: '—' }}</td>
                     <td><small>{{ $r->family_code ?: '—' }}</small></td>
                     <td><small>{{ $r->fee_particular }}</small></td>

@@ -4,7 +4,7 @@ use Illuminate\Support\Str;
 
 return [
 
-    'default' => env('DB_CONNECTION', 'mysql'),
+    'default' => env('DB_CONNECTION', 'qa'),
 
     'connections' => [
 
@@ -38,7 +38,7 @@ return [
             'url' => env('DB_URL'),
             'host' => env('DB_QA_HOST', env('DB_HOST', '127.0.0.1')),
             'port' => env('DB_QA_PORT', env('DB_PORT', '3306')),
-            'database' => env('DB_QA_DATABASE', 'iqra_billing_qa'),
+            'database' => env('DB_QA_DATABASE', env('DB_DATABASE', 'iqra_billing_qa')),
             'username' => env('DB_QA_USERNAME', env('DB_USERNAME', 'root')),
             'password' => env('DB_QA_PASSWORD', env('DB_PASSWORD', '')),
             'unix_socket' => env('DB_QA_SOCKET', env('DB_SOCKET', '')),

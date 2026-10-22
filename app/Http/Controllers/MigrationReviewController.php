@@ -570,4 +570,18 @@ class MigrationReviewController
             'currencies' => $currencies,
         ]);
     }
+
+    /**
+     * Historical Opening Balances Preview (QA Isolated).
+     */
+    public function openingBalancesPreview(Request $request, \App\Services\Migration\HistoricalOpeningBalanceService $service)
+    {
+        $this->authorizeAdmin($request);
+        $preview = $service->preview($this->qaConnection());
+
+        return view('migration.opening-balances-preview', [
+            'preview' => $preview,
+            'user' => $request->user(),
+        ]);
+    }
 }

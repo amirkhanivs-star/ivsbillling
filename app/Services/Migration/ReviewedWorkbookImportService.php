@@ -13,6 +13,7 @@ use RuntimeException;
 class ReviewedWorkbookImportService
 {
     public const EXPECTED_SHA256 = 'd2276cf0c75a0c17b143d1815fda568c9b5cc7e0154f546b8075d1a98e225401';
+    public const REVISED_SHA256 = 'f48f1ee57eb826776c2f1eb7cab0150640605d4b30f1c761044f7d0d12d0468e';
     public const SHEET_REGISTRATION = '01_REGISTRATION_PRESENT (1)';
     public const SHEET_COLLECTION = '03_COLLECTION_PRESENT_ONLY';
     public const SHEET_OUTSTANDING = '05_OUTSTANDING_PRESENT_ONLY';
@@ -23,9 +24,10 @@ class ReviewedWorkbookImportService
     public function preview(
         string $filePath,
         ?string $expectedSha256 = self::EXPECTED_SHA256,
-        string $qaConn = 'qa'
+        ?string $qaConn = null
     ): array {
         @ini_set('memory_limit', '1024M');
+        $qaConn = $qaConn ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa');
         $this->validateFileAndHash($filePath, $expectedSha256);
         $this->validateQaConnection($qaConn);
 
@@ -51,6 +53,14 @@ class ReviewedWorkbookImportService
         $approvedCount = 0;
         $heldCount = 0;
 
+        $mutuallyExclusive = [
+            'active_billable' => 0,
+            'active_zero_fee' => 0,
+            'leaving_date_discrepancy' => 0,
+            'review_hold_review' => 0,
+            'review_hold_yes' => 0,
+        ];
+
         foreach ($regData as $idx => $row) {
             $r = $idx + 2;
             $gr = trim((string) ($row[1] ?? ''));
@@ -61,6 +71,9 @@ class ReviewedWorkbookImportService
             $curr = trim((string) ($row[21] ?? ''));
             $prov = trim((string) ($row[23] ?? ''));
             $class = trim((string) ($row[11] ?? ''));
+            $fee = self::parseMoneyDecimal($row[13] ?? 0);
+            $leavingDate = trim((string) ($row[17] ?? ''));
+            $hasLeaving = ($leavingDate !== '');
 
             $regGrs[$gr] = [
                 'row' => $r,
@@ -76,8 +89,19 @@ class ReviewedWorkbookImportService
             }
 
             if ($prov === 'NO' && $curr !== '') {
+                if ($hasLeaving) {
+                    $mutuallyExclusive['leaving_date_discrepancy']++;
+                } elseif ($fee > 0) {
+                    $mutuallyExclusive['active_billable']++;
+                } else {
+                    $mutuallyExclusive['active_zero_fee']++;
+                }
                 $approvedCount++;
+            } elseif ($prov === 'REVIEW') {
+                $mutuallyExclusive['review_hold_review']++;
+                $heldCount++;
             } else {
+                $mutuallyExclusive['review_hold_yes']++;
                 $heldCount++;
             }
 
@@ -172,6 +196,8 @@ class ReviewedWorkbookImportService
                 'new_grs_count' => count($newGrs),
                 'old_only_grs_count' => count($oldOnlyGrs),
                 'provisional_breakdown' => $provCounts,
+                'mutually_exclusive' => $mutuallyExclusive,
+                'mutually_exclusive_sum' => array_sum($mutuallyExclusive),
                 'approved_count' => $approvedCount,
                 'held_count' => $heldCount,
                 'blank_currency_count' => $blankCurrencyCount,
@@ -197,11 +223,12 @@ class ReviewedWorkbookImportService
     public function import(
         string $filePath,
         ?string $expectedSha256 = self::EXPECTED_SHA256,
-        string $qaConn = 'qa',
+        ?string $qaConn = null,
         ?string $batchId = null
     ): array {
         @ini_set('memory_limit', '1024M');
         gc_collect_cycles();
+        $qaConn = $qaConn ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa');
         $this->validateFileAndHash($filePath, $expectedSha256);
         $this->validateQaConnection($qaConn);
 
@@ -534,8 +561,9 @@ class ReviewedWorkbookImportService
                 $payMethod = trim((string) ($r[9] ?? ''));
                 $curr = strtoupper(trim((string) ($r[10] ?? '')));
                 $currOriginal = trim((string) ($r[11] ?? ''));
-                $amtDecimal = self::parseMoneyDecimal($r[12] ?? 0);
-                $amtMinor = self::parseMoneyMinor($r[12] ?? 0);
+                $amtErr = null;
+                $amtDecimal = self::parseMoneyDecimal($r[12] ?? 0, $amtErr);
+                $amtMinor = self::parseMoneyMinor($r[12] ?? 0, $amtErr);
                 $regCurr = strtoupper(trim((string) ($r[13] ?? '')));
                 $currCompare = trim((string) ($r[14] ?? ''));
                 $pdfPage = trim((string) ($r[15] ?? ''));
@@ -546,6 +574,20 @@ class ReviewedWorkbookImportService
 
                 $isUnresolved = ($curr === '' || $curr === 'UNRESOLVED' || str_contains($reviewFlags, 'UNRESOLVED'));
                 $hasConflict = ($curr !== '' && $regCurr !== '' && $curr !== $regCurr);
+
+                if ($amtErr !== null) {
+                    $exceptionsToInsert[] = [
+                        'batch_id' => $batchId,
+                        'sheet_name' => self::SHEET_COLLECTION,
+                        'source_row' => $sourceRow,
+                        'gr_number' => $gr,
+                        'issue_code' => 'INVALID_MONETARY_AMOUNT',
+                        'issue_message' => "Collection row has invalid amount: {$amtErr}. Slip: {$slip}",
+                        'raw_data' => json_encode($r),
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ];
+                }
 
                 if ($isUnresolved) {
                     $stats['unresolved_collections']++;
@@ -642,8 +684,9 @@ class ReviewedWorkbookImportService
                 $particular = trim((string) ($r[8] ?? ''));
                 $curr = strtoupper(trim((string) ($r[9] ?? '')));
                 $currOriginal = trim((string) ($r[10] ?? ''));
-                $amtDecimal = self::parseMoneyDecimal($r[11] ?? 0);
-                $amtMinor = self::parseMoneyMinor($r[11] ?? 0);
+                $dueAmtErr = null;
+                $amtDecimal = self::parseMoneyDecimal($r[11] ?? 0, $dueAmtErr);
+                $amtMinor = self::parseMoneyMinor($r[11] ?? 0, $dueAmtErr);
                 $regCurr = strtoupper(trim((string) ($r[12] ?? '')));
                 $pdfPage = trim((string) ($r[13] ?? ''));
                 $pdfY = trim((string) ($r[14] ?? ''));
@@ -653,6 +696,20 @@ class ReviewedWorkbookImportService
 
                 $isUnresolved = ($curr === '' || $curr === 'UNRESOLVED' || str_contains($reviewFlags, 'UNRESOLVED'));
                 $hasConflict = ($curr !== '' && $regCurr !== '' && $curr !== $regCurr);
+
+                if ($dueAmtErr !== null) {
+                    $exceptionsToInsert[] = [
+                        'batch_id' => $batchId,
+                        'sheet_name' => self::SHEET_OUTSTANDING,
+                        'source_row' => $sourceRow,
+                        'gr_number' => $gr,
+                        'issue_code' => 'INVALID_MONETARY_AMOUNT',
+                        'issue_message' => "Outstanding row has invalid amount: {$dueAmtErr}",
+                        'raw_data' => json_encode($r),
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ];
+                }
 
                 if ($isUnresolved) {
                     $stats['unresolved_dues']++;
@@ -743,6 +800,25 @@ class ReviewedWorkbookImportService
                 ]
             );
 
+            // 10. Record immutable import version in qa_import_versions
+            $qa->table('qa_import_versions')->updateOrInsert(
+                ['batch_id' => $batchId],
+                [
+                    'version_key' => config('imports.active_version', 'v2_reviewed_20261022'),
+                    'source_file' => $filePath,
+                    'sha256' => hash_file('sha256', $filePath),
+                    'registration_rows' => $stats['registration_rows'],
+                    'collection_rows' => $stats['collections_staged'],
+                    'dues_rows' => $stats['dues_staged'],
+                    'unresolved_collections' => $stats['unresolved_collections'],
+                    'unresolved_dues' => $stats['unresolved_dues'],
+                    'exceptions_logged' => count($exceptionsToInsert),
+                    'status' => 'imported',
+                    'updated_at' => $now,
+                    'created_at' => $now,
+                ]
+            );
+
             return $stats;
         });
     }
@@ -793,8 +869,9 @@ class ReviewedWorkbookImportService
         if ($expectedSha256 !== null) {
             $actual = strtolower(hash_file('sha256', $filePath));
             $expected = strtolower($expectedSha256);
-            if ($actual !== $expected) {
-                throw new RuntimeException("SHA-256 mismatch for '{$filePath}'. Expected {$expected}, found {$actual}.");
+            $revised = strtolower(self::REVISED_SHA256);
+            if ($actual !== $expected && $actual !== $revised) {
+                throw new RuntimeException("SHA-256 mismatch for '{$filePath}'. Expected {$expected} (or revised {$revised}), found {$actual}.");
             }
         }
     }
@@ -839,21 +916,27 @@ class ReviewedWorkbookImportService
         return null;
     }
 
-    public static function parseMoneyDecimal(mixed $val): float
+    public static function parseMoneyDecimal(mixed $val, ?string &$error = null): float
     {
+        $error = null;
         if ($val === null || $val === '') {
             return 0.00;
         }
-        $cleaned = str_replace([',', ' '], '', trim((string) $val));
+        $raw = trim((string) $val);
+        $cleaned = str_replace([',', ' '], '', $raw);
         if (!is_numeric($cleaned)) {
+            $error = "Non-numeric monetary string '{$raw}'";
             return 0.00;
         }
         return round((float) $cleaned, 2);
     }
 
-    public static function parseMoneyMinor(mixed $val): int
+    public static function parseMoneyMinor(mixed $val, ?string &$error = null): int
     {
-        $decimal = self::parseMoneyDecimal($val);
+        $decimal = self::parseMoneyDecimal($val, $error);
+        if ($error !== null) {
+            return 0;
+        }
         return (int) round($decimal * 100);
     }
 

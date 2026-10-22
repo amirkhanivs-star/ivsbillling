@@ -18,6 +18,7 @@ final class InvoiceService {
                 ->join('students as s', 's.id', '=', 'e.student_id')
                 ->where('e.campus_id', $run->campus_id)->where('e.department_id', $run->department_id)
                 ->where('e.status', 'active')->where('p.is_active', true)->where('p.frequency', $run->frequency)
+                ->whereNotIn('s.status', ['review_hold', 'historical_hold', 'suspended', 'left'])
                 ->where(fn ($q) => $q->whereNull('e.started_on')->orWhere('e.started_on', '<=', $run->period_end))
                 ->where(fn ($q) => $q->whereNull('e.ended_on')->orWhere('e.ended_on', '>=', $run->period_start))
                 ->where(fn ($q) => $q->whereNull('p.effective_from')->orWhere('p.effective_from', '<=', $run->period_end))
