@@ -386,7 +386,15 @@ class BillingController {
    ->get() : collect();
   $catalogRates = DB::table('fee_catalog_rates')->get();
 
-  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','dueGroups','scopes','registrationStatus','summaryMetrics','feeTypes','familyStudents','catalogRates'));
+  $familyGrNumbers = $family ? DB::table('students')->where('family_id', $family->id)->pluck('gr_number')->filter()->all() : [];
+  $historicalCollections = (\Illuminate\Support\Facades\Schema::hasTable('qa_staged_collections') && !empty($familyGrNumbers))
+   ? DB::table('qa_staged_collections')->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
+   : collect();
+  $historicalDues = (\Illuminate\Support\Facades\Schema::hasTable('qa_staged_dues') && !empty($familyGrNumbers))
+   ? DB::table('qa_staged_dues')->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
+   : collect();
+
+  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','dueGroups','scopes','registrationStatus','summaryMetrics','feeTypes','familyStudents','catalogRates','historicalCollections','historicalDues'));
  }
 
  public function createChallanFee(Request $r){

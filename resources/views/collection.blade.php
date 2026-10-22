@@ -223,8 +223,8 @@
                                     </span>
                                     @if((int)$item->discount_minor > 0)
                                         <div style="margin-top: 3px;">
-                                            <span class="ms-pill-lavender" style="color: #28c76f; background: #eafbf1; font-size: 10px; font-weight: 600;" title="Discount applied: SAR {{ number_format($item->discount_minor / 100, 2) }}">
-                                                -{{ number_format($item->discount_minor / 100, 0) }} disc
+                                            <span class="ms-pill-lavender" style="color: #28c76f; background: #eafbf1; font-size: 10px; font-weight: 600;" title="Discount applied: {{ $item->currency }} {{ number_format($item->discount_minor / 100, 2) }}">
+                                                -{{ $item->currency }} {{ number_format($item->discount_minor / 100, 0) }} disc
                                             </span>
                                             @if(!empty($item->discount_reason))
                                                 <div style="font-size: 9px; color: #a5a2b8; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Reason: {{ $item->discount_reason }}">
@@ -236,7 +236,7 @@
                                 </td>
                                 <td>
                                     <span class="ms-pill-lavender row-balance-pill" id="balance-pill-{{ $item->id }}">
-                                        {{ $balanceFmt }}
+                                        {{ $item->currency }} {{ $balanceFmt }}
                                     </span>
                                 </td>
                                 <td>
@@ -245,6 +245,7 @@
                                             <button type="button" class="btn-ms-disc action-trigger"
                                                 data-action="discount"
                                                 data-id="{{ $item->id }}"
+                                                data-currency="{{ $item->currency }}"
                                                 data-student="{{ $item->student_name }}"
                                                 data-month="{{ $periodLabel }}"
                                                 data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
@@ -256,6 +257,7 @@
                                             <button type="button" class="btn-ms-square-action action-trigger"
                                                 data-action="installment"
                                                 data-id="{{ $item->id }}"
+                                                data-currency="{{ $item->currency }}"
                                                 data-student="{{ $item->student_name }}"
                                                 data-month="{{ $periodLabel }}"
                                                 data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
@@ -266,6 +268,7 @@
                                             <button type="button" class="btn-ms-square-action action-trigger"
                                                 data-action="exempt"
                                                 data-id="{{ $item->id }}"
+                                                data-currency="{{ $item->currency }}"
                                                 data-student="{{ $item->student_name }}"
                                                 data-month="{{ $periodLabel }}"
                                                 data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
@@ -277,6 +280,7 @@
                                                 <button type="button" class="btn-ms-square-action danger action-trigger"
                                                     data-action="void"
                                                     data-id="{{ $item->id }}"
+                                                    data-currency="{{ $item->currency }}"
                                                     data-student="{{ $item->student_name }}"
                                                     data-month="{{ $periodLabel }}"
                                                     data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
@@ -306,13 +310,13 @@
             </div>
         </div>
 
-        {{-- BOTTOM CARD: FEE HISTORY (Matching Image 1) --}}
+        {{-- BOTTOM CARD: NEW PORTAL PAYMENTS & HISTORICAL MYSKOOL ARCHIVE --}}
         @if($family)
             <div class="myskool-card">
                 <div class="myskool-history-header" id="historyToggleBtn">
                     <div class="myskool-history-title">
-                        <span>Fee History</span>
-                        <span style="font-size: 12px; color: #b9b9c3;">&#9707;</span>
+                        <span>New Portal Payments (Receipts)</span>
+                        <span style="font-size: 11px; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;">Live Portal Receipts</span>
                     </div>
                     <div class="myskool-history-chevron" id="historyChevron">&uarr;</div>
                 </div>
@@ -350,8 +354,8 @@
                                     <td>{{ $feeTypesStr }}</td>
                                     <td>{{ $classesStr }}</td>
                                     <td><span class="ms-pill-lavender">{{ $monthsStr }}</span></td>
-                                    <td>{{ (int)$payment->total_discount_minor > 0 ? number_format($payment->total_discount_minor / 100, 0) : '0' }}</td>
-                                    <td><b>{{ number_format($payment->amount_minor / 100, 0) }}</b></td>
+                                    <td>{{ (int)$payment->total_discount_minor > 0 ? $payment->currency . ' ' . number_format($payment->total_discount_minor / 100, 2) : '0' }}</td>
+                                    <td><b>{{ $payment->currency }} {{ number_format($payment->amount_minor / 100, 2) }}</b></td>
                                     <td>{{ \Carbon\Carbon::parse($payment->received_on)->format('d M Y') }}</td>
                                     <td>
                                         <div style="font-size: 11px; color: #5e5873;">{{ $payment->received_by_name ?? 'coordinatorivs92@gmail.com' }}</div>
@@ -366,6 +370,7 @@
                                                 <button type="button" class="btn-ms-square-action danger action-trigger"
                                                     data-action="reverse"
                                                     data-id="{{ $payment->id }}"
+                                                    data-currency="{{ $payment->currency }}"
                                                     data-slip="{{ $payment->receipt_number }}"
                                                     data-balance="{{ number_format($payment->amount_minor / 100, 2, '.', '') }}"
                                                     title="Reverse Receipt">
@@ -378,7 +383,7 @@
                             @empty
                                 <tr>
                                     <td colspan="9" style="text-align: center; padding: 18px; color: #b9b9c3;">
-                                        No fee payment slips recorded.
+                                        No live portal fee payment receipts recorded yet.
                                     </td>
                                 </tr>
                             @endforelse
@@ -386,6 +391,55 @@
                     </table>
                 </div>
             </div>
+
+            {{-- HISTORICAL MYSKOOL ARCHIVE SECTION --}}
+            @if(($historicalCollections ?? collect())->isNotEmpty() || ($historicalDues ?? collect())->isNotEmpty())
+                <div class="myskool-card" style="margin-top: 16px; border-left: 4px solid #f59e0b;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #ebe9f1; background: #fffbeb;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <strong style="color: #92400e; font-size: 13px;">📑 Historical MySkool Archive (October 22 Staging — Read-Only)</strong>
+                            <span style="font-size: 10px; background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 12px; font-weight: 700; border: 1px solid #fde68a;">Legacy MySkool Collections</span>
+                        </div>
+                        <span style="font-size: 11px; color: #b45309;">Verified Source Staging Records</span>
+                    </div>
+
+                    @if(($historicalCollections ?? collect())->isNotEmpty())
+                        <div style="overflow-x: auto; padding: 10px 14px;">
+                            <div style="font-size: 11px; font-weight: 600; color: #64748b; margin-bottom: 6px;">Historical MySkool Receipt Slips ({{ $historicalCollections->count() }}):</div>
+                            <table class="myskool-table" style="font-size: 11px;">
+                                <thead>
+                                    <tr style="background: #f8fafc;">
+                                        <th>SLIP NO#</th>
+                                        <th>GR</th>
+                                        <th>STUDENT</th>
+                                        <th>FEE PARTICULAR</th>
+                                        <th>PAYMENT DATE</th>
+                                        <th>CURRENCY</th>
+                                        <th>AMOUNT</th>
+                                        <th>METHOD</th>
+                                        <th>STATUS / SOURCE</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach($historicalCollections as $col)
+                                        <tr>
+                                            <td><span class="ms-pill-lavender" style="font-weight: 700;">{{ $col->slip_number ?: '—' }}</span></td>
+                                            <td><b>{{ $col->gr_number }}</b></td>
+                                            <td>{{ $col->student_name }}</td>
+                                            <td>{{ $col->fee_particular }}</td>
+                                            <td>{{ $col->payment_date_parsed ?: $col->payment_date_raw }}</td>
+                                            <td><b>{{ $col->currency ?: 'UNRESOLVED' }}</b></td>
+                                            <td><b>{{ $col->currency }} {{ number_format($col->amount, 2) }}</b></td>
+                                            <td>{{ $col->payment_method ?: 'Cash' }}</td>
+                                            <td><span class="ms-pill-lavender" style="background: #fef3c7; color: #92400e; font-size: 9px; font-weight: 600;">MySkool Historical (Read-Only)</span></td>
+                                        </tr>
+                                    @endforeach
+                                </tbody>
+                            </table>
+                        </div>
+                    @endif
+                </div>
+            @endif
         @endif
     </div>
 
@@ -427,7 +481,21 @@
 
                 {{-- Total Dues --}}
                 <div class="myskool-form-group">
-                    <label>Total dues</label>
+                    <label style="display: flex; justify-content: space-between; align-items: center;">
+                        <span>Total dues</span>
+                        @if($dueGroups->isNotEmpty())
+                            <span style="font-size: 11px; color: var(--ms-purple); font-weight: 600;">
+                                {{ $dueGroups->pluck('currency')->unique()->implode(', ') }}
+                            </span>
+                        @endif
+                    </label>
+                    @if($dueGroups->isNotEmpty())
+                        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px;">
+                            @foreach($dueGroups as $dg)
+                                <span class="ms-pill-lavender" style="font-size: 11px; font-weight: 600;">{{ $dg->currency }} {{ number_format($dg->balance / 100, 2) }}</span>
+                            @endforeach
+                        </div>
+                    @endif
                     <input class="myskool-input disabled" id="disp_total_dues" readonly value="{{ number_format($totalDuesVal / 100, 0, '.', '') }}">
                 </div>
 
@@ -685,6 +753,7 @@
   const instBlock = document.getElementById('drawer_installment_block');
 
   let activeItemBalance = 0;
+  let activeCurrency = 'SAR';
   let activeRowEl = null;
 
   function openActionDrawer(btn) {
@@ -693,13 +762,14 @@
     const balance = Number(btn.dataset.balance) || 0;
     const existingDiscount = Number(btn.dataset.discount) || 0;
     const existingReason = btn.dataset.discountReason || '';
+    activeCurrency = btn.dataset.currency || 'SAR';
 
     activeItemBalance = balance;
     activeRowEl = btn.closest('tr');
 
     drawerItemId.value = btn.dataset.id || '';
     drawerPaymentId.value = btn.dataset.id || '';
-    drawerCurBal.value = balance.toFixed(0);
+    drawerCurBal.value = activeCurrency + ' ' + balance.toFixed(0);
     drawerReason.value = '';
     if (drawerReasonCat) drawerReasonCat.value = '';
 
@@ -721,14 +791,14 @@
 
       if (existingDiscount > 0) {
         if (drawerExistBox) drawerExistBox.style.display = 'block';
-        if (drawerExistVal) drawerExistVal.textContent = 'SAR ' + existingDiscount.toFixed(2);
+        if (drawerExistVal) drawerExistVal.textContent = activeCurrency + ' ' + existingDiscount.toFixed(2);
         if (drawerExistReason) drawerExistReason.textContent = existingReason ? ('Reason: ' + existingReason) : '';
         drawerDiscInput.value = existingDiscount.toFixed(0);
         drawerReason.value = existingReason;
       } else {
         drawerDiscInput.value = '';
       }
-      drawerNetBal.value = balance.toFixed(0);
+      drawerNetBal.value = activeCurrency + ' ' + balance.toFixed(0);
     } else if (action === 'installment') {
       drawerHeading.textContent = 'Installment Plan';
       drawerForm.action = '/challan/installment';
@@ -741,7 +811,7 @@
       drawerHeading.textContent = 'Exempt Fee';
       drawerForm.action = '/challan/exempt';
       drawerDiscInput.value = balance.toFixed(0);
-      drawerNetBal.value = '0';
+      drawerNetBal.value = activeCurrency + ' 0';
       if (drawerReasonCatBlock) drawerReasonCatBlock.hidden = true;
       drawerReason.placeholder = 'Enter exemption justification';
     } else if (action === 'void') {
@@ -785,7 +855,7 @@
     drawerDiscInput.addEventListener('input', () => {
       const discVal = Number(drawerDiscInput.value) || 0;
       const net = Math.max(0, activeItemBalance - discVal);
-      drawerNetBal.value = net.toFixed(0);
+      drawerNetBal.value = activeCurrency + ' ' + net.toFixed(0);
     });
   }
 
