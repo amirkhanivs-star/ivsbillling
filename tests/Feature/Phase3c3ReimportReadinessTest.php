@@ -541,4 +541,77 @@ class Phase3c3ReimportReadinessTest extends TestCase
         $this->assertSame('generated', DB::table('invoices')->where('id', $inv->id)->value('status'));
         $this->assertSame(0, DB::table('payment_allocations')->where('payment_id', $payment->id)->count());
     }
+
+    /**
+     * Test 10: QaPostOpeningBalancesCommand Dry-Run, Force Execution and Idempotency.
+     */
+    public function test_qa_post_opening_balances_command_dry_run_and_force_execution(): void
+    {
+        $env = $this->setupBaseEnvironment();
+
+        $family = DB::table('families')->insertGetId(['family_code' => 'FAM-CMD-01', 'created_at' => now(), 'updated_at' => now()]);
+        $student = DB::table('students')->insertGetId(['gr_number' => 'GR-CMD-01', 'family_id' => $family, 'status' => 'present', 'name' => 'Cmd Student', 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('enrollments')->insert(['student_id' => $student, 'campus_id' => $env['campus'], 'department_id' => $env['deptSchool'], 'currency' => 'SAR', 'monthly_fee_minor' => 45000, 'status' => 'active', 'created_at' => now(), 'updated_at' => now()]);
+
+        $batch = 'BATCH-CMD-TEST';
+        DB::table('qa_staged_dues')->insert([
+            'batch_id' => $batch,
+            'source_row' => 701,
+            'gr_number' => 'GR-CMD-01',
+            'class_in_dues_report' => 'Grade 4',
+            'fee_particular' => 'Monthly Fee - Oct-2026',
+            'currency' => 'SAR',
+            'outstanding_amount' => 450.00,
+            'outstanding_amount_minor' => 45000,
+            'is_currency_unresolved' => false,
+            'has_currency_conflict' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // 1. Dry run
+        $this->artisan('qa:post-opening-balances', ['--batch-id' => $batch, '--dry-run' => true, '--conn' => 'sqlite'])
+            ->expectsOutputToContain('DRY-RUN MODE COMPLETE: Zero records were written to the ledger.')
+            ->assertExitCode(0);
+
+        $this->assertSame(0, DB::table('invoices')->where('family_id', $family)->count());
+
+        // 2. Force execution
+        $this->artisan('qa:post-opening-balances', ['--batch-id' => $batch, '--force' => true, '--yes' => true, '--conn' => 'sqlite'])
+            ->expectsOutputToContain('OPENING BALANCES SUCCESSFULLY POSTED TO QA LEDGER')
+            ->assertExitCode(0);
+
+        $this->assertSame(1, DB::table('invoices')->where('family_id', $family)->count());
+        $this->assertSame(1, DB::table('qa_opening_balance_lineage')->where('batch_id', $batch)->count());
+
+        // 3. Repeat run (Idempotency)
+        $this->artisan('qa:post-opening-balances', ['--batch-id' => $batch, '--force' => true, '--yes' => true, '--conn' => 'sqlite'])
+            ->expectsOutputToContain('ALL ELIGIBLE ROWS (1) ALREADY POSTED')
+            ->assertExitCode(0);
+
+        $this->assertSame(1, DB::table('invoices')->where('family_id', $family)->count(), 'Must not duplicate invoices.');
+    }
+
+    /**
+     * Test 11: Portal Student Profile and Migration Views Render Cleanly.
+     */
+    public function test_portal_student_profile_and_migration_views_render_cleanly(): void
+    {
+        $env = $this->setupBaseEnvironment();
+
+        $family = DB::table('families')->insertGetId(['family_code' => 'FAM-VIEW-01', 'created_at' => now(), 'updated_at' => now()]);
+        $studentId = DB::table('students')->insertGetId(['gr_number' => 'GR-VIEW-01', 'family_id' => $family, 'status' => 'present', 'name' => 'View Student', 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('enrollments')->insert(['student_id' => $studentId, 'campus_id' => $env['campus'], 'department_id' => $env['deptSchool'], 'currency' => 'SAR', 'monthly_fee_minor' => 30000, 'status' => 'active', 'created_at' => now(), 'updated_at' => now()]);
+
+        // Authenticate as QA admin
+        $response = $this->actingAs($env['user'])->get("/manage-student/{$studentId}");
+        $response->assertStatus(200);
+        $response->assertSee('View Student');
+        $response->assertSee('GR-VIEW-01');
+
+        // Opening Balances Preview View
+        $previewResp = $this->actingAs($env['user'])->get('/migration/opening-balances');
+        $previewResp->assertStatus(200);
+        $previewResp->assertSee('Opening Balances Preview');
+    }
 }

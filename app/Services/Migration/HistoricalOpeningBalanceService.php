@@ -597,6 +597,7 @@ class HistoricalOpeningBalanceService
                         'amount_minor' => $item['amount_minor'],
                         'period_key' => $group['period_key'],
                         'created_at' => $now,
+                        'updated_at' => $now,
                     ]);
 
                     $postedItemsCount++;
