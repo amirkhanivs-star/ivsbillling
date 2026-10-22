@@ -286,6 +286,16 @@ class Phase3c3OpeningBalanceEngineTest extends TestCase
         $campus = DB::table('campuses')->value('id');
         $deptSchool = DB::table('departments')->where('code', 'school')->value('id');
 
+        $user = User::create([
+            'name' => 'Admin User',
+            'email' => 'admin_posting@example.com',
+            'password' => bcrypt('testing-password'),
+            'role' => 'super_admin',
+            'campus_id' => $campus,
+            'department_id' => $deptSchool,
+            'is_active' => true,
+        ]);
+
         $family = DB::table('families')->insertGetId([
             'family_code' => 'FAM-IDEM-01',
             'guardian_name' => 'Idempotency Parent',

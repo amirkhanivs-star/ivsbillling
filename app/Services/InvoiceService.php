@@ -19,6 +19,9 @@ final class InvoiceService {
                 ->where('e.campus_id', $run->campus_id)->where('e.department_id', $run->department_id)
                 ->where('e.status', 'active')->where('p.is_active', true)->where('p.frequency', $run->frequency)
                 ->whereNotIn('s.status', ['review_hold', 'historical_hold', 'suspended', 'left'])
+                ->whereNotNull('e.currency')->where('e.currency', '!=', 'PENDING')->where('e.currency', '!=', '')
+                ->whereNotNull('p.currency')->where('p.currency', '!=', 'PENDING')->where('p.currency', '!=', '')
+                ->whereColumn('p.currency', 'e.currency')
                 ->where(fn ($q) => $q->whereNull('e.started_on')->orWhere('e.started_on', '<=', $run->period_end))
                 ->where(fn ($q) => $q->whereNull('e.ended_on')->orWhere('e.ended_on', '>=', $run->period_start))
                 ->where(fn ($q) => $q->whereNull('p.effective_from')->orWhere('p.effective_from', '<=', $run->period_end))
@@ -42,7 +45,21 @@ final class InvoiceService {
                     ->select('i.*')->lockForUpdate()->first();
 
                 foreach ($group as $plan) {
-                    if (DB::table('invoice_items')->where('fee_plan_item_id', $plan->id)->where('period_key', $run->period_key)->exists()) {
+                    // Check if obligation is already represented in an existing invoice item,
+                    // recurring fee run, or historical opening balance invoice
+                    $alreadyRepresented = DB::table('invoice_items as ii')
+                        ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+                        ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
+                        ->where('ii.enrollment_id', $plan->enrollment_id)
+                        ->where('ii.period_key', $run->period_key)
+                        ->where(function ($q) use ($plan) {
+                            $q->where('ii.fee_plan_item_id', $plan->id)
+                              ->orWhere('br.frequency', 'opening_balance')
+                              ->orWhere('ii.fee_type_id', $plan->fee_type_id);
+                        })
+                        ->exists();
+
+                    if ($alreadyRepresented) {
                         $skipped++;
                         continue;
                     }

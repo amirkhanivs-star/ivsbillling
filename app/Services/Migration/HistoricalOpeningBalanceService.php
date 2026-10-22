@@ -296,12 +296,21 @@ class HistoricalOpeningBalanceService
 
         $totalExcludedCount = array_sum(array_map('count', $excludedRows));
 
+        $alreadyPostedCount = 0;
+        if ($db->getSchemaBuilder()->hasTable('qa_opening_balance_lineage')) {
+            $alreadyPostedCount = $db->table('qa_opening_balance_lineage')
+                ->where('batch_id', $batchId)
+                ->count();
+        }
+
         return [
             'status' => 'success',
             'batch_id' => $batchId,
             'summary' => [
                 'total_staged_dues' => count($dues),
                 'eligible_rows' => count($eligibleRows),
+                'already_posted_lines' => $alreadyPostedCount,
+                'remaining_eligible_lines' => max(0, count($eligibleRows) - $alreadyPostedCount),
                 'excluded_rows_count' => $totalExcludedCount,
                 'invoices_to_create' => count($invoicesGrouped),
             ],
@@ -437,99 +446,128 @@ class HistoricalOpeningBalanceService
             // Group invoices from preview
             $grouped = $this->buildInvoiceGroups($db, $batchId, $conn);
 
-            // Fetch default fee type for historical opening balance
-            $feeType = $db->table('fee_types')->where('code', 'monthly')->first();
-            $feeTypeId = $feeType ? $feeType->id : 1;
+            // Fetch dynamic fee types map
+            $feeTypesByCode = $db->table('fee_types')->pluck('id', 'code')->all();
+            if (empty($feeTypesByCode)) {
+                throw new RuntimeException('Cannot post opening balances: fee_types table is empty.');
+            }
+
+            // Fetch department codes
+            $deptCodes = $db->table('departments')->pluck('code', 'id')->all();
+
+            // Resolve system actor safely without creating backdoor accounts
+            $userId = auth()->id()
+                ?: $db->table('users')->where('is_active', true)->whereIn('role', ['admin', 'super_admin'])->value('id')
+                ?: $db->table('users')->where('is_active', true)->value('id')
+                ?: $db->table('users')->value('id');
+
+            if (!$userId) {
+                throw new RuntimeException('Cannot post opening balances: No active system user found to record audit ownership.');
+            }
 
             foreach ($grouped as $groupKey => $group) {
-                // Check if any items in this group were already posted (source-line idempotency)
                 $stagedDueIds = collect($group['items'])->pluck('source_staged_due_id')->all();
-                $alreadyPostedCount = $db->table('qa_opening_balance_lineage')
-                    ->whereIn('qa_staged_due_id', $stagedDueIds)
-                    ->count();
 
-                if ($alreadyPostedCount === count($stagedDueIds)) {
-                    // Entire invoice was already posted in a prior run
+                // Fetch any existing lineages for this group's source lines
+                $existingLineages = $db->table('qa_opening_balance_lineage')
+                    ->whereIn('qa_staged_due_id', $stagedDueIds)
+                    ->get()
+                    ->keyBy('qa_staged_due_id');
+
+                // Determine unposted items
+                $unpostedItems = collect($group['items'])->filter(function ($item) use ($existingLineages) {
+                    return !$existingLineages->has($item['source_staged_due_id']);
+                })->values();
+
+                if ($unpostedItems->isEmpty()) {
+                    // All items in this group were already posted in a prior run
                     continue;
                 }
 
-                // 1. Create Opening Balance Billing Run
-                $userId = (int) ($db->table('users')->value('id') ?: 1);
-                if (!$db->table('users')->where('id', $userId)->exists()) {
-                    $userId = $db->table('users')->insertGetId([
-                        'name' => 'System Migration',
-                        'email' => 'system_migration@example.test',
-                        'password' => bcrypt('secret'),
-                        'role' => 'super_admin',
-                        'is_active' => true,
+                // Check if an invoice already exists for this group
+                $invoiceId = null;
+                if ($existingLineages->isNotEmpty()) {
+                    $invoiceId = (int) $existingLineages->first()->invoice_id;
+                } else {
+                    // Check if an opening-balance invoice exists for this family, dept, campus, curr, period
+                    $existingInvoiceId = $db->table('invoices as i')
+                        ->join('billing_runs as br', 'br.id', '=', 'i.billing_run_id')
+                        ->where('i.family_id', $group['family_id'])
+                        ->where('i.department_id', $group['department_id'])
+                        ->where('i.campus_id', $group['campus_id'])
+                        ->where('i.currency', $group['currency'])
+                        ->where('br.frequency', 'opening_balance')
+                        ->where('br.period_key', $group['period_key'])
+                        ->value('i.id');
+                    $invoiceId = $existingInvoiceId ? (int) $existingInvoiceId : null;
+                }
+
+                if (!$invoiceId) {
+                    // Create Billing Run for opening balance if not exists
+                    $billingRun = $db->table('billing_runs')
+                        ->where('campus_id', $group['campus_id'])
+                        ->where('department_id', $group['department_id'])
+                        ->where('frequency', 'opening_balance')
+                        ->where('period_key', $group['period_key'])
+                        ->first();
+
+                    $billingRunId = $billingRun ? (int) $billingRun->id : (int) $db->table('billing_runs')->insertGetId([
+                        'campus_id' => $group['campus_id'],
+                        'department_id' => $group['department_id'],
+                        'frequency' => 'opening_balance',
+                        'period_key' => $group['period_key'],
+                        'period_start' => $group['period_start'],
+                        'period_end' => $group['period_end'],
+                        'due_date' => $group['due_date'],
+                        'fee_type_ids' => json_encode(array_values($feeTypesByCode)),
+                        'status' => 'generated',
+                        'created_by' => $userId,
                         'created_at' => $now,
                         'updated_at' => $now,
                     ]);
-                }
 
-                $billingRunId = $db->table('billing_runs')->insertGetId([
-                    'campus_id' => $group['campus_id'],
-                    'department_id' => $group['department_id'],
-                    'frequency' => 'opening_balance',
-                    'period_key' => $group['period_key'],
-                    'period_start' => $group['period_start'],
-                    'period_end' => $group['period_end'],
-                    'due_date' => $group['due_date'],
-                    'fee_type_ids' => json_encode([$feeTypeId]),
-                    'status' => 'generated',
-                    'created_by' => $userId,
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ]);
+                    // Generate unique opening balance invoice number
+                    $deptCode = $deptCodes[$group['department_id']] ?? 'SCH';
+                    $prefix = strtoupper(substr($deptCode, 0, 3)) . '-OB';
+                    $year = date('Y', strtotime($group['period_start']));
+                    $invNumber = sprintf('%s-%s-%07d', $prefix, $year, $billingRunId);
 
-                // 2. Generate unique opening balance invoice number
-                $prefix = $group['department_id'] === 2 ? 'TUI-OB' : 'SCH-OB';
-                $year = date('Y', strtotime($group['period_start']));
-                $invNumber = sprintf('%s-%s-%07d', $prefix, $year, $billingRunId);
-
-                // Ensure uniqueness
-                $seq = 1;
-                while ($db->table('invoices')->where('invoice_number', $invNumber)->exists()) {
-                    $invNumber = sprintf('%s-%s-%07d-%d', $prefix, $year, $billingRunId, $seq++);
-                }
-
-                $invoiceId = $db->table('invoices')->insertGetId([
-                    'billing_run_id' => $billingRunId,
-                    'family_id' => $group['family_id'],
-                    'campus_id' => $group['campus_id'],
-                    'department_id' => $group['department_id'],
-                    'currency' => $group['currency'],
-                    'invoice_number' => $invNumber,
-                    'issued_on' => $group['period_start'],
-                    'due_date' => $group['due_date'],
-                    'total_minor' => $group['total_minor'],
-                    'paid_minor' => 0,
-                    'previous_dues_snapshot_minor' => 0,
-                    'status' => 'generated',
-                    'approved_to_send' => 0,
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ]);
-
-                $postedInvoicesCount++;
-
-                // 3. Create invoice items and lineage
-                foreach ($group['items'] as $item) {
-                    // Check if specific source line was already posted
-                    $exists = $db->table('qa_opening_balance_lineage')
-                        ->where('qa_staged_due_id', $item['source_staged_due_id'])
-                        ->exists();
-
-                    if ($exists) {
-                        continue;
+                    $seq = 1;
+                    while ($db->table('invoices')->where('invoice_number', $invNumber)->exists()) {
+                        $invNumber = sprintf('%s-%s-%07d-%d', $prefix, $year, $billingRunId, $seq++);
                     }
 
-                    $itemId = $db->table('invoice_items')->insertGetId([
+                    $invoiceId = (int) $db->table('invoices')->insertGetId([
+                        'billing_run_id' => $billingRunId,
+                        'family_id' => $group['family_id'],
+                        'campus_id' => $group['campus_id'],
+                        'department_id' => $group['department_id'],
+                        'currency' => $group['currency'],
+                        'invoice_number' => $invNumber,
+                        'issued_on' => $group['period_start'],
+                        'due_date' => $group['due_date'],
+                        'total_minor' => 0,
+                        'paid_minor' => 0,
+                        'previous_dues_snapshot_minor' => 0,
+                        'status' => 'generated',
+                        'approved_to_send' => 0,
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ]);
+
+                    $postedInvoicesCount++;
+                }
+
+                // Insert only unposted items
+                foreach ($unpostedItems as $item) {
+                    $itemFeeTypeId = $this->resolveFeeTypeId($item['fee_particular'], $feeTypesByCode);
+
+                    $itemId = (int) $db->table('invoice_items')->insertGetId([
                         'invoice_id' => $invoiceId,
                         'student_id' => $item['student_id'],
                         'enrollment_id' => $item['enrollment_id'],
                         'fee_plan_item_id' => null,
-                        'fee_type_id' => $feeTypeId,
+                        'fee_type_id' => $itemFeeTypeId,
                         'description' => $item['fee_particular'],
                         'period_key' => $group['period_key'],
                         'period_start' => $group['period_start'],
@@ -559,12 +597,28 @@ class HistoricalOpeningBalanceService
                         'amount_minor' => $item['amount_minor'],
                         'period_key' => $group['period_key'],
                         'created_at' => $now,
-                        'updated_at' => $now,
                     ]);
 
                     $postedItemsCount++;
                     $totalsPostedByCurrency[$group['currency']] = ($totalsPostedByCurrency[$group['currency']] ?? 0) + $item['amount_minor'];
                 }
+
+                // Refresh parent invoice totals accurately from actual attached invoice items
+                $invTotals = $db->table('invoice_items')
+                    ->where('invoice_id', $invoiceId)
+                    ->selectRaw('COALESCE(SUM(net_minor), 0) AS total, COALESCE(SUM(paid_minor), 0) AS paid')
+                    ->first();
+
+                $invStatus = ($invTotals->paid >= $invTotals->total && $invTotals->total > 0)
+                    ? 'paid'
+                    : ($invTotals->paid > 0 ? 'partial' : 'generated');
+
+                $db->table('invoices')->where('id', $invoiceId)->update([
+                    'total_minor' => (int) $invTotals->total,
+                    'paid_minor' => (int) $invTotals->paid,
+                    'status' => $invStatus,
+                    'updated_at' => $now,
+                ]);
             }
 
             return [
@@ -665,6 +719,35 @@ class HistoricalOpeningBalanceService
         }
 
         return $invoicesGrouped;
+    }
+
+    /**
+     * Map fee particular text to appropriate fee type without arbitrary default fallback.
+     */
+    public function resolveFeeTypeId(string $particular, array $feeTypesByCode): int
+    {
+        $p = strtolower(trim($particular));
+        if (str_contains($p, 'admission')) {
+            $code = 'admission';
+        } elseif (str_contains($p, 'registration')) {
+            $code = 'registration';
+        } elseif (str_contains($p, 'books')) {
+            $code = 'books';
+        } elseif (str_contains($p, 'slc')) {
+            $code = 'slc_charges';
+        } elseif (str_contains($p, 're-exam') || str_contains($p, 're_exam')) {
+            $code = 're_exam';
+        } elseif (str_contains($p, 'exam')) {
+            $code = 'exam';
+        } else {
+            $code = 'monthly';
+        }
+
+        if (!isset($feeTypesByCode[$code])) {
+            throw new RuntimeException("Fee type code '{$code}' not found in fee_types catalog for particular: '{$particular}'");
+        }
+
+        return (int) $feeTypesByCode[$code];
     }
 
     private function validateQaConnection(string $conn): void
