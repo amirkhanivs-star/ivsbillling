@@ -102,7 +102,11 @@ class Phase3c1ReviewedWorkbookImportTest extends TestCase
         $sheetDue->fromArray($dueRows, null, 'A2');
 
         $writer = new Xlsx($spreadsheet);
-        $tempPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'test_workbook_' . uniqid() . '.xlsx';
+        $tempDir = storage_path('framework/testing');
+        if (!is_dir($tempDir)) {
+            @mkdir($tempDir, 0777, true);
+        }
+        $tempPath = $tempDir . DIRECTORY_SEPARATOR . 'test_workbook_' . uniqid() . '.xlsx';
         $writer->save($tempPath);
 
         $spreadsheet->disconnectWorksheets();

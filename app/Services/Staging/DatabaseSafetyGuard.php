@@ -153,7 +153,7 @@ class DatabaseSafetyGuard
             $row = $conn->selectOne('SELECT DATABASE() as current_db');
             $activeDb = $row?->current_db ?? $conn->getDatabaseName();
         } catch (\Throwable $e) {
-            return;
+            $activeDb = $conn->getDatabaseName();
         }
 
         if (strtolower((string) $activeDb) === strtolower(self::FORBIDDEN_QUARANTINE_DATABASE)) {
@@ -180,7 +180,7 @@ class DatabaseSafetyGuard
             $row = $conn->selectOne('SELECT DATABASE() as current_db');
             $activeDb = $row?->current_db ?? $conn->getDatabaseName();
         } catch (\Throwable $e) {
-            return;
+            $activeDb = $conn->getDatabaseName();
         }
 
         if (strtolower((string) $activeDb) === strtolower(self::REQUIRED_STAGING_DATABASE)) {

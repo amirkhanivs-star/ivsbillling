@@ -21,9 +21,27 @@ class QaPostOpeningBalancesCommand extends Command
     public function handle(HistoricalOpeningBalanceService $service): int
     {
         $conn = (string) ($this->option('conn') ?: config('database.default'));
-        $batchId = $this->option('batch-id')
-            ? (string) $this->option('batch-id')
-            : (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        $activeBatchId = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        $batchOption = $this->option('batch-id');
+
+        // Guard against ambiguous or unapproved batch specifications
+        if ($batchOption !== null && trim($batchOption) === '') {
+            $this->error('CRITICAL SAFETY STOP: Source batch ID cannot be empty. Ambiguous source identity is strictly rejected.');
+            return self::FAILURE;
+        }
+
+        $isSqlite = (config("database.connections.{$conn}.driver") === 'sqlite' || $conn === 'sqlite');
+        if (!$isSqlite && $batchOption !== null && $batchOption !== $activeBatchId) {
+            $this->error("CRITICAL SAFETY STOP: Batch '{$batchOption}' is not the approved active batch ('{$activeBatchId}'). Cross-batch posting is strictly rejected.");
+            return self::FAILURE;
+        }
+
+        if ($batchOption === 'BATCH-20261022-PORTAL-V2' && $activeBatchId !== 'BATCH-20261022-PORTAL-V2') {
+            $this->error("CRITICAL SAFETY STOP: Batch '{$batchOption}' is an unapproved historical workbook version. Only the approved revised batch '{$activeBatchId}' may be posted.");
+            return self::FAILURE;
+        }
+
+        $batchId = $batchOption ? (string) $batchOption : $activeBatchId;
 
         $this->line('');
         $this->info('========================================================================');

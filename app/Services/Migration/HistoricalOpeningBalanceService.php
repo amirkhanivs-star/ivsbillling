@@ -181,9 +181,9 @@ class HistoricalOpeningBalanceService
 
             // Check 8: Match to student's verified enrollment in target department
             $studentEnrollments = $enrollments->get($student->id, collect());
-            $matchedEnrollment = $studentEnrollments->first(fn($e) => (int) $e->department_id === $targetDeptId);
+            $matchingEnrollments = $studentEnrollments->filter(fn($e) => (int) $e->department_id === $targetDeptId);
 
-            if (!$matchedEnrollment) {
+            if ($matchingEnrollments->isEmpty()) {
                 $excludedRows['unmatched_enrollment'][] = [
                     'source_row' => $due->source_row,
                     'gr_number' => $due->gr_number,
@@ -195,6 +195,19 @@ class HistoricalOpeningBalanceService
                 ];
                 continue;
             }
+
+            if ($matchingEnrollments->count() > 1) {
+                $excludedRows['ambiguous_department'][] = [
+                    'source_row' => $due->source_row,
+                    'gr_number' => $due->gr_number,
+                    'target_department_id' => $targetDeptId,
+                    'reason' => 'Student has multiple active enrollments in target department (ambiguous enrollment identity)',
+                    'amount_minor' => $amtMinor,
+                ];
+                continue;
+            }
+
+            $matchedEnrollment = $matchingEnrollments->first();
 
             // Check 9: Currency Conflict between Enrollment and Dues
             if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {
@@ -423,7 +436,50 @@ class HistoricalOpeningBalanceService
             );
         }
 
-        $batchId = $batchId ?: (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        // Safeguard 1: Reject ambiguous or missing batch identity
+        if ($batchId !== null && trim($batchId) === '') {
+            throw new RuntimeException('CRITICAL SAFETY STOP: Source batch ID cannot be empty. Ambiguous source identity is strictly rejected.');
+        }
+
+        $activeBatchId = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        $batchId = $batchId ?: $activeBatchId;
+
+        // Safeguard 2: Enforce posting ONLY the explicitly selected approved source batch
+        $isSqlite = (config("database.connections.{$conn}.driver") === 'sqlite' || $conn === 'sqlite');
+        if (!$isSqlite && $batchId !== $activeBatchId) {
+            throw new RuntimeException(
+                "CRITICAL SAFETY STOP: Batch '{$batchId}' is not the approved active batch ('{$activeBatchId}'). " .
+                "Cross-batch posting is strictly rejected to prevent financial ledger corruption."
+            );
+        }
+
+        // Reject attempts to post the unapproved original October 22 batch when revised is active
+        if ($batchId === 'BATCH-20261022-PORTAL-V2' && $activeBatchId !== 'BATCH-20261022-PORTAL-V2') {
+            throw new RuntimeException(
+                "CRITICAL SAFETY STOP: Batch '{$batchId}' is an unapproved historical workbook version. " .
+                "Only the approved revised batch '{$activeBatchId}' may be posted."
+            );
+        }
+
+        $db = DB::connection($conn);
+
+        // Safeguard 3: Prevent mixing original and revised workbook balances in the financial ledger
+        if ($db->getSchemaBuilder()->hasTable('qa_opening_balance_lineage')) {
+            $existingBatches = $db->table('qa_opening_balance_lineage')
+                ->distinct()
+                ->pluck('batch_id')
+                ->filter()
+                ->all();
+
+            $foreignBatches = array_values(array_filter($existingBatches, fn($b) => $b !== $batchId));
+            if (!empty($foreignBatches)) {
+                throw new RuntimeException(
+                    "CRITICAL SAFETY STOP: Financial ledger already contains opening balance lineage from different batch: " .
+                    implode(', ', $foreignBatches) . ". Mixing original and revised workbook balances is strictly forbidden."
+                );
+            }
+        }
+
         $preview = $this->preview($conn, $batchId);
 
         if ($preview['status'] === 'empty' || empty($preview['summary']['eligible_rows'])) {
@@ -434,8 +490,6 @@ class HistoricalOpeningBalanceService
                 'posted_items' => 0,
             ];
         }
-
-        $db = DB::connection($conn);
 
         return $db->transaction(function () use ($db, $conn, $batchId, $preview) {
             $now = now();
@@ -562,6 +616,44 @@ class HistoricalOpeningBalanceService
                 foreach ($unpostedItems as $item) {
                     $itemFeeTypeId = $this->resolveFeeTypeId($item['fee_particular'], $feeTypesByCode);
 
+                    // Safeguard 4: Underlying financial obligation cross-batch duplicate protection
+                    // Check if this student enrollment already has this exact fee obligation represented in the ledger from another batch
+                    $conflictingQuery = $db->table('invoice_items as ii')
+                        ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+                        ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
+                        ->leftJoin('qa_opening_balance_lineage as obl', 'obl.invoice_item_id', '=', 'ii.id')
+                        ->where('br.frequency', 'opening_balance')
+                        ->where(function ($q) use ($batchId) {
+                            $q->whereNull('obl.id')
+                              ->orWhere('obl.batch_id', '!=', $batchId);
+                        })
+                        ->where('ii.enrollment_id', $item['enrollment_id'])
+                        ->where('ii.period_key', $group['period_key'])
+                        ->where('ii.fee_type_id', $itemFeeTypeId);
+
+                    if (preg_match('/\((.*?)\)/', $item['fee_particular'], $subMatch)) {
+                        $subject = trim($subMatch[1]);
+                        $conflictingQuery->where('ii.description', 'LIKE', "%{$subject}%");
+                    } else {
+                        $conflictingQuery->where('ii.description', trim($item['fee_particular']));
+                    }
+
+                    $conflictingObligation = $conflictingQuery
+                        ->select('ii.id', 'ii.description', 'obl.batch_id', 'obl.qa_staged_due_id')
+                        ->first();
+
+                    if ($conflictingObligation) {
+                        $conflictBatch = $conflictingObligation->batch_id ?? 'another batch';
+                        $conflictDue = $conflictingObligation->qa_staged_due_id ?? 'another staged row';
+                        throw new RuntimeException(
+                            "CRITICAL SAFETY STOP: Cross-batch duplicate financial obligation detected for student GR {$item['gr_number']} " .
+                            "('{$item['fee_particular']}') for period {$group['period_key']}. " .
+                            "This underlying financial obligation is already represented in the ledger by invoice item #{$conflictingObligation->id} " .
+                            "(Source Batch: {$conflictBatch}, Staged Due ID: {$conflictDue}). " .
+                            "Cross-batch duplicate posting rejected to protect ledger integrity."
+                        );
+                    }
+
                     $itemId = (int) $db->table('invoice_items')->insertGetId([
                         'invoice_id' => $invoiceId,
                         'student_id' => $item['student_id'],
@@ -677,9 +769,15 @@ class HistoricalOpeningBalanceService
             }
 
             $studentEnrollments = $enrollments->get($student->id, collect());
-            $matchedEnrollment = $studentEnrollments->first(fn($e) => (int) $e->department_id === $targetDeptId);
+            $matchingEnrollments = $studentEnrollments->filter(fn($e) => (int) $e->department_id === $targetDeptId);
 
-            if (!$matchedEnrollment || ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr)) {
+            if ($matchingEnrollments->count() !== 1) {
+                continue;
+            }
+
+            $matchedEnrollment = $matchingEnrollments->first();
+
+            if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {
                 continue;
             }
 

@@ -32,11 +32,13 @@ final class InvoiceService {
             $created = 0; $skipped = 0; $invoices = [];
             foreach ($items->groupBy(fn ($p) => $p->family_id.'|'.$p->currency) as $group) {
                 $first = $group->first();
-                // Reuse the existing unsent family invoice for the same period,
-                // even if another billing run was created later. The database's
-                // original unique key protects only one run, not the calendar period.
+                // Reuse the existing unsent family invoice for the same period and frequency,
+                // even if another billing run was created later.
+                // Critical: NEVER reuse historical opening-balance invoices for recurring monthly fees!
                 $invoice = DB::table('invoices as i')
                     ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+                    ->where('b.frequency', $run->frequency)
+                    ->where('b.frequency', '!=', 'opening_balance')
                     ->where('b.period_key', $run->period_key)
                     ->where('i.family_id', $first->family_id)
                     ->where('i.campus_id', $run->campus_id)
@@ -45,21 +47,33 @@ final class InvoiceService {
                     ->select('i.*')->lockForUpdate()->first();
 
                 foreach ($group as $plan) {
-                    // Check if obligation is already represented in an existing invoice item,
-                    // recurring fee run, or historical opening balance invoice
-                    $alreadyRepresented = DB::table('invoice_items as ii')
-                        ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
-                        ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
-                        ->where('ii.enrollment_id', $plan->enrollment_id)
-                        ->where('ii.period_key', $run->period_key)
-                        ->where(function ($q) use ($plan) {
-                            $q->where('ii.fee_plan_item_id', $plan->id)
-                              ->orWhere('br.frequency', 'opening_balance')
-                              ->orWhere('ii.fee_type_id', $plan->fee_type_id);
-                        })
+                    // 1. Regular billing check: Has THIS specific fee plan item already been invoiced for this period?
+                    $alreadyBilledInRecurring = DB::table('invoice_items')
+                        ->where('fee_plan_item_id', $plan->id)
+                        ->where('period_key', $run->period_key)
                         ->exists();
 
-                    if ($alreadyRepresented) {
+                    if ($alreadyBilledInRecurring) {
+                        $skipped++;
+                        continue;
+                    }
+
+                    // 2. Opening-balance check: Is this exact fee obligation already represented in historical opening balances?
+                    // Must match: same enrollment, same period, opening_balance frequency, AND exact fee_type_id!
+                    $obQuery = DB::table('invoice_items as ii')
+                        ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+                        ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
+                        ->where('br.frequency', 'opening_balance')
+                        ->where('ii.enrollment_id', $plan->enrollment_id)
+                        ->where('ii.period_key', $run->period_key)
+                        ->where('ii.fee_type_id', $plan->fee_type_id);
+
+                    // If plan item has a specific subject, require the opening balance description to match that subject
+                    if (!empty($plan->subject_name)) {
+                        $obQuery->where('ii.description', 'LIKE', '%' . $plan->subject_name . '%');
+                    }
+
+                    if ($obQuery->exists()) {
                         $skipped++;
                         continue;
                     }
