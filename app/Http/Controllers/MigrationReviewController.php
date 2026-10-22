@@ -584,4 +584,108 @@ class MigrationReviewController
             'user' => $request->user(),
         ]);
     }
+
+    /**
+     * Staff Review Screen for the 790 Held / Excluded Dues Lines.
+     * Strictly review-only: does not automatically approve any record.
+     */
+    public function heldDuesIndex(Request $request, \App\Services\Migration\HistoricalOpeningBalanceService $service)
+    {
+        $this->authorizeAdmin($request);
+        $allHeld = collect($service->getHeldDuesReport($this->qaConnection()));
+
+        $counts = [
+            'total' => $allHeld->count(),
+            'review_hold_student' => $allHeld->where('category', 'review_hold_student')->count(),
+            'unknown_period' => $allHeld->where('category', 'unknown_period')->count(),
+            'unresolved_currency' => $allHeld->where('category', 'unresolved_currency')->count(),
+        ];
+
+        $filtered = $allHeld;
+
+        $cat = (string) $request->query('category', 'all');
+        if ($cat !== '' && $cat !== 'all') {
+            $filtered = $filtered->where('category', $cat);
+        }
+
+        if ($term = trim((string) $request->query('q', ''))) {
+            $filtered = $filtered->filter(function ($item) use ($term) {
+                return str_contains(strtolower((string)$item['gr_number']), strtolower($term))
+                    || str_contains(strtolower((string)$item['student_name']), strtolower($term))
+                    || str_contains(strtolower((string)$item['fee_particular']), strtolower($term))
+                    || (string)$item['source_row'] === $term;
+            });
+        }
+
+        $page = (int) $request->query('page', 1);
+        $perPage = 25;
+        $items = $filtered->slice(($page - 1) * $perPage, $perPage)->values();
+        $paginator = new \Illuminate\Pagination\LengthAwarePaginator(
+            $items,
+            $filtered->count(),
+            $perPage,
+            $page,
+            ['path' => $request->url(), 'query' => $request->query()]
+        );
+
+        return view('migration.held-dues', [
+            'records' => $paginator,
+            'counts' => $counts,
+            'currentCategory' => $cat,
+            'searchTerm' => $request->query('q', ''),
+        ]);
+    }
+
+    /**
+     * Export all 790 Held Dues lines as CSV report for staff review.
+     */
+    public function exportHeldDues(Request $request, \App\Services\Migration\HistoricalOpeningBalanceService $service)
+    {
+        $this->authorizeAdmin($request);
+        $held = $service->getHeldDuesReport($this->qaConnection());
+
+        $cat = (string) $request->query('category', 'all');
+        if ($cat !== '' && $cat !== 'all') {
+            $held = array_values(array_filter($held, fn($h) => $h['category'] === $cat));
+        }
+
+        return response()->streamDownload(function () use ($held) {
+            $f = fopen('php://output', 'w');
+            fputcsv($f, [
+                'Source Row',
+                'GR Number',
+                'Student Name',
+                'Family Code',
+                'Class',
+                'Fee Particular',
+                'Currency',
+                'Outstanding Amount',
+                'Hold Category',
+                'Hold Reason',
+                'Required Staff Correction',
+                'Status',
+            ]);
+
+            foreach ($held as $row) {
+                fputcsv($f, [
+                    $row['source_row'],
+                    $row['gr_number'],
+                    $row['student_name'],
+                    $row['family_code'],
+                    $row['class_label'],
+                    $row['fee_particular'],
+                    $row['currency'],
+                    $row['amount_decimal'],
+                    $row['category_label'],
+                    $row['reason'],
+                    $row['required_correction'],
+                    $row['status'],
+                ]);
+            }
+
+            fclose($f);
+        }, 'held_dues_exceptions_report_' . date('Ymd_His') . '.csv', [
+            'Content-Type' => 'text/csv',
+        ]);
+    }
 }

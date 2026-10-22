@@ -849,6 +849,165 @@ class HistoricalOpeningBalanceService
         return (int) $feeTypesByCode[$code];
     }
 
+    /**
+     * Get detailed report of all held/excluded dues lines with reasons and required staff corrections.
+     * Does NOT automatically approve any held line.
+     */
+    public function getHeldDuesReport(?string $conn = null, ?string $batchId = null): array
+    {
+        $conn = $conn ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa');
+        $this->validateQaConnection($conn);
+        $db = DB::connection($conn);
+
+        $batchId = $batchId ?: (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+
+        $dues = $db->table('qa_staged_dues')
+            ->where('batch_id', $batchId)
+            ->orderBy('source_row')
+            ->get();
+
+        $students = $db->table('students')->get()->keyBy('gr_number');
+        $enrollments = $db->table('enrollments')->where('status', 'active')->get()->groupBy('student_id');
+
+        $deptCodes = $db->table('departments')->pluck('id', 'code')->all();
+        $schoolDeptId = (int) ($deptCodes['school'] ?? 1);
+        $tuitionDeptId = (int) ($deptCodes['tuition'] ?? 2);
+
+        $heldRecords = [];
+
+        foreach ($dues as $due) {
+            $amtMinor = (int) $due->outstanding_amount_minor;
+            $curr = strtoupper(trim((string) $due->currency));
+            $p = trim((string) $due->fee_particular);
+            $cls = trim((string) $due->class_in_dues_report);
+            $student = $students->get($due->gr_number);
+
+            $heldItem = [
+                'source_row' => (int) $due->source_row,
+                'staged_due_id' => (int) $due->id,
+                'gr_number' => (string) $due->gr_number,
+                'student_name' => $due->student_name ?: ($due->registration_name ?: ($student?->name ?: '—')),
+                'family_code' => $due->family_code_final ?: ($due->family_code_pdf ?: ($due->family_code_registration ?: '—')),
+                'class_label' => $cls ?: '—',
+                'fee_particular' => $p,
+                'currency' => $curr ?: ($due->currency_original ?: 'UNRESOLVED'),
+                'amount_minor' => $amtMinor,
+                'amount_decimal' => number_format($amtMinor / 100, 2, '.', ''),
+                'source_pdf_page' => $due->source_pdf_page ? (int) $due->source_pdf_page : null,
+                'status' => 'HELD - PENDING AUDIT',
+            ];
+
+            // 1. Invalid Amount
+            if ($amtMinor <= 0) {
+                $heldItem['category'] = 'invalid_amount';
+                $heldItem['category_label'] = 'Invalid / Zero Amount';
+                $heldItem['reason'] = 'Outstanding amount is zero or negative.';
+                $heldItem['required_correction'] = 'Audit source manual challan; if invalid or settled, archive record as non-collectible.';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            // 2. Unresolved Currency
+            if ($due->is_currency_unresolved || $curr === '' || $curr === 'UNRESOLVED') {
+                $heldItem['category'] = 'unresolved_currency';
+                $heldItem['category_label'] = 'Unresolved Currency';
+                $heldItem['reason'] = "Dues line has missing, blank, or unrecognized currency label ('" . ($due->currency_original ?: 'BLANK') . "').";
+                $heldItem['required_correction'] = 'Review student enrollment country and campus on /migration/currency and assign valid ISO currency (SAR/AED/PKR/QAR/OMR).';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            // 3. Missing Student
+            if (!$student) {
+                $heldItem['category'] = 'missing_student';
+                $heldItem['category_label'] = 'Missing Student Record';
+                $heldItem['reason'] = "Student GR {$due->gr_number} not found in QA students table.";
+                $heldItem['required_correction'] = 'Confirm GR against admission registers and create missing student record on /manage-student/admission/new.';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            // 4. Review Hold
+            if ($student->status === 'review_hold') {
+                $heldItem['category'] = 'review_hold_student';
+                $heldItem['category_label'] = 'Student on Review Hold';
+                $heldItem['reason'] = "Student {$student->name} (GR {$student->gr_number}) is on financial review hold pending currency or identity audit.";
+                $heldItem['required_correction'] = 'Finance administrator must audit student admission and approve currency on /migration/currency and student profile before dues can be billed.';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            // 5. Historical Hold
+            if ($student->status === 'historical_hold') {
+                $heldItem['category'] = 'historical_hold_student';
+                $heldItem['category_label'] = 'Student on Historical Hold';
+                $heldItem['reason'] = "Student {$student->name} (GR {$student->gr_number}) is on historical hold (legacy record absent from active audit).";
+                $heldItem['required_correction'] = 'Verify enrollment status with School administration or confirm bad-debt write-off.';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            // 6. Unknown Period
+            $period = self::parseParticularPeriod($p);
+            if (!$period) {
+                $heldItem['category'] = 'unknown_period';
+                $heldItem['category_label'] = 'Unknown / Missing Period';
+                $heldItem['reason'] = "Fee particular '{$p}' does not contain a verified calendar month and 4-digit year. Default period was strictly not invented.";
+                $heldItem['required_correction'] = 'Cross-reference original manual fee challan to determine exact billing month and year, then assign verified period.';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            // 7. Department Determination
+            $targetDeptId = self::determineDepartmentId($cls, $p, $schoolDeptId, $tuitionDeptId);
+            if ($targetDeptId === null) {
+                $heldItem['category'] = 'ambiguous_department';
+                $heldItem['category_label'] = 'Ambiguous Department';
+                $heldItem['reason'] = 'Unable to unambiguously determine School vs Tuition department from source evidence.';
+                $heldItem['required_correction'] = 'Accounts staff must review fee particular and assign explicit department enrollment.';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            // 8. Match to Enrollment
+            $studentEnrollments = $enrollments->get($student->id, collect());
+            $matchingEnrollments = $studentEnrollments->filter(fn($e) => (int) $e->department_id === $targetDeptId);
+
+            if ($matchingEnrollments->isEmpty()) {
+                $deptName = $targetDeptId === 2 ? 'Tuition' : 'School';
+                $heldItem['category'] = 'unmatched_enrollment';
+                $heldItem['category_label'] = 'Unmatched Department Enrollment';
+                $heldItem['reason'] = "Student has no active enrollment matching target department ({$deptName}).";
+                $heldItem['required_correction'] = "Enrol student in {$deptName} department or reclassify fee particular.";
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            if ($matchingEnrollments->count() > 1) {
+                $heldItem['category'] = 'ambiguous_department';
+                $heldItem['category_label'] = 'Multiple Enrollments';
+                $heldItem['reason'] = 'Student has multiple active enrollments in target department (ambiguous enrollment identity).';
+                $heldItem['required_correction'] = 'Consolidate multiple enrollments to a single active program.';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+
+            $matchedEnrollment = $matchingEnrollments->first();
+
+            // 9. Currency Conflict
+            if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {
+                $heldItem['category'] = 'currency_mismatch';
+                $heldItem['category_label'] = 'Currency Conflict';
+                $heldItem['reason'] = "Dues currency '{$curr}' conflicts with enrollment currency '{$matchedEnrollment->currency}'.";
+                $heldItem['required_correction'] = 'Reconcile currency difference between enrollment fee plan and source dues line.';
+                $heldRecords[] = $heldItem;
+                continue;
+            }
+        }
+
+        return $heldRecords;
+    }
+
     private function validateQaConnection(string $conn): void
     {
         if (config("database.connections.{$conn}.driver") === 'sqlite') {

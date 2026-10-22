@@ -50,5 +50,7 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/migration/exceptions/export', [\App\Http\Controllers\MigrationReviewController::class, 'exportExceptions'])->name('migration.exceptions.export');
  Route::get('/migration/qa-collections', [\App\Http\Controllers\MigrationReviewController::class, 'qaCollectionsIndex'])->name('migration.qa_collections');
  Route::get('/migration/qa-dues', [\App\Http\Controllers\MigrationReviewController::class, 'qaDuesIndex'])->name('migration.qa_dues');
+ Route::get('/migration/held-dues', [\App\Http\Controllers\MigrationReviewController::class, 'heldDuesIndex'])->name('migration.held_dues');
+ Route::get('/migration/held-dues/export', [\App\Http\Controllers\MigrationReviewController::class, 'exportHeldDues'])->name('migration.held_dues.export');
  Route::get('/migration/opening-balances', [\App\Http\Controllers\MigrationReviewController::class, 'openingBalancesPreview'])->name('migration.opening_balances_preview');
 });

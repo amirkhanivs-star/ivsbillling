@@ -80,11 +80,12 @@ class BillingController {
    ->select('p.id','p.receipt_number','p.received_on','p.currency','p.status','pa.amount_minor',\Illuminate\Support\Facades\DB::raw("COALESCE(ft.name, ii.description, 'Monthly Fee') as fee_type_name"),'ii.period_start as item_period')
    ->orderByDesc('p.received_on')
    ->limit(100)->get();
+  $activeBatch = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
   $stagedCollections = \Illuminate\Support\Facades\Schema::hasTable('qa_staged_collections')
-   ? DB::table('qa_staged_collections')->where('gr_number', $s->gr_number)->orderBy('source_row')->get()
+   ? DB::table('qa_staged_collections')->where('batch_id', $activeBatch)->where('gr_number', $s->gr_number)->orderBy('source_row')->get()
    : collect();
   $stagedDues = \Illuminate\Support\Facades\Schema::hasTable('qa_staged_dues')
-   ? DB::table('qa_staged_dues')->where('gr_number', $s->gr_number)->orderBy('source_row')->get()
+   ? DB::table('qa_staged_dues')->where('batch_id', $activeBatch)->where('gr_number', $s->gr_number)->orderBy('source_row')->get()
    : collect();
   return view('student-details', [
    'student' => $s,
@@ -386,12 +387,13 @@ class BillingController {
    ->get() : collect();
   $catalogRates = DB::table('fee_catalog_rates')->get();
 
+  $activeBatch = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
   $familyGrNumbers = $family ? DB::table('students')->where('family_id', $family->id)->pluck('gr_number')->filter()->all() : [];
   $historicalCollections = (\Illuminate\Support\Facades\Schema::hasTable('qa_staged_collections') && !empty($familyGrNumbers))
-   ? DB::table('qa_staged_collections')->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
+   ? DB::table('qa_staged_collections')->where('batch_id', $activeBatch)->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
    : collect();
   $historicalDues = (\Illuminate\Support\Facades\Schema::hasTable('qa_staged_dues') && !empty($familyGrNumbers))
-   ? DB::table('qa_staged_dues')->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
+   ? DB::table('qa_staged_dues')->where('batch_id', $activeBatch)->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
    : collect();
 
   return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','dueGroups','scopes','registrationStatus','summaryMetrics','feeTypes','familyStudents','catalogRates','historicalCollections','historicalDues'));

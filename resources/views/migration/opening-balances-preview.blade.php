@@ -110,7 +110,12 @@
 
 <!-- Excluded Rows Detail -->
 @php $ex = $preview['exclusions']; @endphp
-    <h3 style="font-size:16px;font-weight:700;margin:0 0 10px;color:#2c2c2c;">Excluded & Held Dues Lines ({{ number_format($s['excluded_rows_count']) }} Lines Kept Out of Ledger)</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <h3 style="font-size:16px;font-weight:700;margin:0;color:#2c2c2c;">Excluded & Held Dues Lines ({{ number_format($s['excluded_rows_count']) }} Lines Kept Out of Ledger)</h3>
+        <a href="{{ route('migration.held_dues') }}" class="btn" style="background:#ea5455;color:#fff;text-decoration:none;font-size:12px;padding:6px 14px;border-radius:4px;font-weight:600;">
+            Review All 790 Held Dues Lines & Reasons →
+        </a>
+    </div>
     <p style="font-size:12px;color:#6e6b7b;margin-bottom:14px;">These rows remain safely staged in <code>qa_staged_dues</code> and are strictly excluded from opening-balance invoice generation.</p>
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:15px;margin-bottom:15px;">
