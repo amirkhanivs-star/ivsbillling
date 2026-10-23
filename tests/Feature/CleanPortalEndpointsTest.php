@@ -86,8 +86,37 @@ class CleanPortalEndpointsTest extends TestCase
         $this->actingAs($admin)->get('/migration')->assertStatus(200);
         $this->actingAs($admin)->get('/migration/campus')->assertStatus(200);
         $this->actingAs($admin)->get('/migration/department')->assertStatus(200);
+        $this->actingAs($admin)->get('/migration/currency')->assertStatus(200);
         $this->actingAs($admin)->get('/migration/qa-collections')->assertStatus(200);
         $this->actingAs($admin)->get('/migration/qa-dues')->assertStatus(200);
+        $this->actingAs($admin)->get('/migration/opening-balances')->assertStatus(200);
+        $this->actingAs($admin)->get('/migration/exceptions')->assertStatus(200);
+        $this->actingAs($admin)->get('/migration/held-dues')->assertStatus(200);
+    }
+
+    public function test_migration_dashboard_schema_and_queries_align_with_database_schema(): void
+    {
+        $admin = $this->getAdminUser();
+
+        // 1. Assert invoices schema has no invoice_type column (prevent future regression)
+        $this->assertFalse(
+            \Illuminate\Support\Facades\Schema::hasColumn('invoices', 'invoice_type'),
+            "Regression failure: 'invoices' table must not have an 'invoice_type' column."
+        );
+
+        // 2. Assert the correct opening-balance invoice query executes properly
+        $count = DB::table('invoices as i')
+            ->join('billing_runs as br', 'br.id', '=', 'i.billing_run_id')
+            ->where('br.frequency', 'opening_balance')
+            ->count('i.id');
+        $this->assertSame(0, $count);
+
+        // 3. Assert /migration endpoint renders HTTP 200 with expected dashboard content
+        $response = $this->actingAs($admin)->get('/migration');
+        $response->assertStatus(200);
+        $response->assertSee('Approved MySkool Workbook');
+        $response->assertSee('Actual Portal Data');
+        $response->assertSee('Not Imported');
     }
 
     public function test_financial_tables_remain_empty_after_endpoint_access(): void

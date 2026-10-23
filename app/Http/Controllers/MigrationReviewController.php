@@ -76,7 +76,10 @@ class MigrationReviewController
             'enrollments' => $db->table('enrollments')->count(),
             'collections_staged' => $db->table('qa_staged_collections')->count(),
             'dues_staged' => $db->table('qa_staged_dues')->count(),
-            'opening_balance_invoices' => $db->table('invoices')->where('invoice_type', 'opening_balance')->count(),
+            'opening_balance_invoices' => $db->table('invoices as i')
+                ->join('billing_runs as br', 'br.id', '=', 'i.billing_run_id')
+                ->where('br.frequency', 'opening_balance')
+                ->count('i.id'),
             'live_receipts' => $db->table('payments')->count(),
             'exceptions' => $db->table('qa_staged_exceptions')->count(),
         ];
