@@ -23,7 +23,8 @@ class HistoricalOpeningBalanceService
         // Resolve dynamic department IDs (never hard-code IDs)
         $deptCodes = $db->table('departments')->pluck('id', 'code')->all();
         $schoolDeptId = (int) ($deptCodes['school'] ?? 1);
-        $tuitionDeptId = (int) ($deptCodes['tuition'] ?? 2);
+        $tuitionDeptId = (int) ($deptCodes['tuition'] ?? 3);
+        $quranDeptId = (int) ($deptCodes['quran'] ?? 2);
 
         // 1. Fetch staged dues for the specified batch
         $dues = $db->table('qa_staged_dues')
@@ -165,49 +166,35 @@ class HistoricalOpeningBalanceService
                 continue;
             }
 
-            // Check 7: Department Determination & Evidence
-            $targetDeptId = self::determineDepartmentId($cls, $p, $schoolDeptId, $tuitionDeptId);
-            if ($targetDeptId === null) {
+            // Check 7 & 8: Department Determination & Enrollment Match
+            $studentEnrollments = $enrollments->get($student->id, collect());
+            $resolved = self::resolveTargetEnrollment($student, $studentEnrollments, $cls, $p, $schoolDeptId, $tuitionDeptId);
+
+            if ($resolved['status'] === 'no_enrollment' || $resolved['status'] === 'conflict') {
+                $excludedRows['unmatched_enrollment'][] = [
+                    'source_row' => $due->source_row,
+                    'gr_number' => $due->gr_number,
+                    'class' => $cls,
+                    'particular' => $p,
+                    'reason' => $resolved['reason'],
+                    'amount_minor' => $amtMinor,
+                ];
+                continue;
+            }
+
+            if ($resolved['status'] === 'ambiguous') {
                 $excludedRows['ambiguous_department'][] = [
                     'source_row' => $due->source_row,
                     'gr_number' => $due->gr_number,
                     'class' => $cls,
                     'particular' => $p,
-                    'reason' => 'Unable to unambiguously determine School vs Tuition department from source evidence',
+                    'reason' => $resolved['reason'],
                     'amount_minor' => $amtMinor,
                 ];
                 continue;
             }
 
-            // Check 8: Match to student's verified enrollment in target department
-            $studentEnrollments = $enrollments->get($student->id, collect());
-            $matchingEnrollments = $studentEnrollments->filter(fn($e) => (int) $e->department_id === $targetDeptId);
-
-            if ($matchingEnrollments->isEmpty()) {
-                $excludedRows['unmatched_enrollment'][] = [
-                    'source_row' => $due->source_row,
-                    'gr_number' => $due->gr_number,
-                    'target_department_id' => $targetDeptId,
-                    'target_department' => $targetDeptId === 2 ? 'Tuition' : 'School',
-                    'student_enrolled_departments' => $studentEnrollments->pluck('department_id')->all(),
-                    'reason' => 'Student has no active enrollment matching the target department',
-                    'amount_minor' => $amtMinor,
-                ];
-                continue;
-            }
-
-            if ($matchingEnrollments->count() > 1) {
-                $excludedRows['ambiguous_department'][] = [
-                    'source_row' => $due->source_row,
-                    'gr_number' => $due->gr_number,
-                    'target_department_id' => $targetDeptId,
-                    'reason' => 'Student has multiple active enrollments in target department (ambiguous enrollment identity)',
-                    'amount_minor' => $amtMinor,
-                ];
-                continue;
-            }
-
-            $matchedEnrollment = $matchingEnrollments->first();
+            $matchedEnrollment = $resolved['enrollment'];
 
             // Check 9: Currency Conflict between Enrollment and Dues
             if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {
@@ -270,7 +257,7 @@ class HistoricalOpeningBalanceService
 
             // Aggregations
             $totalsByCurrency[$curr] = ($totalsByCurrency[$curr] ?? 0) + $amtMinor;
-            $deptName = $deptId === 2 ? 'Tuition' : 'School';
+            $deptName = $deptId === $tuitionDeptId ? 'Tuition' : ($deptId === $quranDeptId ? 'Quran' : 'School');
             if (!isset($totalsByDepartment[$deptName])) {
                 $totalsByDepartment[$deptName] = [];
             }
@@ -347,6 +334,100 @@ class HistoricalOpeningBalanceService
                 'posting_authorization_required' => true,
                 'message' => 'SAFEGUARD ACTIVE: Opening balance ledger posting is strictly stopped pending administrative verification and explicit authorization.',
             ],
+        ];
+    }
+
+    /**
+     * Resolve target enrollment and department for a staged due row.
+     * Uses student verified enrollment(s), department, fee particular, and source class evidence.
+     *
+     * @param object $student
+     * @param \Illuminate\Support\Collection $studentEnrollments
+     * @param string $class
+     * @param string $particular
+     * @param int $schoolDeptId
+     * @param int $tuitionDeptId
+     * @return array ['status' => 'matched'|'ambiguous'|'conflict'|'no_enrollment', 'enrollment' => ?object, 'reason' => string]
+     */
+    public static function resolveTargetEnrollment(
+        object $student,
+        $studentEnrollments,
+        string $class,
+        string $particular,
+        int $schoolDeptId = 1,
+        int $tuitionDeptId = 3
+    ): array {
+        $clsLower = strtolower(trim($class));
+        $partLower = strtolower(trim($particular));
+
+        if ($studentEnrollments->isEmpty()) {
+            return [
+                'status' => 'no_enrollment',
+                'enrollment' => null,
+                'reason' => 'Student has no active enrollment in any department',
+            ];
+        }
+
+        // Single verified enrollment: use it unless source evidence explicitly contradicts it
+        if ($studentEnrollments->count() === 1) {
+            $singleEnr = $studentEnrollments->first();
+            $enrDeptId = (int) $singleEnr->department_id;
+
+            // Enrolled in School, but source class or particular explicitly specifies Tuition
+            if ($enrDeptId === $schoolDeptId && (str_contains($clsLower, 'tuition') || str_contains($clsLower, '1-1') || str_contains($partLower, 'tuition fee') || str_contains($partLower, 'tution fee'))) {
+                return [
+                    'status' => 'conflict',
+                    'enrollment' => null,
+                    'reason' => 'Source evidence indicates Tuition department but student is enrolled in School',
+                ];
+            }
+
+            // Enrolled in Tuition, but source class explicitly names a non-tuition school class
+            if ($enrDeptId === $tuitionDeptId && $clsLower !== '' && !str_contains($clsLower, 'tuition') && !str_contains($clsLower, '1-1')) {
+                return [
+                    'status' => 'conflict',
+                    'enrollment' => null,
+                    'reason' => "Source class '{$class}' indicates School department but student is enrolled in Tuition",
+                ];
+            }
+
+            return [
+                'status' => 'matched',
+                'enrollment' => $singleEnr,
+                'reason' => 'Consistent single enrollment',
+            ];
+        }
+
+        // Multiple enrollments: disambiguate using explicit evidence
+        $isTuitionEvidence = str_contains($clsLower, 'tuition') || str_contains($clsLower, '1-1') || str_contains($partLower, 'tuition fee') || str_contains($partLower, 'tution fee');
+        $isSchoolEvidence = ($clsLower !== '' && !str_contains($clsLower, 'tuition') && !str_contains($clsLower, '1-1'));
+
+        if ($isTuitionEvidence && !$isSchoolEvidence) {
+            $tuitionEnrs = $studentEnrollments->filter(fn($e) => (int) $e->department_id === $tuitionDeptId);
+            if ($tuitionEnrs->count() === 1) {
+                return [
+                    'status' => 'matched',
+                    'enrollment' => $tuitionEnrs->first(),
+                    'reason' => 'Disambiguated to Tuition based on source evidence',
+                ];
+            }
+        }
+
+        if ($isSchoolEvidence && !$isTuitionEvidence) {
+            $schoolEnrs = $studentEnrollments->filter(fn($e) => (int) $e->department_id === $schoolDeptId);
+            if ($schoolEnrs->count() === 1) {
+                return [
+                    'status' => 'matched',
+                    'enrollment' => $schoolEnrs->first(),
+                    'reason' => 'Disambiguated to School based on source evidence',
+                ];
+            }
+        }
+
+        return [
+            'status' => 'ambiguous',
+            'enrollment' => null,
+            'reason' => 'Student has multiple active enrollments and fee evidence is ambiguous',
         ];
     }
 
@@ -740,7 +821,7 @@ class HistoricalOpeningBalanceService
 
         $deptCodes = $db->table('departments')->pluck('id', 'code')->all();
         $schoolDeptId = (int) ($deptCodes['school'] ?? 1);
-        $tuitionDeptId = (int) ($deptCodes['tuition'] ?? 2);
+        $tuitionDeptId = (int) ($deptCodes['tuition'] ?? 3);
 
         $students = $db->table('students')->get()->keyBy('gr_number');
         $enrollments = $db->table('enrollments')->get()->groupBy('student_id');
@@ -767,19 +848,14 @@ class HistoricalOpeningBalanceService
                 continue;
             }
 
-            $targetDeptId = self::determineDepartmentId($cls, $p, $schoolDeptId, $tuitionDeptId);
-            if ($targetDeptId === null) {
-                continue;
-            }
-
             $studentEnrollments = $enrollments->get($student->id, collect());
-            $matchingEnrollments = $studentEnrollments->filter(fn($e) => (int) $e->department_id === $targetDeptId);
+            $resolved = self::resolveTargetEnrollment($student, $studentEnrollments, $cls, $p, $schoolDeptId, $tuitionDeptId);
 
-            if ($matchingEnrollments->count() !== 1) {
+            if ($resolved['status'] !== 'matched' || !$resolved['enrollment']) {
                 continue;
             }
 
-            $matchedEnrollment = $matchingEnrollments->first();
+            $matchedEnrollment = $resolved['enrollment'];
 
             if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {
                 continue;
@@ -875,7 +951,7 @@ class HistoricalOpeningBalanceService
 
         $deptCodes = $db->table('departments')->pluck('id', 'code')->all();
         $schoolDeptId = (int) ($deptCodes['school'] ?? 1);
-        $tuitionDeptId = (int) ($deptCodes['tuition'] ?? 2);
+        $tuitionDeptId = (int) ($deptCodes['tuition'] ?? 3);
 
         $heldRecords = [];
 
@@ -962,41 +1038,29 @@ class HistoricalOpeningBalanceService
                 continue;
             }
 
-            // 7. Department Determination
-            $targetDeptId = self::determineDepartmentId($cls, $p, $schoolDeptId, $tuitionDeptId);
-            if ($targetDeptId === null) {
-                $heldItem['category'] = 'ambiguous_department';
-                $heldItem['category_label'] = 'Ambiguous Department';
-                $heldItem['reason'] = 'Unable to unambiguously determine School vs Tuition department from source evidence.';
-                $heldItem['required_correction'] = 'Accounts staff must review fee particular and assign explicit department enrollment.';
-                $heldRecords[] = $heldItem;
-                continue;
-            }
-
-            // 8. Match to Enrollment
+            // 7 & 8. Department Determination & Enrollment Match
             $studentEnrollments = $enrollments->get($student->id, collect());
-            $matchingEnrollments = $studentEnrollments->filter(fn($e) => (int) $e->department_id === $targetDeptId);
+            $resolved = self::resolveTargetEnrollment($student, $studentEnrollments, $cls, $p, $schoolDeptId, $tuitionDeptId);
 
-            if ($matchingEnrollments->isEmpty()) {
-                $deptName = $targetDeptId === 2 ? 'Tuition' : 'School';
+            if ($resolved['status'] === 'no_enrollment' || $resolved['status'] === 'conflict') {
                 $heldItem['category'] = 'unmatched_enrollment';
                 $heldItem['category_label'] = 'Unmatched Department Enrollment';
-                $heldItem['reason'] = "Student has no active enrollment matching target department ({$deptName}).";
-                $heldItem['required_correction'] = "Enrol student in {$deptName} department or reclassify fee particular.";
+                $heldItem['reason'] = $resolved['reason'];
+                $heldItem['required_correction'] = 'Review student department enrollment against fee evidence.';
                 $heldRecords[] = $heldItem;
                 continue;
             }
 
-            if ($matchingEnrollments->count() > 1) {
+            if ($resolved['status'] === 'ambiguous') {
                 $heldItem['category'] = 'ambiguous_department';
-                $heldItem['category_label'] = 'Multiple Enrollments';
-                $heldItem['reason'] = 'Student has multiple active enrollments in target department (ambiguous enrollment identity).';
-                $heldItem['required_correction'] = 'Consolidate multiple enrollments to a single active program.';
+                $heldItem['category_label'] = 'Ambiguous Department';
+                $heldItem['reason'] = $resolved['reason'];
+                $heldItem['required_correction'] = 'Review fee particular and assign explicit department enrollment.';
                 $heldRecords[] = $heldItem;
                 continue;
             }
 
-            $matchedEnrollment = $matchingEnrollments->first();
+            $matchedEnrollment = $resolved['enrollment'];
 
             // 9. Currency Conflict
             if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {

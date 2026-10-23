@@ -506,4 +506,224 @@ class Phase3c3OpeningBalanceEngineTest extends TestCase
         $this->assertSame(0, (int) DB::table('invoices')->where('id', $invId)->value('paid_minor'));
         $this->assertSame('generated', DB::table('invoices')->where('id', $invId)->value('status'));
     }
+
+    /**
+     * Phase 7.1: Blank class cell with known School enrollment resolves to School.
+     */
+    public function test_blank_class_cell_with_known_school_enrollment_resolves_to_school(): void
+    {
+        $this->seed();
+        $campus = DB::table('campuses')->value('id');
+        $deptSchool = DB::table('departments')->where('code', 'school')->value('id');
+        $deptTuition = DB::table('departments')->where('code', 'tuition')->value('id');
+
+        $family = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-REG-01',
+            'guardian_name' => 'School Parent',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $student = DB::table('students')->insertGetId([
+            'gr_number' => 'GR-REG-01',
+            'family_id' => $family,
+            'name' => 'School Student',
+            'status' => 'present',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $enrollment = DB::table('enrollments')->insertGetId([
+            'student_id' => $student,
+            'campus_id' => $campus,
+            'department_id' => $deptSchool,
+            'currency' => 'SAR',
+            'grade_label' => 'Grade 2 - A',
+            'monthly_fee_minor' => 25000,
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $stObj = DB::table('students')->where('id', $student)->first();
+        $enrColl = DB::table('enrollments')->where('student_id', $student)->get();
+
+        // Staged due with blank class and subject particular
+        $resolved = HistoricalOpeningBalanceService::resolveTargetEnrollment(
+            $stObj,
+            $enrColl,
+            '',
+            'Grade 2- (English) - Oct-2026',
+            $deptSchool,
+            $deptTuition
+        );
+
+        $this->assertSame('matched', $resolved['status']);
+        $this->assertNotNull($resolved['enrollment']);
+        $this->assertSame($deptSchool, (int) $resolved['enrollment']->department_id);
+    }
+
+    /**
+     * Phase 7.1: Blank class cell with known Tuition enrollment preserves subject fee.
+     */
+    public function test_blank_class_cell_with_known_tuition_enrollment_preserves_subject_fee(): void
+    {
+        $this->seed();
+        $campus = DB::table('campuses')->value('id');
+        $deptSchool = DB::table('departments')->where('code', 'school')->value('id');
+        $deptTuition = DB::table('departments')->where('code', 'tuition')->value('id');
+
+        $family = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-REG-02',
+            'guardian_name' => 'Tuition Parent',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $student = DB::table('students')->insertGetId([
+            'gr_number' => 'GR-REG-02',
+            'family_id' => $family,
+            'name' => 'Tuition Student',
+            'status' => 'present',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $enrollment = DB::table('enrollments')->insertGetId([
+            'student_id' => $student,
+            'campus_id' => $campus,
+            'department_id' => $deptTuition,
+            'currency' => 'SAR',
+            'grade_label' => 'Tuition - ( 1-1)',
+            'monthly_fee_minor' => 0,
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $stObj = DB::table('students')->where('id', $student)->first();
+        $enrColl = DB::table('enrollments')->where('student_id', $student)->get();
+
+        // Blank class with subject particular
+        $resolved = HistoricalOpeningBalanceService::resolveTargetEnrollment(
+            $stObj,
+            $enrColl,
+            '',
+            'Grade 1- (English) - Oct-2026',
+            $deptSchool,
+            $deptTuition
+        );
+
+        $this->assertSame('matched', $resolved['status']);
+        $this->assertNotNull($resolved['enrollment']);
+        $this->assertSame($deptTuition, (int) $resolved['enrollment']->department_id);
+
+        // Blank class with monthly fee particular for tuition student
+        $resolvedMonthly = HistoricalOpeningBalanceService::resolveTargetEnrollment(
+            $stObj,
+            $enrColl,
+            '',
+            'Monthly Fee - Oct-2026',
+            $deptSchool,
+            $deptTuition
+        );
+
+        $this->assertSame('matched', $resolvedMonthly['status']);
+        $this->assertNotNull($resolvedMonthly['enrollment']);
+        $this->assertSame($deptTuition, (int) $resolvedMonthly['enrollment']->department_id);
+    }
+
+    /**
+     * Phase 7.1: Multiple enrollments without clear evidence remains on review hold.
+     */
+    public function test_multiple_enrollments_without_clear_evidence_remains_on_review_hold(): void
+    {
+        $this->seed();
+        $campus = DB::table('campuses')->value('id');
+        $deptSchool = DB::table('departments')->where('code', 'school')->value('id');
+        $deptTuition = DB::table('departments')->where('code', 'tuition')->value('id');
+
+        $family = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-REG-03',
+            'guardian_name' => 'Multi Parent',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $student = DB::table('students')->insertGetId([
+            'gr_number' => 'GR-REG-03',
+            'family_id' => $family,
+            'name' => 'Multi Student',
+            'status' => 'present',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('enrollments')->insert([
+            [
+                'student_id' => $student,
+                'campus_id' => $campus,
+                'department_id' => $deptSchool,
+                'currency' => 'SAR',
+                'grade_label' => 'Grade 5 - A',
+                'monthly_fee_minor' => 30000,
+                'status' => 'active',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'student_id' => $student,
+                'campus_id' => $campus,
+                'department_id' => $deptTuition,
+                'currency' => 'SAR',
+                'grade_label' => 'Tuition - A',
+                'monthly_fee_minor' => 15000,
+                'status' => 'active',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        $stObj = DB::table('students')->where('id', $student)->first();
+        $enrColl = DB::table('enrollments')->where('student_id', $student)->get();
+
+        // Ambiguous particular with blank class across two department enrollments
+        $resolved = HistoricalOpeningBalanceService::resolveTargetEnrollment(
+            $stObj,
+            $enrColl,
+            '',
+            'Monthly Fee - Oct-2026',
+            $deptSchool,
+            $deptTuition
+        );
+
+        $this->assertSame('ambiguous', $resolved['status']);
+        $this->assertNull($resolved['enrollment']);
+
+        // Explicit Tuition particular disambiguates to Tuition
+        $resolvedTuition = HistoricalOpeningBalanceService::resolveTargetEnrollment(
+            $stObj,
+            $enrColl,
+            '',
+            'Tuition Fee - Oct-2026',
+            $deptSchool,
+            $deptTuition
+        );
+
+        $this->assertSame('matched', $resolvedTuition['status']);
+        $this->assertSame($deptTuition, (int) $resolvedTuition['enrollment']->department_id);
+
+        // Explicit School class disambiguates to School
+        $resolvedSchool = HistoricalOpeningBalanceService::resolveTargetEnrollment(
+            $stObj,
+            $enrColl,
+            'Grade 5 - A',
+            'Monthly Fee - Oct-2026',
+            $deptSchool,
+            $deptTuition
+        );
+
+        $this->assertSame('matched', $resolvedSchool['status']);
+        $this->assertSame($deptSchool, (int) $resolvedSchool['enrollment']->department_id);
+    }
 }
