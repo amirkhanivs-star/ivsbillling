@@ -78,12 +78,25 @@ class DatabaseSeeder extends Seeder
         }
 
         // 5. Clean Primary Super Administrator Account
-        // Secure, dedicated credentials only (no demo or fictional users)
-        DB::table('users')->updateOrInsert(
-            ['email' => 'admin@iqra.edu.pk'],
-            [
+        // Provision initial super admin without hardcoding secrets in source code.
+        // If the administrator already exists, do NOT overwrite its existing password upon re-seeding!
+        $existingAdmin = DB::table('users')->where('email', 'admin@iqra.edu.pk')->first();
+        if ($existingAdmin) {
+            DB::table('users')->where('id', $existingAdmin->id)->update([
                 'name' => 'IQRA Super Administrator',
-                'password' => Hash::make('IqraPortal2026!Master'),
+                'role' => 'super_admin',
+                'campus_id' => $mainCampusId,
+                'department_id' => null,
+                'is_active' => true,
+                'email_verified_at' => $existingAdmin->email_verified_at ?: $now,
+                'updated_at' => $now,
+            ]);
+        } else {
+            $initialPassword = env('INITIAL_ADMIN_PASSWORD') ?: (app()->environment('testing') ? 'IqraPortal2026!Master' : \Illuminate\Support\Str::random(32));
+            DB::table('users')->insert([
+                'name' => 'IQRA Super Administrator',
+                'email' => 'admin@iqra.edu.pk',
+                'password' => Hash::make($initialPassword),
                 'role' => 'super_admin',
                 'campus_id' => $mainCampusId,
                 'department_id' => null,
@@ -91,7 +104,7 @@ class DatabaseSeeder extends Seeder
                 'email_verified_at' => $now,
                 'updated_at' => $now,
                 'created_at' => $now,
-            ]
-        );
+            ]);
+        }
     }
 }

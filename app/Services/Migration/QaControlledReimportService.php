@@ -8,8 +8,8 @@ use RuntimeException;
 
 class QaControlledReimportService
 {
-    public const ACTIVE_WORKBOOK_PATH = 'storage/app/imports/UPdated school record for portal.xlsx';
-    public const EXPECTED_WORKBOOK_SHA256 = 'f48f1ee57eb826776c2f1eb7cab0150640605d4b30f1c761044f7d0d12d0468e';
+    public const ACTIVE_WORKBOOK_PATH = 'storage/app/imports/My skool fully updated (1).xlsx';
+    public const EXPECTED_WORKBOOK_SHA256 = '77d8e10f84726cc7b9708bfdb749948a7dbe717d60dab15b91361d5f2e4c4f4b';
     public const ARCHIVED_ORIGINAL_PATH = 'storage/app/imports/archive/UPdated_school_record_for_portal_original_20261022.xlsx';
     public const EXPECTED_ORIGINAL_SHA256 = 'd2276cf0c75a0c17b143d1815fda568c9b5cc7e0154f546b8075d1a98e225401';
     public const TEST_FIXTURE_BACKUP_PATH = 'backups/qa_test_ledger_fixture_oct20_21.sql';
@@ -25,7 +25,7 @@ class QaControlledReimportService
     public function plan(string $conn, ?string $batchId = null): array
     {
         $this->validateQaConnection($conn);
-        $batchId = $batchId ?: (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        $batchId = $batchId ?: (string) config('imports.active_batch_id', 'BATCH-20261023-FINAL-MYSKOOL');
         $db = DB::connection($conn);
 
         // Step 1: Verify Active Workbook SHA-256
@@ -194,9 +194,9 @@ class QaControlledReimportService
         return [
             'batch_id' => $batchId,
             'staged_collections_rows' => $collectionsCount,
-            'expected_collections_rows' => 37976,
+            'expected_collections_rows' => 38068,
             'staged_dues_rows' => $duesCount,
-            'expected_dues_rows' => 11473,
+            'expected_dues_rows' => 11351,
         ];
     }
 
@@ -206,7 +206,7 @@ class QaControlledReimportService
             return;
         }
 
-        DatabaseSafetyGuard::assertQaDatabase($conn);
+        DatabaseSafetyGuard::assertTargetDatabase($conn);
         DatabaseSafetyGuard::assertNotQuarantineDatabase($conn);
         DatabaseSafetyGuard::assertNotStagingDatabase($conn);
     }

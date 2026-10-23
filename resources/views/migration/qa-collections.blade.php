@@ -1,10 +1,10 @@
 @extends('layouts.app')
-@section('title', 'QA Staged Collections Review')
+@section('title', 'Historical Collections Review')
 @section('content')
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
     <div>
-        <h2 style="font-size:22px;font-weight:700;color:#2c2c2c;margin:0;">QA Staged Collections Review</h2>
-        <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Inspect 37,976 historical collection lines from October 22 reviewed workbook (Sheet: <code>03_COLLECTION_PRESENT_ONLY</code>).</p>
+        <h2 style="font-size:22px;font-weight:700;color:#2c2c2c;margin:0;">Historical Collections Review</h2>
+        <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Inspect historical collection lines from the approved workbook (Sheet: <code>Paid details</code>).</p>
     </div>
     <div style="display:flex;gap:10px;">
         <span style="background:#e8fadf;color:#28c76f;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;">
@@ -30,7 +30,7 @@
 
         <select class="input" name="unresolved">
             <option value="">All Statuses</option>
-            <option value="1" @selected(request('unresolved') === '1')>⚠️ Unresolved Currencies (8)</option>
+            <option value="1" @selected(request('unresolved') === '1')>⚠️ Unresolved Currencies ({{ $unresolvedCount }})</option>
             <option value="0" @selected(request('unresolved') === '0')>✓ Resolved Only</option>
         </select>
 

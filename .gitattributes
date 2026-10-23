@@ -1,0 +1,15 @@
+# Git Archive export exclusions for privacy and security
+.env export-ignore
+.env.* export-ignore
+.env.qa export-ignore
+*.sql export-ignore
+*.dump export-ignore
+*.xlsx export-ignore
+*.xls export-ignore
+*.csv export-ignore
+*.zip export-ignore
+/backups/* export-ignore
+/storage/backups/* export-ignore
+/storage/app/imports/* export-ignore
+/storage/app/private/* export-ignore
+/scratch/* export-ignore

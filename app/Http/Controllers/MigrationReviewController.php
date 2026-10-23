@@ -31,25 +31,84 @@ class MigrationReviewController
     {
         $this->authorizeAdmin($request);
         $conn = $this->connection();
+        $db = DB::connection($conn);
+
+        // Verify active target database
+        $activeDb = null;
+        $dbVerified = false;
+        try {
+            $row = $db->selectOne('SELECT DATABASE() as current_db');
+            $activeDb = $row?->current_db ?? config("database.connections.{$conn}.database");
+            DatabaseSafetyGuard::assertTargetDatabase($conn);
+            $dbVerified = true;
+        } catch (\Throwable $e) {
+            $dbVerified = false;
+        }
+
+        // Approved MySkool Workbook configuration
+        $activeKey = config('imports.active_version', 'v3_final_myskool_20261023');
+        $activeImport = config("imports.versions.{$activeKey}", []);
+        $activeBatchId = config('imports.active_batch_id', 'BATCH-20261023-FINAL-MYSKOOL');
+
+        $workbookRelativePath = $activeImport['relative_path'] ?? 'storage/app/imports/My skool fully updated (1).xlsx';
+        $workbookAbsolutePath = base_path($workbookRelativePath);
+        $workbookConfigured = file_exists($workbookAbsolutePath);
+        $workbookSha256 = $workbookConfigured ? hash_file('sha256', $workbookAbsolutePath) : null;
+        $workbookHashMatches = ($workbookSha256 && strtolower($workbookSha256) === strtolower($activeImport['expected_sha256'] ?? '77d8e10f84726cc7b9708bfdb749948a7dbe717d60dab15b91361d5f2e4c4f4b'));
+
+        $expectedWorkbook = [
+            'file_name' => $activeImport['filename'] ?? 'My skool fully updated (1).xlsx',
+            'relative_path' => $workbookRelativePath,
+            'batch_id' => $activeBatchId,
+            'version' => $activeKey,
+            'expected_sha256' => $activeImport['expected_sha256'] ?? '77d8e10f84726cc7b9708bfdb749948a7dbe717d60dab15b91361d5f2e4c4f4b',
+            'configured' => $workbookConfigured,
+            'hash_verified' => $workbookHashMatches,
+            'expected_students' => 4358,
+            'expected_collections' => 38068,
+            'expected_dues' => 11351,
+        ];
+
+        // Actual portal data queried live from current database
+        $actualData = [
+            'students' => $db->table('students')->count(),
+            'families' => $db->table('families')->count(),
+            'enrollments' => $db->table('enrollments')->count(),
+            'collections_staged' => $db->table('qa_staged_collections')->count(),
+            'dues_staged' => $db->table('qa_staged_dues')->count(),
+            'opening_balance_invoices' => $db->table('invoices')->where('invoice_type', 'opening_balance')->count(),
+            'live_receipts' => $db->table('payments')->count(),
+            'exceptions' => $db->table('qa_staged_exceptions')->count(),
+        ];
+
+        $importStatus = ($actualData['students'] > 0 || $actualData['collections_staged'] > 0 || $actualData['dues_staged'] > 0)
+            ? 'Imported'
+            : 'Not Imported';
+
+        $financialPostingStatus = ($actualData['opening_balance_invoices'] > 0 || $actualData['live_receipts'] > 0)
+            ? 'Active Postings'
+            : 'Zero Financial Postings (Clean)';
+
         $metrics = $service->getPhase3aDashboardMetrics($conn);
 
         // Recent audit logs
-        $recentLogs = DB::connection($conn)->table('staging_approval_logs')
+        $recentLogs = $db->table('staging_approval_logs')
             ->orderByDesc('id')
             ->limit(10)
             ->get();
 
-        $activeKey = config('imports.active_version', 'v2_reviewed_20261022');
-        $activeImport = config("imports.versions.{$activeKey}");
-        $historicalImport = config("imports.versions.v1_historical_staging");
-
         return view('migration.dashboard', [
+            'activeDb' => $activeDb,
+            'dbVerified' => $dbVerified,
+            'expectedWorkbook' => $expectedWorkbook,
+            'actualData' => $actualData,
+            'importStatus' => $importStatus,
+            'financialPostingStatus' => $financialPostingStatus,
             'metrics' => $metrics,
             'recentLogs' => $recentLogs,
             'user' => $request->user(),
             'activeImportKey' => $activeKey,
             'activeImport' => $activeImport,
-            'historicalImport' => $historicalImport,
         ]);
     }
 
@@ -484,18 +543,13 @@ class MigrationReviewController
         return $response;
     }
 
-    private function qaConnection(): string
-    {
-        return config('database.default', 'mysql');
-    }
-
     /**
-     * Staged Collections Review (Sheet 03_COLLECTION_PRESENT_ONLY).
+     * Historical Collections Review (Sheet: Paid details).
      */
     public function qaCollectionsIndex(Request $request)
     {
         $this->authorizeAdmin($request);
-        $conn = $this->qaConnection();
+        $conn = $this->connection();
 
         $query = DB::connection($conn)->table('qa_staged_collections');
 
@@ -531,12 +585,12 @@ class MigrationReviewController
     }
 
     /**
-     * Staged Dues / Outstanding Review (Sheet 05_OUTSTANDING_PRESENT_ONLY).
+     * Outstanding Fees Review (Sheet: Outstanding (Compiled Valid)).
      */
     public function qaDuesIndex(Request $request)
     {
         $this->authorizeAdmin($request);
-        $conn = $this->qaConnection();
+        $conn = $this->connection();
 
         $query = DB::connection($conn)->table('qa_staged_dues');
 
@@ -572,12 +626,12 @@ class MigrationReviewController
     }
 
     /**
-     * Historical Opening Balances Preview (QA Isolated).
+     * Historical Opening Balances Preview.
      */
     public function openingBalancesPreview(Request $request, \App\Services\Migration\HistoricalOpeningBalanceService $service)
     {
         $this->authorizeAdmin($request);
-        $preview = $service->preview($this->qaConnection());
+        $preview = $service->preview($this->connection());
 
         return view('migration.opening-balances-preview', [
             'preview' => $preview,
@@ -586,13 +640,13 @@ class MigrationReviewController
     }
 
     /**
-     * Staff Review Screen for the 790 Held / Excluded Dues Lines.
+     * Staff Review Screen for Held / Excluded Dues Lines.
      * Strictly review-only: does not automatically approve any record.
      */
     public function heldDuesIndex(Request $request, \App\Services\Migration\HistoricalOpeningBalanceService $service)
     {
         $this->authorizeAdmin($request);
-        $allHeld = collect($service->getHeldDuesReport($this->qaConnection()));
+        $allHeld = collect($service->getHeldDuesReport($this->connection()));
 
         $counts = [
             'total' => $allHeld->count(),
@@ -637,12 +691,12 @@ class MigrationReviewController
     }
 
     /**
-     * Export all 790 Held Dues lines as CSV report for staff review.
+     * Export Held Dues lines as CSV report for staff review.
      */
     public function exportHeldDues(Request $request, \App\Services\Migration\HistoricalOpeningBalanceService $service)
     {
         $this->authorizeAdmin($request);
-        $held = $service->getHeldDuesReport($this->qaConnection());
+        $held = $service->getHeldDuesReport($this->connection());
 
         $cat = (string) $request->query('category', 'all');
         if ($cat !== '' && $cat !== 'all') {

@@ -14,11 +14,11 @@ class HistoricalOpeningBalanceService
      */
     public function preview(?string $conn = null, ?string $batchId = null): array
     {
-        $conn = $conn ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa');
+        $conn = $conn ?: config('database.default', 'mysql');
         $this->validateQaConnection($conn);
         $db = DB::connection($conn);
 
-        $batchId = $batchId ?: (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        $batchId = $batchId ?: (string) config('imports.active_batch_id', 'BATCH-20261023-FINAL-MYSKOOL');
 
         // Resolve dynamic department IDs (never hard-code IDs)
         $deptCodes = $db->table('departments')->pluck('id', 'code')->all();
@@ -425,7 +425,7 @@ class HistoricalOpeningBalanceService
      */
     public function postOpeningBalances(?string $conn = null, ?string $batchId = null, bool $allowTestExecution = false): array
     {
-        $conn = $conn ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa');
+        $conn = $conn ?: config('database.default', 'mysql');
         $this->validateQaConnection($conn);
 
         // Security Lock: Only allowed if config authorizes it or explicit test flag is active
@@ -855,11 +855,11 @@ class HistoricalOpeningBalanceService
      */
     public function getHeldDuesReport(?string $conn = null, ?string $batchId = null): array
     {
-        $conn = $conn ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa');
+        $conn = $conn ?: config('database.default', 'mysql');
         $this->validateQaConnection($conn);
         $db = DB::connection($conn);
 
-        $batchId = $batchId ?: (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        $batchId = $batchId ?: (string) config('imports.active_batch_id', 'BATCH-20261023-FINAL-MYSKOOL');
 
         $dues = $db->table('qa_staged_dues')
             ->where('batch_id', $batchId)
@@ -1014,7 +1014,7 @@ class HistoricalOpeningBalanceService
             return;
         }
 
-        DatabaseSafetyGuard::assertQaDatabase($conn);
+        DatabaseSafetyGuard::assertTargetDatabase($conn);
         DatabaseSafetyGuard::assertNotQuarantineDatabase($conn);
         DatabaseSafetyGuard::assertNotStagingDatabase($conn);
     }

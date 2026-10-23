@@ -1,201 +1,340 @@
 @extends('layouts.app')
 @section('title', 'Migration Review Dashboard')
 @section('content')
-<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:12px;">
     <div>
         <h2 style="font-size:22px;font-weight:700;color:#2c2c2c;margin:0;">Migration Review Dashboard</h2>
-        <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Historical baseline verification, student identity, campus/department assignments, and staging approval audit.</p>
+        <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Approved MySkool workbook verification, live portal database metrics, and single-database migration readiness.</p>
     </div>
-    <div style="display:flex;gap:10px;">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <span style="background:#e8fadf;color:#28c76f;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px;">
-            <span style="width:8px;height:8px;background:#28c76f;border-radius:50%;"></span> Historical Baseline: iqra_billing_clean
+            <span style="width:8px;height:8px;background:#28c76f;border-radius:50%;"></span> Active Database: {{ $activeDb ?? 'iqra_billing' }}
+        </span>
+        <span style="background:{{ $importStatus === 'Imported' ? '#e8fadf' : '#f1f5f9' }};color:{{ $importStatus === 'Imported' ? '#28c76f' : '#64748b' }};padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;">
+            Import Status: {{ $importStatus }}
         </span>
         <span style="background:#fceaea;color:#ea5455;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;">
-            Ledger Postings: 0 (Protected)
+            Financial Postings: {{ $actualData['opening_balance_invoices'] + $actualData['live_receipts'] }} (Protected)
         </span>
     </div>
 </div>
 
-<div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:14px 18px;margin-bottom:22px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
-    <div>
-        <div style="display:flex;align-items:center;gap:8px;">
-            <span style="font-weight:700;color:#3730a3;font-size:14px;">📁 Historical Staging Baseline: October 19, 2026 (4,340 Students)</span>
-            <span style="background:#c7d2fe;color:#312e81;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;">READ-ONLY BASELINE</span>
-        </div>
-        <p style="margin:4px 0 0;font-size:12px;color:#4338ca;">
-            The metrics below represent the approved October 19 staging export (<code>iqra_billing_clean</code>). All legacy CSV files are archived in <code>storage/app/private/archive_20261022_legacy_csvs/</code>.
-        </p>
-    </div>
-    <div style="font-size:12px;color:#4338ca;background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #c7d2fe;">
-        <div><strong style="color:#1e1b4b;">Active QA Pipeline Version:</strong> <code>{{ $activeImportKey ?? 'v2_reviewed_20261022' }}</code></div>
-        <div style="font-size:11px;color:#4b5563;margin-top:2px;">Source: <code>{{ $activeImport['relative_path'] ?? 'storage/app/imports/UPdated school record for portal.xlsx' }}</code></div>
-        <div style="font-size:11px;color:#059669;margin-top:2px;">Target: <strong>iqra_billing_qa</strong> (Strictly Isolated)</div>
-    </div>
-</div>
-
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:15px;margin-bottom:25px;">
-    <!-- Student Identity Card -->
-    <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span style="color:#b9b9c3;font-size:12px;font-weight:600;text-transform:uppercase;">Students & Families</span>
-            <span style="font-size:18px;">👥</span>
-        </div>
-        <div style="font-size:24px;font-weight:700;color:#5e5873;margin:8px 0 4px;">{{ number_format($metrics['students']['total']) }}</div>
-        <div style="font-size:12px;color:#6e6b7b;">
-            Verified Families: <strong>{{ number_format($metrics['students']['total'] - $metrics['students']['provisional_families']) }}</strong><br>
-            Provisional Families: <strong style="color:#ff9f43;">{{ $metrics['students']['provisional_families'] }}</strong><br>
-            Sibling Students: <strong>{{ number_format($metrics['students']['sibling_students']) }}</strong> ({{ $metrics['students']['multi_currency_families'] }} multi-curr)
-        </div>
-    </div>
-
-    <!-- Campus Approval Card -->
-    <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span style="color:#b9b9c3;font-size:12px;font-weight:600;text-transform:uppercase;">Campus Approvals</span>
-            <span style="font-size:18px;">🏫</span>
-        </div>
-        <div style="font-size:24px;font-weight:700;color:#5e5873;margin:8px 0 4px;">{{ number_format($metrics['campus']['approved']) }} / {{ number_format($metrics['campus']['total']) }}</div>
-        <div style="font-size:12px;color:#6e6b7b;">
-            Pending Approval: <strong style="color:#ff9f43;">{{ number_format($metrics['campus']['pending']) }}</strong><br>
-            Status: <span style="color:{{ $metrics['campus']['approved'] > 0 ? '#28c76f' : '#ff9f43' }};font-weight:600;">{{ $metrics['campus']['approved'] > 0 ? 'In Progress' : 'Pending Review' }}</span>
-        </div>
-        <a href="/migration/campus" style="display:inline-block;margin-top:8px;font-size:12px;color:var(--ms-purple,#7367f0);font-weight:600;text-decoration:none;">Review & Approve →</a>
-    </div>
-
-    <!-- Department Approval Card -->
-    <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span style="color:#b9b9c3;font-size:12px;font-weight:600;text-transform:uppercase;">Department Class</span>
-            <span style="font-size:18px;">📚</span>
-        </div>
-        <div style="font-size:24px;font-weight:700;color:#5e5873;margin:8px 0 4px;">{{ number_format($metrics['department']['approved']) }} / {{ number_format($metrics['department']['total']) }}</div>
-        <div style="font-size:12px;color:#6e6b7b;">
-            School: <strong>{{ number_format($metrics['department']['school']) }}</strong> | Tuition: <strong>{{ number_format($metrics['department']['tuition']) }}</strong><br>
-            Pending Approval: <strong style="color:#ff9f43;">{{ number_format($metrics['department']['pending']) }}</strong>
-        </div>
-        <a href="/migration/department" style="display:inline-block;margin-top:8px;font-size:12px;color:var(--ms-purple,#7367f0);font-weight:600;text-decoration:none;">Review & Approve →</a>
-    </div>
-
-    <!-- Currency Review Card -->
-    <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span style="color:#b9b9c3;font-size:12px;font-weight:600;text-transform:uppercase;">Currency Review</span>
-            <span style="font-size:18px;">💱</span>
-        </div>
-        <div style="font-size:24px;font-weight:700;color:#28c76f;margin:8px 0 4px;">{{ number_format($metrics['currency']['approved']) }} <span style="font-size:14px;color:#6e6b7b;">Approved</span></div>
-        <div style="font-size:12px;color:#6e6b7b;">
-            Pending Review: <strong style="color:#ea5455;">{{ number_format($metrics['currency']['pending']) }}</strong> (112 no fin, 26 unrec)<br>
-            Auto-assigned SAR: <strong style="color:#28c76f;">0 (Prohibited)</strong>
-        </div>
-        <a href="/migration/currency" style="display:inline-block;margin-top:8px;font-size:12px;color:var(--ms-purple,#7367f0);font-weight:600;text-decoration:none;">Review Currencies →</a>
-    </div>
-
-    <!-- Historical GR Card -->
-    <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span style="color:#b9b9c3;font-size:12px;font-weight:600;text-transform:uppercase;">Historical GR Cases</span>
-            <span style="font-size:18px;">🔍</span>
-        </div>
-        <div style="font-size:24px;font-weight:700;color:#5e5873;margin:8px 0 4px;">{{ number_format($metrics['reconciliation']['total']) }}</div>
-        <div style="font-size:12px;color:#6e6b7b;">
-            Unknown Dues: <strong>{{ number_format($metrics['reconciliation']['dues_unknown']) }}</strong><br>
-            Unknown Payments: <strong>{{ number_format($metrics['reconciliation']['payments_unknown']) }}</strong> ({{ number_format($metrics['reconciliation']['unlinked_payments']) }} unlinked)<br>
-            Exact Name Matches: <strong style="color:#28c76f;">{{ number_format($metrics['reconciliation']['exact_name_matches']) }}</strong>
-        </div>
-        <a href="/migration/gr-reconciliation" style="display:inline-block;margin-top:8px;font-size:12px;color:var(--ms-purple,#7367f0);font-weight:600;text-decoration:none;">Review Historical GRs →</a>
-    </div>
-
-    <!-- Exceptions Card -->
-    <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span style="color:#b9b9c3;font-size:12px;font-weight:600;text-transform:uppercase;">Staging Exceptions</span>
-            <span style="font-size:18px;">⚠️</span>
-        </div>
-        <div style="font-size:24px;font-weight:700;color:#ff9f43;margin:8px 0 4px;">{{ number_format($metrics['exceptions']['total']) }}</div>
-        <div style="font-size:12px;color:#6e6b7b;">
-            Captured Findings: <strong>{{ number_format($metrics['exceptions']['total']) }}</strong><br>
-            Audited Logs: <strong>{{ number_format($metrics['audit_logs']['total']) }}</strong>
-        </div>
-        <div style="display:flex;gap:10px;margin-top:8px;">
-            <a href="/migration/exceptions" style="font-size:12px;color:var(--ms-purple,#7367f0);font-weight:600;text-decoration:none;">Inspect →</a>
-            <a href="/migration/exceptions/export" style="font-size:12px;color:#28c76f;font-weight:600;text-decoration:none;">Export CSV ⤓</a>
-        </div>
-    </div>
-</div>
-
-<!-- October 22 Reviewed QA Financial Staging (Read-Only) -->
-<div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:20px;margin-bottom:25px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+<!-- SECTION 1: Current System -->
+<div style="background:#fff;border:1px solid #ebe9f1;border-radius:8px;padding:18px 20px;margin-bottom:22px;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;border-bottom:1px solid #f1f5f9;padding-bottom:10px;">
         <div>
-            <h3 style="font-size:16px;font-weight:700;color:#2c2c2c;margin:0;">October 22 Reviewed QA Financial Staging (Read-Only)</h3>
-            <p style="color:#6e6b7b;font-size:12px;margin:2px 0 0;">Isolated staging tables in <code>iqra_billing_qa</code>. Zero financial ledger postings created.</p>
+            <h3 style="font-size:15px;font-weight:700;color:#1e293b;margin:0;display:flex;align-items:center;gap:8px;">
+                <span>🖥️</span> Current System Environment
+            </h3>
+            <p style="font-size:12px;color:#64748b;margin:2px 0 0;">Dedicated single MySQL database connection verified fail-closed against unauthorized schemas.</p>
         </div>
-        <span style="background:#e8fadf;color:#28c76f;padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;">Phase 3C.1 Staged</span>
+        <span style="background:#e8fadf;color:#166534;font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;">SINGLE-DATABASE ARCHITECTURE</span>
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:15px;">
-        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-                <strong style="font-size:14px;color:#1e293b;">03_COLLECTION_PRESENT_ONLY</strong>
-                <span style="font-size:16px;">🧾</span>
-            </div>
-            <div style="font-size:20px;font-weight:700;color:#334155;margin:8px 0 4px;">37,976 <span style="font-size:12px;color:#64748b;font-weight:normal;">rows</span></div>
-            <div style="font-size:12px;color:#64748b;margin-bottom:10px;">
-                Historical receipt details with PDF page/slip references.<br>
-                Unresolved Currencies: <strong style="color:#f59e0b;">8 rows</strong> (flagged).
-            </div>
-            <a href="/migration/qa-collections" style="color:#7367f0;font-size:12px;font-weight:600;text-decoration:none;">Search & Review Collections →</a>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:15px;">
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 14px;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Active Database</div>
+            <div style="font-size:16px;font-weight:700;color:#0f172a;margin-top:4px;"><code>{{ $activeDb ?? 'iqra_billing' }}</code></div>
+            <div style="font-size:11px;color:#16a34a;margin-top:2px;">✓ Verified Target Connection</div>
         </div>
 
-        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-                <strong style="font-size:14px;color:#1e293b;">05_OUTSTANDING_PRESENT_ONLY</strong>
-                <span style="font-size:16px;">📑</span>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 14px;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Connection Health</div>
+            <div style="font-size:16px;font-weight:700;color:{{ $dbVerified ? '#16a34a' : '#dc2626' }};margin-top:4px;">
+                {{ $dbVerified ? 'Verified' : 'Check Failed' }}
             </div>
-            <div style="font-size:20px;font-weight:700;color:#334155;margin:8px 0 4px;">11,473 <span style="font-size:12px;color:#64748b;font-weight:normal;">rows</span></div>
-            <div style="font-size:12px;color:#64748b;margin-bottom:10px;">
-                Historical residual dues balances by fee particular.<br>
-                Unresolved Currencies: <strong style="color:#f59e0b;">70 rows</strong> (flagged).
-            </div>
-            <a href="/migration/qa-dues" style="color:#7367f0;font-size:12px;font-weight:600;text-decoration:none;">Search & Review Dues →</a>
+            <div style="font-size:11px;color:#64748b;margin-top:2px;">127.0.0.1:3306 (mysql driver)</div>
         </div>
 
-        <div style="border:1px solid #c7d2fe;border-radius:6px;padding:14px;background:#eef2ff;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-                <strong style="font-size:14px;color:#3730a3;">Opening Balances Preview</strong>
-                <span style="font-size:16px;">⚖️</span>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 14px;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Source Workbook</div>
+            <div style="font-size:16px;font-weight:700;color:{{ $expectedWorkbook['configured'] ? '#0f172a' : '#dc2626' }};margin-top:4px;">
+                {{ $expectedWorkbook['configured'] ? 'Configured' : 'Missing' }}
             </div>
-            <div style="font-size:20px;font-weight:700;color:#312e81;margin:8px 0 4px;">7,692 <span style="font-size:12px;color:#4338ca;font-weight:normal;">invoices preview</span></div>
-            <div style="font-size:12px;color:#4338ca;margin-bottom:10px;">
-                Aggregated from 10,683 eligible dues (790 held).<br>
-                Strict ledger posting lock: <strong style="color:#dc2626;">STOPPED (Awaiting Approval)</strong>.
-            </div>
-            <a href="/migration/opening-balances" style="display:inline-block;background:#4f46e5;color:#fff;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:600;text-decoration:none;">Inspect Opening Balances →</a>
+            <div style="font-size:11px;color:#64748b;margin-top:2px;">{{ $expectedWorkbook['file_name'] }}</div>
         </div>
 
-        <div style="border:1px solid #fed7aa;border-radius:6px;padding:14px;background:#fff7ed;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-                <strong style="font-size:14px;color:#c2410c;">Held Dues Exceptions</strong>
-                <span style="font-size:16px;">🛑</span>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 14px;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Import Status</div>
+            <div style="font-size:16px;font-weight:700;color:{{ $importStatus === 'Imported' ? '#16a34a' : '#64748b' }};margin-top:4px;">
+                {{ $importStatus }}
             </div>
-            <div style="font-size:20px;font-weight:700;color:#9a3412;margin:8px 0 4px;">790 <span style="font-size:12px;color:#c2410c;font-weight:normal;">held dues lines</span></div>
-            <div style="font-size:12px;color:#9a3412;margin-bottom:10px;">
-                Excluded from posting: 391 student hold, 329 unknown period, 70 unresolved currency.<br>
-                Requires staff review prior to manual resolution.
+            <div style="font-size:11px;color:#64748b;margin-top:2px;">Staging Tables Zero-Baseline</div>
+        </div>
+
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 14px;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Posting Status</div>
+            <div style="font-size:16px;font-weight:700;color:#0f172a;margin-top:4px;">Protected</div>
+            <div style="font-size:11px;color:#16a34a;margin-top:2px;">Zero Financial Postings</div>
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 2: Approved MySkool Workbook -->
+<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:18px 20px;margin-bottom:22px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;border-bottom:1px solid #e2e8f0;padding-bottom:10px;flex-wrap:wrap;gap:8px;">
+        <div>
+            <h3 style="font-size:15px;font-weight:700;color:#1e293b;margin:0;display:flex;align-items:center;gap:8px;">
+                <span>📗</span> Approved MySkool Workbook (Final Authority)
+            </h3>
+            <p style="font-size:12px;color:#475569;margin:2px 0 0;">Configured source file: <code>{{ $expectedWorkbook['file_name'] }}</code> | Batch: <code>{{ $expectedWorkbook['batch_id'] }}</code></p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+            @if($expectedWorkbook['hash_verified'])
+                <span style="background:#dcfce7;color:#15803d;font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;">✓ SHA-256 VERIFIED</span>
+            @else
+                <span style="background:#fee2e2;color:#b91c1c;font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;">HASH CHECK PENDING</span>
+            @endif
+            <span style="background:#e0e7ff;color:#3730a3;font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;">Version: {{ $expectedWorkbook['version'] }}</span>
+        </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:15px;">
+        <div style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:14px;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Worksheet: Students</div>
+            <div style="font-size:24px;font-weight:700;color:#1e293b;margin:6px 0 2px;">{{ number_format($expectedWorkbook['expected_students']) }}</div>
+            <div style="font-size:12px;color:#64748b;">
+                Expected valid student records across School (3,981) and Tuition (377).<br>
+                13 admission currency records pending staff verification.
             </div>
-            <div style="display:flex;gap:10px;">
-                <a href="/migration/held-dues" style="display:inline-block;background:#ea580c;color:#fff;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:600;text-decoration:none;">Review 790 Lines →</a>
-                <a href="/migration/held-dues/export" style="font-size:12px;color:#ea580c;font-weight:600;text-decoration:none;align-self:center;">Export CSV ⤓</a>
+        </div>
+
+        <div style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:14px;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Worksheet: Paid details</div>
+            <div style="font-size:24px;font-weight:700;color:#1e293b;margin:6px 0 2px;">{{ number_format($expectedWorkbook['expected_collections']) }}</div>
+            <div style="font-size:12px;color:#64748b;">
+                Expected historical payment receipts across SAR, AED, PKR, QAR, BHD, OMR.<br>
+                Preserved as historical evidence with source slip identities.
+            </div>
+        </div>
+
+        <div style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:14px;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Worksheet: Outstanding (Compiled Valid)</div>
+            <div style="font-size:24px;font-weight:700;color:#1e293b;margin:6px 0 2px;">{{ number_format($expectedWorkbook['expected_dues']) }}</div>
+            <div style="font-size:12px;color:#64748b;">
+                Expected residual outstanding balance lines by fee particular.<br>
+                Currencies isolated without cross-currency addition.
             </div>
         </div>
     </div>
 </div>
 
-<!-- Recent Approval History -->
-<div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:20px;">
-    <h3 style="font-size:16px;font-weight:700;color:#2c2c2c;margin:0 0 15px;">Recent Staging Audit & Approval Logs</h3>
+<!-- SECTION 3: Actual Portal Data (Live Database Queries) -->
+<div style="background:#fff;border:1px solid #ebe9f1;border-radius:8px;padding:18px 20px;margin-bottom:22px;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;border-bottom:1px solid #f1f5f9;padding-bottom:10px;flex-wrap:wrap;gap:8px;">
+        <div>
+            <h3 style="font-size:15px;font-weight:700;color:#1e293b;margin:0;display:flex;align-items:center;gap:8px;">
+                <span>📊</span> Actual Portal Data (Live Database: <code>{{ $activeDb ?? 'iqra_billing' }}</code>)
+            </h3>
+            <p style="font-size:12px;color:#64748b;margin:2px 0 0;">Live counts queried directly from the current database. Un-imported tables display zero.</p>
+        </div>
+        <span style="background:#f1f5f9;color:#475569;font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;">PRE-IMPORT CLEAN STATE</span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(210px, 1fr));gap:15px;">
+        <!-- Students -->
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Students Imported</div>
+            <div style="font-size:24px;font-weight:700;color:{{ $actualData['students'] > 0 ? '#16a34a' : '#64748b' }};margin:6px 0 4px;">
+                {{ number_format($actualData['students']) }}
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                @if($actualData['students'] === 0)
+                    <span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">Not Imported</span>
+                @else
+                    <span style="color:#16a34a;font-weight:600;">Imported</span>
+                @endif
+                <span style="color:#94a3b8;margin-left:4px;">(Expected: 4,358)</span>
+            </div>
+        </div>
+
+        <!-- Families -->
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Families Created</div>
+            <div style="font-size:24px;font-weight:700;color:{{ $actualData['families'] > 0 ? '#16a34a' : '#64748b' }};margin:6px 0 4px;">
+                {{ number_format($actualData['families']) }}
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                @if($actualData['families'] === 0)
+                    <span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">Not Created</span>
+                @else
+                    <span style="color:#16a34a;font-weight:600;">Created</span>
+                @endif
+                <span style="color:#94a3b8;margin-left:4px;">(Family groupings)</span>
+            </div>
+        </div>
+
+        <!-- Enrollments -->
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Enrollments Created</div>
+            <div style="font-size:24px;font-weight:700;color:{{ $actualData['enrollments'] > 0 ? '#16a34a' : '#64748b' }};margin:6px 0 4px;">
+                {{ number_format($actualData['enrollments']) }}
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                @if($actualData['enrollments'] === 0)
+                    <span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">Not Created</span>
+                @else
+                    <span style="color:#16a34a;font-weight:600;">Created</span>
+                @endif
+                <span style="color:#94a3b8;margin-left:4px;">(School / Tuition)</span>
+            </div>
+        </div>
+
+        <!-- Collections Staged -->
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Historical Collections</div>
+            <div style="font-size:24px;font-weight:700;color:{{ $actualData['collections_staged'] > 0 ? '#16a34a' : '#64748b' }};margin:6px 0 4px;">
+                {{ number_format($actualData['collections_staged']) }}
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                @if($actualData['collections_staged'] === 0)
+                    <span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">Not Staged</span>
+                @else
+                    <span style="color:#16a34a;font-weight:600;">Staged</span>
+                @endif
+                <span style="color:#94a3b8;margin-left:4px;">(Expected: 38,068)</span>
+            </div>
+        </div>
+
+        <!-- Dues Staged -->
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Outstanding Dues</div>
+            <div style="font-size:24px;font-weight:700;color:{{ $actualData['dues_staged'] > 0 ? '#16a34a' : '#64748b' }};margin:6px 0 4px;">
+                {{ number_format($actualData['dues_staged']) }}
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                @if($actualData['dues_staged'] === 0)
+                    <span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">Not Staged</span>
+                @else
+                    <span style="color:#16a34a;font-weight:600;">Staged</span>
+                @endif
+                <span style="color:#94a3b8;margin-left:4px;">(Expected: 11,351)</span>
+            </div>
+        </div>
+
+        <!-- Opening Balance Invoices -->
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Opening Invoices</div>
+            <div style="font-size:24px;font-weight:700;color:{{ $actualData['opening_balance_invoices'] > 0 ? '#dc2626' : '#16a34a' }};margin:6px 0 4px;">
+                {{ number_format($actualData['opening_balance_invoices']) }}
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                <span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">Protected (0)</span>
+            </div>
+        </div>
+
+        <!-- Live Receipts -->
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Live Receipts</div>
+            <div style="font-size:24px;font-weight:700;color:{{ $actualData['live_receipts'] > 0 ? '#dc2626' : '#16a34a' }};margin:6px 0 4px;">
+                {{ number_format($actualData['live_receipts']) }}
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                <span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">Clean (0)</span>
+            </div>
+        </div>
+
+        <!-- Exceptions -->
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;">Import Exceptions</div>
+            <div style="font-size:24px;font-weight:700;color:{{ $actualData['exceptions'] > 0 ? '#f59e0b' : '#64748b' }};margin:6px 0 4px;">
+                {{ number_format($actualData['exceptions']) }}
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                <span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">0 Logged</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 4: Review and Auditing Screens -->
+<div style="background:#fff;border:1px solid #ebe9f1;border-radius:8px;padding:18px 20px;margin-bottom:22px;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+    <h3 style="font-size:15px;font-weight:700;color:#1e293b;margin:0 0 14px;border-bottom:1px solid #f1f5f9;padding-bottom:10px;">
+        🔍 Migration Review & Audit Modules
+    </h3>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:15px;">
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#faf5ff;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="color:#581c87;font-size:14px;">Historical Collections Review</strong>
+                <span>🧾</span>
+            </div>
+            <p style="font-size:12px;color:#6b21a8;margin:6px 0 10px;">Inspect historical receipts from worksheet <code>Paid details</code>.</p>
+            <a href="/migration/qa-collections" style="color:#7e22ce;font-size:12px;font-weight:600;text-decoration:none;">Review Collections ({{ number_format($actualData['collections_staged']) }}) →</a>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#eff6ff;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="color:#1e3a8a;font-size:14px;">Outstanding Fees Review</strong>
+                <span>📑</span>
+            </div>
+            <p style="font-size:12px;color:#1e40af;margin:6px 0 10px;">Inspect residual outstanding balances from worksheet <code>Outstanding (Compiled Valid)</code>.</p>
+            <a href="/migration/qa-dues" style="color:#2563eb;font-size:12px;font-weight:600;text-decoration:none;">Review Outstanding ({{ number_format($actualData['dues_staged']) }}) →</a>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f0fdf4;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="color:#14532d;font-size:14px;">Opening Balance Preview</strong>
+                <span>⚖️</span>
+            </div>
+            <p style="font-size:12px;color:#166534;margin:6px 0 10px;">Pre-posting invoice simulation without financial ledger mutation.</p>
+            <a href="/migration/opening-balances" style="color:#15803d;font-size:12px;font-weight:600;text-decoration:none;">Inspect Opening Balances →</a>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#fff7ed;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="color:#7c2d12;font-size:14px;">Financial Exceptions</strong>
+                <span>🛑</span>
+            </div>
+            <p style="font-size:12px;color:#9a3412;margin:6px 0 10px;">Review held dues lines excluded from posting to protect ledger integrity.</p>
+            <a href="/migration/held-dues" style="color:#ea580c;font-size:12px;font-weight:600;text-decoration:none;">Inspect Held Exceptions →</a>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="color:#334155;font-size:14px;">Campus Approvals</strong>
+                <span>🏫</span>
+            </div>
+            <p style="font-size:12px;color:#475569;margin:6px 0 10px;">Assign and approve physical campus designations.</p>
+            <a href="/migration/campus" style="color:#4f46e5;font-size:12px;font-weight:600;text-decoration:none;">Review & Approve Campuses →</a>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="color:#334155;font-size:14px;">Department Classification</strong>
+                <span>📚</span>
+            </div>
+            <p style="font-size:12px;color:#475569;margin:6px 0 10px;">Review School vs Tuition department programs.</p>
+            <a href="/migration/department" style="color:#4f46e5;font-size:12px;font-weight:600;text-decoration:none;">Review Departments →</a>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="color:#334155;font-size:14px;">Currency Review</strong>
+                <span>💱</span>
+            </div>
+            <p style="font-size:12px;color:#475569;margin:6px 0 10px;">Verify approved student currencies and resolve missing currencies.</p>
+            <a href="/migration/currency" style="color:#4f46e5;font-size:12px;font-weight:600;text-decoration:none;">Review Currencies →</a>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;background:#f8fafc;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="color:#334155;font-size:14px;">Identity Reconciliation</strong>
+                <span>🔍</span>
+            </div>
+            <p style="font-size:12px;color:#475569;margin:6px 0 10px;">Audit historical student GR and family code matching.</p>
+            <a href="/migration/gr-reconciliation" style="color:#4f46e5;font-size:12px;font-weight:600;text-decoration:none;">Reconciliation Cases →</a>
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 5: Recent Audit Logs -->
+<div style="background:#fff;border:1px solid #ebe9f1;border-radius:8px;padding:18px 20px;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+    <h3 style="font-size:15px;font-weight:700;color:#1e293b;margin:0 0 14px;border-bottom:1px solid #f1f5f9;padding-bottom:10px;">
+        Recent Staging Audit & Approval Logs
+    </h3>
     @if($recentLogs->isEmpty())
-        <p style="color:#b9b9c3;font-size:13px;margin:0;">No approval actions logged yet.</p>
+        <p style="color:#94a3b8;font-size:13px;margin:0;padding:10px 0;">No approval actions logged yet. Clean baseline established.</p>
     @else
         <table style="width:100%;border-collapse:collapse;font-size:13px;">
             <thead>

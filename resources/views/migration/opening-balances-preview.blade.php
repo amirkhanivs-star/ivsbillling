@@ -3,7 +3,7 @@
 @section('content')
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
     <div>
-        <h2 style="font-size:22px;font-weight:700;color:#2c2c2c;margin:0;">Historical Opening Balances Preview (QA Isolated)</h2>
+        <h2 style="font-size:22px;font-weight:700;color:#2c2c2c;margin:0;">Historical Opening Balances Preview</h2>
         <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Inspect pre-posting simulation of historical opening balance invoices generated from <code>qa_staged_dues</code>.</p>
     </div>
     <div style="display:flex;gap:10px;">
@@ -28,7 +28,7 @@
     <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
         <small style="color:#b9b9c3;text-transform:uppercase;font-size:11px;font-weight:600;">Total Staged Dues</small>
         <h3 style="font-size:24px;margin:6px 0 0;color:#2c2c2c;">{{ number_format($s['total_staged_dues']) }}</h3>
-        <small style="color:#7367f0;">Worksheet 05 rows</small>
+        <small style="color:#7367f0;">Source dues rows</small>
     </div>
 
     <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
@@ -40,7 +40,7 @@
     <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
         <small style="color:#b9b9c3;text-transform:uppercase;font-size:11px;font-weight:600;">Excluded / Held Rows</small>
         <h3 style="font-size:24px;margin:6px 0 0;color:#ff9f43;">{{ number_format($s['excluded_rows_count']) }}</h3>
-        <small style="color:#ff9f43;">70 unres. curr + 391 review hold</small>
+        <small style="color:#ff9f43;">Unresolved currency & review hold lines</small>
     </div>
 
     <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
@@ -113,7 +113,7 @@
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <h3 style="font-size:16px;font-weight:700;margin:0;color:#2c2c2c;">Excluded & Held Dues Lines ({{ number_format($s['excluded_rows_count']) }} Lines Kept Out of Ledger)</h3>
         <a href="{{ route('migration.held_dues') }}" class="btn" style="background:#ea5455;color:#fff;text-decoration:none;font-size:12px;padding:6px 14px;border-radius:4px;font-weight:600;">
-            Review All 790 Held Dues Lines & Reasons →
+            Review Held Dues Lines & Reasons →
         </a>
     </div>
     <p style="font-size:12px;color:#6e6b7b;margin-bottom:14px;">These rows remain safely staged in <code>qa_staged_dues</code> and are strictly excluded from opening-balance invoice generation.</p>
@@ -121,15 +121,15 @@
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:15px;margin-bottom:15px;">
         <div style="background:#fff9e6;border:1px solid #ffeeba;border-radius:4px;padding:12px;">
             <strong style="color:#856404;">⚠️ Unresolved Currency: {{ $ex['unresolved_currency_count'] }}</strong>
-            <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">70 rows with blank currency or aliases like "SAE" awaiting currency determination.</p>
+            <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">Rows with blank or unverified currency awaiting determination.</p>
         </div>
         <div style="background:#fff4e5;border:1px solid #ffd8a8;border-radius:4px;padding:12px;">
             <strong style="color:#d9480f;">🔒 Review-Hold Students: {{ $ex['review_hold_student_count'] }}</strong>
-            <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">391 dues lines belonging to the 72 provisional/review students on financial approval hold.</p>
+            <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">Dues lines belonging to students on financial approval hold.</p>
         </div>
         <div style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;padding:12px;">
             <strong style="color:#475569;">📅 Unknown Period: {{ $ex['unknown_period_count'] }}</strong>
-            <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">329 course/subject particulars lacking verified 4-digit calendar year (held for review; no invented Sep 2026).</p>
+            <p style="font-size:12px;color:#6e6b7b;margin:4px 0 0;">Particulars lacking verified 4-digit calendar year (held for review; no invented dates).</p>
         </div>
         <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:4px;padding:12px;">
             <strong style="color:#334155;">🏢 Department Review: {{ $ex['ambiguous_department_count'] + $ex['unmatched_enrollment_count'] }}</strong>

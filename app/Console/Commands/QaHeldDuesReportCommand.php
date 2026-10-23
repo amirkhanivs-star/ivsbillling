@@ -22,7 +22,7 @@ class QaHeldDuesReportCommand extends Command
         $this->info('  IQRA Virtual School — Financial Exceptions: Held Dues Lines Report   ');
         $this->info('========================================================================');
 
-        $conn = (string) ($this->option('conn') ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa'));
+        $conn = (string) ($this->option('conn') ?: config('database.default', 'mysql'));
         $batchId = $this->option('batch-id') ? (string) $this->option('batch-id') : null;
 
         $allHeld = $service->getHeldDuesReport($conn, $batchId);

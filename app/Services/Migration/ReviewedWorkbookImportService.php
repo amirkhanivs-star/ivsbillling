@@ -12,38 +12,118 @@ use RuntimeException;
 
 class ReviewedWorkbookImportService
 {
-    public const EXPECTED_SHA256 = 'd2276cf0c75a0c17b143d1815fda568c9b5cc7e0154f546b8075d1a98e225401';
+    public const APPROVED_WORKBOOK_SHA256 = '77d8e10f84726cc7b9708bfdb749948a7dbe717d60dab15b91361d5f2e4c4f4b';
+    public const APPROVED_BATCH_ID = 'BATCH-20261023-FINAL-MYSKOOL';
+    public const APPROVED_VERSION_KEY = 'v3_final_myskool_20261023';
+
+    // Legacy and alternative SHA-256 hashes
+    public const EXPECTED_SHA256 = self::APPROVED_WORKBOOK_SHA256;
+    public const LEGACY_OCT22_SHA256 = 'd2276cf0c75a0c17b143d1815fda568c9b5cc7e0154f546b8075d1a98e225401';
     public const REVISED_SHA256 = 'f48f1ee57eb826776c2f1eb7cab0150640605d4b30f1c761044f7d0d12d0468e';
+
+    // Final approved worksheet names
+    public const SHEET_STUDENTS = 'Students';
+    public const SHEET_COLLECTIONS = 'Paid details';
+    public const SHEET_OUTSTANDING = 'Outstanding (Compiled Valid)';
+
+    // Legacy worksheet constants retained for backwards compatibility
     public const SHEET_REGISTRATION = '01_REGISTRATION_PRESENT (1)';
     public const SHEET_COLLECTION = '03_COLLECTION_PRESENT_ONLY';
-    public const SHEET_OUTSTANDING = '05_OUTSTANDING_PRESENT_ONLY';
+    public const SHEET_LEGACY_OUTSTANDING = '05_OUTSTANDING_PRESENT_ONLY';
+
+    /**
+     * Build normalized column-header map for dynamic header resolution.
+     */
+    public function buildHeaderMap(array $headerRow): array
+    {
+        $map = [];
+        foreach ($headerRow as $idx => $col) {
+            $normalized = strtolower(trim(preg_replace('/[^a-zA-Z0-9]/', '', (string) $col)));
+            if ($normalized !== '') {
+                $map[$normalized] = $idx;
+            }
+        }
+        return $map;
+    }
+
+    /**
+     * Resolve sheet names dynamically from configuration or source workbook.
+     */
+    public function getResolvedSheets(?string $filePath = null): array
+    {
+        $activeKey = config('imports.active_version', self::APPROVED_VERSION_KEY);
+        $configured = config("imports.versions.{$activeKey}.sheets", []);
+
+        $students = $configured['students'] ?? self::SHEET_STUDENTS;
+        $collections = $configured['paid_details'] ?? ($configured['collections'] ?? self::SHEET_COLLECTIONS);
+        $outstanding = $configured['outstanding'] ?? self::SHEET_OUTSTANDING;
+
+        if ($filePath && is_file($filePath)) {
+            try {
+                $reader = IOFactory::createReaderForFile($filePath);
+                $names = $reader->listWorksheetNames($filePath);
+                if (!in_array($students, $names, true) && in_array(self::SHEET_REGISTRATION, $names, true)) {
+                    $students = self::SHEET_REGISTRATION;
+                }
+                if (!in_array($collections, $names, true) && in_array(self::SHEET_COLLECTION, $names, true)) {
+                    $collections = self::SHEET_COLLECTION;
+                }
+                if (!in_array($outstanding, $names, true) && in_array(self::SHEET_LEGACY_OUTSTANDING, $names, true)) {
+                    $outstanding = self::SHEET_LEGACY_OUTSTANDING;
+                }
+            } catch (\Throwable $e) {
+                // Fall back to configured names
+            }
+        }
+
+        return [
+            'students' => $students,
+            'collections' => $collections,
+            'outstanding' => $outstanding,
+        ];
+    }
 
     /**
      * Preview the workbook reconciliation and metrics without modifying the database.
+     * Strictly read-only: performs zero inserts or updates to the database.
      */
     public function preview(
         string $filePath,
-        ?string $expectedSha256 = self::EXPECTED_SHA256,
-        ?string $qaConn = null
+        ?string $expectedSha256 = self::APPROVED_WORKBOOK_SHA256,
+        ?string $conn = null
     ): array {
-        @ini_set('memory_limit', '1024M');
-        $qaConn = $qaConn ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa');
+        @ini_set('memory_limit', '1536M');
+        $conn = $conn ?: config('database.default', 'mysql');
         $this->validateFileAndHash($filePath, $expectedSha256);
-        $this->validateQaConnection($qaConn);
+        $this->validateConnection($conn);
+
+        $sheets = $this->getResolvedSheets($filePath);
+        $studentSheet = $sheets['students'];
+        $collectionSheet = $sheets['collections'];
+        $outstandingSheet = $sheets['outstanding'];
 
         $reader = IOFactory::createReaderForFile($filePath);
         $reader->setReadDataOnly(true);
 
-        // 1. Sheet 1: Registration
-        $reader->setLoadSheetsOnly([self::SHEET_REGISTRATION]);
+        // 1. Sheet 1: Students / Registration
+        $reader->setLoadSheetsOnly([$studentSheet]);
         $sp = $reader->load($filePath);
-        $sheetReg = $sp->getSheetByName(self::SHEET_REGISTRATION);
+        $sheetReg = $sp->getSheetByName($studentSheet);
         $regData = $sheetReg->toArray(null, false, false, false);
         $sp->disconnectWorksheets();
         unset($sp, $sheetReg);
         gc_collect_cycles();
 
-        array_shift($regData); // Header
+        $regHeaders = array_shift($regData) ?: [];
+        $hdrReg = $this->buildHeaderMap($regHeaders);
+
+        $idxGr = $hdrReg['grno'] ?? ($hdrReg['gr'] ?? ($hdrReg['grn'] ?? 1));
+        $idxClass = $hdrReg['class'] ?? 11;
+        $idxFee = $hdrReg['monthlyfee'] ?? ($hdrReg['fee'] ?? 13);
+        $idxCurr = $hdrReg['currency'] ?? ($hdrReg['regcurr'] ?? 14);
+        $idxStatus = $hdrReg['status'] ?? 15;
+        $idxLeaving = $hdrReg['dateofleaving'] ?? ($hdrReg['leavingdate'] ?? 18);
+        $idxProv = $hdrReg['currencyprovisional'] ?? ($hdrReg['provisional'] ?? null);
 
         $regGrs = [];
         $provCounts = [];
@@ -52,6 +132,7 @@ class ReviewedWorkbookImportService
         $deptCounts = ['school' => 0, 'tuition' => 0];
         $approvedCount = 0;
         $heldCount = 0;
+        $zeroFeeCount = 0;
 
         $mutuallyExclusive = [
             'active_billable' => 0,
@@ -63,17 +144,17 @@ class ReviewedWorkbookImportService
 
         foreach ($regData as $idx => $row) {
             $r = $idx + 2;
-            $gr = trim((string) ($row[1] ?? ''));
+            $gr = trim((string) ($row[$idxGr] ?? ''));
             if ($gr === '') {
                 continue;
             }
 
-            $curr = trim((string) ($row[21] ?? ''));
-            $prov = trim((string) ($row[23] ?? ''));
-            $class = trim((string) ($row[11] ?? ''));
-            $fee = self::parseMoneyDecimal($row[13] ?? 0);
-            $leavingDate = trim((string) ($row[17] ?? ''));
+            $curr = strtoupper(trim((string) ($row[$idxCurr] ?? '')));
+            $class = trim((string) ($row[$idxClass] ?? ''));
+            $fee = self::parseMoneyDecimal($row[$idxFee] ?? 0);
+            $leavingDate = trim((string) ($row[$idxLeaving] ?? ''));
             $hasLeaving = ($leavingDate !== '');
+            $prov = $idxProv !== null ? strtoupper(trim((string) ($row[$idxProv] ?? 'NO'))) : ($curr === '' ? 'YES' : 'NO');
 
             $regGrs[$gr] = [
                 'row' => $r,
@@ -83,12 +164,17 @@ class ReviewedWorkbookImportService
             ];
 
             $provCounts[$prov] = ($provCounts[$prov] ?? 0) + 1;
-            $currCounts[$curr] = ($currCounts[$curr] ?? 0) + 1;
             if ($curr === '') {
                 $blankCurrencyCount++;
+            } else {
+                $currCounts[$curr] = ($currCounts[$curr] ?? 0) + 1;
             }
 
-            if ($prov === 'NO' && $curr !== '') {
+            if ($fee == 0) {
+                $zeroFeeCount++;
+            }
+
+            if ($curr !== '' && $prov === 'NO') {
                 if ($hasLeaving) {
                     $mutuallyExclusive['leaving_date_discrepancy']++;
                 } elseif ($fee > 0) {
@@ -111,9 +197,9 @@ class ReviewedWorkbookImportService
         unset($regData);
         gc_collect_cycles();
 
-        // Reconcile with existing QA students
-        $qa = DB::connection($qaConn);
-        $existingGrs = $qa->table('students')->pluck('gr_number')->all();
+        // Reconcile with existing portal database students (read-only)
+        $db = DB::connection($conn);
+        $existingGrs = $db->table('students')->pluck('gr_number')->all();
         $existingSet = array_flip($existingGrs);
 
         $sharedGrs = [];
@@ -133,26 +219,47 @@ class ReviewedWorkbookImportService
             }
         }
 
-        // 2. Sheet 2: Collection
-        $reader->setLoadSheetsOnly([self::SHEET_COLLECTION]);
+        // 2. Sheet 2: Collections
+        $reader->setLoadSheetsOnly([$collectionSheet]);
         $sp = $reader->load($filePath);
-        $sheetCol = $sp->getSheetByName(self::SHEET_COLLECTION);
+        $sheetCol = $sp->getSheetByName($collectionSheet);
         $colData = $sheetCol->toArray(null, false, false, false);
         $sp->disconnectWorksheets();
         unset($sp, $sheetCol);
         gc_collect_cycles();
 
-        array_shift($colData); // header
-        $colRowsCount = count($colData);
+        $colHeaders = array_shift($colData) ?: [];
+        $hdrCol = $this->buildHeaderMap($colHeaders);
+        $idxColSlip = $hdrCol['slip'] ?? ($hdrCol['slipnumber'] ?? 1);
+        $idxColGr = $hdrCol['grn'] ?? ($hdrCol['gr'] ?? 2);
+        $idxColPart = $hdrCol['particular'] ?? 4;
+        $idxColDate = $hdrCol['date'] ?? 5;
+        $idxColCurr = $hdrCol['currency'] ?? 6;
+        $idxColAmt = $hdrCol['amount'] ?? 7;
+        $idxColFlags = $hdrCol['reviewflags'] ?? ($hdrCol['flags'] ?? null);
 
+        $colRowsCount = 0;
         $colUnresolved = 0;
         $colCurrencyTotals = [];
-        foreach ($colData as $row) {
-            $curr = trim((string) ($row[10] ?? ''));
-            $flags = trim((string) ($row[19] ?? ''));
-            $amt = (float) ($row[12] ?? 0);
+        $colCurrencyCounts = [];
 
-            $colCurrencyTotals[$curr] = ($colCurrencyTotals[$curr] ?? 0) + $amt;
+        foreach ($colData as $row) {
+            $slip = trim((string) ($row[$idxColSlip] ?? ''));
+            $gr = trim((string) ($row[$idxColGr] ?? ''));
+            $amtRaw = trim((string) ($row[$idxColAmt] ?? ''));
+            if ($slip === '' && $gr === '' && $amtRaw === '') {
+                continue;
+            }
+
+            $colRowsCount++;
+            $curr = strtoupper(trim((string) ($row[$idxColCurr] ?? '')));
+            $flags = $idxColFlags !== null ? trim((string) ($row[$idxColFlags] ?? '')) : '';
+            $amt = self::parseMoneyDecimal($amtRaw);
+
+            $currKey = $curr !== '' ? $curr : 'UNRESOLVED';
+            $colCurrencyTotals[$currKey] = ($colCurrencyTotals[$currKey] ?? 0) + $amt;
+            $colCurrencyCounts[$currKey] = ($colCurrencyCounts[$currKey] ?? 0) + 1;
+
             if ($curr === '' || $curr === 'UNRESOLVED' || str_contains($flags, 'UNRESOLVED')) {
                 $colUnresolved++;
             }
@@ -161,25 +268,44 @@ class ReviewedWorkbookImportService
         gc_collect_cycles();
 
         // 3. Sheet 3: Outstanding
-        $reader->setLoadSheetsOnly([self::SHEET_OUTSTANDING]);
+        $reader->setLoadSheetsOnly([$outstandingSheet]);
         $sp = $reader->load($filePath);
-        $sheetDue = $sp->getSheetByName(self::SHEET_OUTSTANDING);
+        $sheetDue = $sp->getSheetByName($outstandingSheet);
         $dueData = $sheetDue->toArray(null, false, false, false);
         $sp->disconnectWorksheets();
         unset($sp, $sheetDue);
         gc_collect_cycles();
 
-        array_shift($dueData); // header
-        $dueRowsCount = count($dueData);
+        $dueHeaders = array_shift($dueData) ?: [];
+        $hdrDue = $this->buildHeaderMap($dueHeaders);
+        $idxDueGr = $hdrDue['grn'] ?? ($hdrDue['gr'] ?? 0);
+        $idxDuePart = $hdrDue['particular'] ?? 3;
+        $idxDueCurr = $hdrDue['currency'] ?? 4;
+        $idxDueAmt = $hdrDue['balance'] ?? ($hdrDue['outstandingamount'] ?? ($hdrDue['amount'] ?? 5));
+        $idxDueFlags = $hdrDue['reviewflags'] ?? ($hdrDue['flags'] ?? null);
 
+        $dueRowsCount = 0;
         $dueUnresolved = 0;
         $dueCurrencyTotals = [];
-        foreach ($dueData as $row) {
-            $curr = trim((string) ($row[9] ?? ''));
-            $flags = trim((string) ($row[17] ?? ''));
-            $amt = (float) ($row[11] ?? 0);
+        $dueCurrencyCounts = [];
 
-            $dueCurrencyTotals[$curr] = ($dueCurrencyTotals[$curr] ?? 0) + $amt;
+        foreach ($dueData as $row) {
+            $gr = trim((string) ($row[$idxDueGr] ?? ''));
+            $part = trim((string) ($row[$idxDuePart] ?? ''));
+            $balRaw = trim((string) ($row[$idxDueAmt] ?? ''));
+            if ($gr === '' && $part === '' && $balRaw === '') {
+                continue;
+            }
+
+            $dueRowsCount++;
+            $curr = strtoupper(trim((string) ($row[$idxDueCurr] ?? '')));
+            $flags = $idxDueFlags !== null ? trim((string) ($row[$idxDueFlags] ?? '')) : '';
+            $amt = self::parseMoneyDecimal($balRaw);
+
+            $currKey = $curr !== '' ? $curr : 'UNRESOLVED';
+            $dueCurrencyTotals[$currKey] = ($dueCurrencyTotals[$currKey] ?? 0) + $amt;
+            $dueCurrencyCounts[$currKey] = ($dueCurrencyCounts[$currKey] ?? 0) + 1;
+
             if ($curr === '' || $curr === 'UNRESOLVED' || str_contains($flags, 'UNRESOLVED')) {
                 $dueUnresolved++;
             }
@@ -190,6 +316,11 @@ class ReviewedWorkbookImportService
         return [
             'file_path' => $filePath,
             'sha256' => hash_file('sha256', $filePath),
+            'sheets_resolved' => [
+                'students' => $studentSheet,
+                'collections' => $collectionSheet,
+                'outstanding' => $outstandingSheet,
+            ],
             'registration' => [
                 'total_rows' => count($regGrs),
                 'shared_grs_count' => count($sharedGrs),
@@ -203,41 +334,46 @@ class ReviewedWorkbookImportService
                 'blank_currency_count' => $blankCurrencyCount,
                 'currencies' => $currCounts,
                 'departments' => $deptCounts,
+                'zero_fee_count' => $zeroFeeCount,
             ],
             'collection' => [
+                'sheet_name' => $collectionSheet,
                 'total_rows' => $colRowsCount,
                 'unresolved_currency_rows' => $colUnresolved,
                 'totals_by_currency' => $colCurrencyTotals,
+                'counts_by_currency' => $colCurrencyCounts,
             ],
             'outstanding' => [
+                'sheet_name' => $outstandingSheet,
                 'total_rows' => $dueRowsCount,
                 'unresolved_currency_rows' => $dueUnresolved,
                 'totals_by_currency' => $dueCurrencyTotals,
+                'counts_by_currency' => $dueCurrencyCounts,
             ],
         ];
     }
 
     /**
-     * Import the reviewed workbook into the QA database.
+     * Import the approved workbook into the portal database.
      */
     public function import(
         string $filePath,
-        ?string $expectedSha256 = self::EXPECTED_SHA256,
-        ?string $qaConn = null,
+        ?string $expectedSha256 = self::APPROVED_WORKBOOK_SHA256,
+        ?string $conn = null,
         ?string $batchId = null
     ): array {
-        @ini_set('memory_limit', '1024M');
+        @ini_set('memory_limit', '1536M');
         gc_collect_cycles();
-        $qaConn = $qaConn ?: (config('database.default') === 'sqlite' ? 'sqlite' : 'qa');
+        $conn = $conn ?: config('database.default', 'mysql');
         $this->validateFileAndHash($filePath, $expectedSha256);
-        $this->validateQaConnection($qaConn);
+        $this->validateConnection($conn);
 
-        $batchId = $batchId ?: 'BATCH-20261022-PORTAL-V2';
+        $batchId = $batchId ?: (string) config('imports.active_batch_id', self::APPROVED_BATCH_ID);
         $now = now();
-        $qa = DB::connection($qaConn);
+        $qa = DB::connection($conn);
 
         return $qa->transaction(function () use ($filePath, $qa, $batchId, $now) {
-            @ini_set('memory_limit', '1024M');
+            @ini_set('memory_limit', '1536M');
 
             // Capture initial financial ledger baseline to guarantee zero ledger mutation
             $ledgerBefore = [
@@ -247,6 +383,11 @@ class ReviewedWorkbookImportService
                 'payment_allocations' => $qa->table('payment_allocations')->count(),
                 'billing_runs' => $qa->table('billing_runs')->count(),
             ];
+
+            $sheets = $this->getResolvedSheets($filePath);
+            $studentSheet = $sheets['students'];
+            $collectionSheet = $sheets['collections'];
+            $outstandingSheet = $sheets['outstanding'];
 
             $reader = IOFactory::createReaderForFile($filePath);
             $reader->setReadDataOnly(true);
@@ -263,15 +404,38 @@ class ReviewedWorkbookImportService
                 $programsCache[$p->department_id . ':' . $p->name] = $p->id;
             }
 
-            // 3. Process Sheet 1: Registration
-            $reader->setLoadSheetsOnly([self::SHEET_REGISTRATION]);
+            // 3. Process Sheet 1: Registration / Students
+            $reader->setLoadSheetsOnly([$studentSheet]);
             $sp = $reader->load($filePath);
-            $sheetReg = $sp->getSheetByName(self::SHEET_REGISTRATION);
+            $sheetReg = $sp->getSheetByName($studentSheet);
             $regData = $sheetReg->toArray(null, false, false, false);
             $sp->disconnectWorksheets();
             unset($sp);
 
-            $regHeaders = array_shift($regData); // Remove header row
+            $regHeaders = array_shift($regData) ?: [];
+            $hdrReg = $this->buildHeaderMap($regHeaders);
+
+            $idxRawId = $hdrReg['id'] ?? 0;
+            $idxGr = $hdrReg['grno'] ?? ($hdrReg['gr'] ?? ($hdrReg['grn'] ?? 1));
+            $idxFam = $hdrReg['familycode'] ?? 2;
+            $idxName = $hdrReg['studentname'] ?? 3;
+            $idxFather = $hdrReg['fathername'] ?? 4;
+            $idxGender = $hdrReg['gender'] ?? 5;
+            $idxReligion = $hdrReg['religion'] ?? 7;
+            $idxContactFather = $hdrReg['contactfather'] ?? 8;
+            $idxContactMother = $hdrReg['contactmother'] ?? 9;
+            $idxAdmissionDate = $hdrReg['dateofadmission'] ?? 10;
+            $idxClass = $hdrReg['class'] ?? 11;
+            $idxClassAdmitted = $hdrReg['classadmitted'] ?? 12;
+            $idxFee = $hdrReg['monthlyfee'] ?? 13;
+            $idxStatus = $hdrReg['status'] ?? 15;
+            $idxGuardian = $hdrReg['guardianname'] ?? 16;
+            $idxCurrency = $hdrReg['currency'] ?? ($hdrReg['regcurr'] ?? 14);
+            $idxCurrencyEvidence = $hdrReg['currencyevidence'] ?? null;
+            $idxProv = $hdrReg['currencyprovisional'] ?? ($hdrReg['provisional'] ?? null);
+            $idxPaidPdf = $hdrReg['paidpdfcurrencies'] ?? null;
+            $idxOutPdf = $hdrReg['outstandingpdfcurrencies'] ?? null;
+            $idxConflict = $hdrReg['currencyconflictflags'] ?? null;
 
             $stats = [
                 'batch_id' => $batchId,
@@ -297,40 +461,40 @@ class ReviewedWorkbookImportService
 
             foreach ($regData as $rowIndex => $row) {
                 $sourceRow = $rowIndex + 2;
-                $rawId = trim((string) ($row[0] ?? ''));
-                $gr = trim((string) ($row[1] ?? ''));
+                $rawId = trim((string) ($row[$idxRawId] ?? ''));
+                $gr = trim((string) ($row[$idxGr] ?? ''));
                 if ($gr === '') {
                     continue;
                 }
 
                 $seenWorkbookGrs[$gr] = true;
 
-                $famCode = trim((string) ($row[2] ?? ''));
+                $famCode = trim((string) ($row[$idxFam] ?? ''));
                 $isProvisionalFamily = false;
                 if ($famCode === '') {
                     $famCode = 'PROV-FAM-' . $gr;
                     $isProvisionalFamily = true;
                 }
 
-                $name = trim((string) ($row[3] ?? ''));
-                $father = trim((string) ($row[4] ?? ''));
-                $gender = trim((string) ($row[5] ?? ''));
-                $religion = trim((string) ($row[7] ?? ''));
-                $contactFather = trim((string) ($row[8] ?? ''));
-                $contactMother = trim((string) ($row[9] ?? ''));
-                $admissionDateRaw = $row[10] ?? null;
+                $name = trim((string) ($row[$idxName] ?? ''));
+                $father = trim((string) ($row[$idxFather] ?? ''));
+                $gender = trim((string) ($row[$idxGender] ?? ''));
+                $religion = trim((string) ($row[$idxReligion] ?? ''));
+                $contactFather = trim((string) ($row[$idxContactFather] ?? ''));
+                $contactMother = trim((string) ($row[$idxContactMother] ?? ''));
+                $admissionDateRaw = $row[$idxAdmissionDate] ?? null;
                 $parsedAdmissionDate = self::parseExcelDate($admissionDateRaw);
-                $className = trim((string) ($row[11] ?? 'General'));
-                $classAdmitted = trim((string) ($row[12] ?? ''));
-                $rawFee = trim((string) ($row[13] ?? '0'));
-                $statusRaw = trim((string) ($row[14] ?? 'present'));
-                $guardian = trim((string) ($row[15] ?? ''));
-                $currencyRaw = strtoupper(trim((string) ($row[21] ?? '')));
-                $currencyEvidence = trim((string) ($row[22] ?? ''));
-                $currencyProvisional = strtoupper(trim((string) ($row[23] ?? 'NO')));
-                $paidPdfCurrencies = trim((string) ($row[24] ?? ''));
-                $outstandingPdfCurrencies = trim((string) ($row[25] ?? ''));
-                $conflictFlags = trim((string) ($row[26] ?? ''));
+                $className = trim((string) ($row[$idxClass] ?? 'General'));
+                $classAdmitted = trim((string) ($row[$idxClassAdmitted] ?? ''));
+                $rawFee = trim((string) ($row[$idxFee] ?? '0'));
+                $statusRaw = trim((string) ($row[$idxStatus] ?? 'present'));
+                $guardian = trim((string) ($row[$idxGuardian] ?? ''));
+                $currencyRaw = strtoupper(trim((string) ($row[$idxCurrency] ?? '')));
+                $currencyEvidence = $idxCurrencyEvidence !== null ? trim((string) ($row[$idxCurrencyEvidence] ?? '')) : '';
+                $currencyProvisional = $idxProv !== null ? strtoupper(trim((string) ($row[$idxProv] ?? 'NO'))) : ($currencyRaw === '' ? 'YES' : 'NO');
+                $paidPdfCurrencies = $idxPaidPdf !== null ? trim((string) ($row[$idxPaidPdf] ?? '')) : '';
+                $outstandingPdfCurrencies = $idxOutPdf !== null ? trim((string) ($row[$idxOutPdf] ?? '')) : '';
+                $conflictFlags = $idxConflict !== null ? trim((string) ($row[$idxConflict] ?? '')) : '';
 
                 // 3a. Family mapping
                 if (!isset($existingFamiliesMap[$famCode])) {
@@ -386,7 +550,7 @@ class ReviewedWorkbookImportService
                 }
 
                 $legacyBilling = [
-                    'source_workbook' => 'UPdated school record for portal.xlsx',
+                    'source_workbook' => basename($filePath),
                     'source_row' => $sourceRow,
                     'batch_id' => $batchId,
                     'currency_provisional' => $currencyProvisional,
@@ -415,7 +579,7 @@ class ReviewedWorkbookImportService
                         'gr_number' => $gr,
                         'name' => $name,
                         'family_id' => $familyId,
-                        'legacy_myskool_id' => $rawId ?: ('XLSX:V2:' . $gr),
+                        'legacy_myskool_id' => $rawId ?: ('XLSX:V3:' . $gr),
                         'status' => $studentStatus,
                         'date_of_admission' => $parsedAdmissionDate,
                         'gender' => $gender ?: null,
@@ -471,7 +635,8 @@ class ReviewedWorkbookImportService
                 }
 
                 // 3g. Fee Plan Items: provision ONLY for active approved enrollments with fee > 0
-                if ($isApprovedCurrency && $enrollmentFeeMinor > 0) {
+                // For Tuition students, zero generic fee is valid and subject fees are generated on demand
+                if ($isApprovedCurrency && $enrollmentFeeMinor > 0 && !$isTuition) {
                     $qa->table('fee_plan_items')->updateOrInsert(
                         [
                             'enrollment_id' => $enrollmentId,
@@ -501,7 +666,7 @@ class ReviewedWorkbookImportService
                 }
             }
 
-            // 4. Reconcile 18 Absent Records (Preserve, Flag for Historical Review)
+            // 4. Reconcile Absent Records (Preserve, Flag for Historical Review)
             $allCurrentQaStudents = $qa->table('students')->get();
             foreach ($allCurrentQaStudents as $stu) {
                 if (!isset($seenWorkbookGrs[$stu->gr_number])) {
@@ -534,51 +699,68 @@ class ReviewedWorkbookImportService
             $qa->table('qa_staged_exceptions')->where('batch_id', $batchId)->delete();
 
             // 6. Process Sheet 2: Collections
-            $reader->setLoadSheetsOnly([self::SHEET_COLLECTION]);
+            $reader->setLoadSheetsOnly([$collectionSheet]);
             $sp = $reader->load($filePath);
-            $sheetCol = $sp->getSheetByName(self::SHEET_COLLECTION);
+            $sheetCol = $sp->getSheetByName($collectionSheet);
             $colData = $sheetCol->toArray(null, false, false, false);
             $sp->disconnectWorksheets();
             unset($sp, $sheetCol);
             gc_collect_cycles();
 
-            array_shift($colData); // remove header
+            $colHeaders = array_shift($colData) ?: [];
+            $hdrCol = $this->buildHeaderMap($colHeaders);
+
+            $idxColSlip = $hdrCol['slip'] ?? ($hdrCol['slipnumber'] ?? 1);
+            $idxColGr = $hdrCol['grn'] ?? ($hdrCol['gr'] ?? 2);
+            $idxColStuName = $hdrCol['studentname'] ?? 3;
+            $idxColRegName = $hdrCol['registrationname'] ?? null;
+            $idxColFam = $hdrCol['familycode'] ?? null;
+            $idxColPart = $hdrCol['particular'] ?? 4;
+            $idxColDate = $hdrCol['date'] ?? 5;
+            $idxColCurr = $hdrCol['currency'] ?? 6;
+            $idxColAmt = $hdrCol['amount'] ?? 7;
+            $idxColRegCurr = $hdrCol['regcurr'] ?? ($hdrCol['registrationcurrency'] ?? null);
+            $idxColPdfPage = $hdrCol['pdfpage'] ?? null;
+            $idxColPdfY = $hdrCol['pdfy'] ?? null;
+            $idxColGrnOrig = $hdrCol['grnoriginal'] ?? null;
+            $idxColNameOrig = $hdrCol['nameoriginal'] ?? null;
+            $idxColFlags = $hdrCol['reviewflags'] ?? null;
 
             $colRowsToInsert = [];
             $exceptionsToInsert = [];
 
             foreach ($colData as $idx => $r) {
                 $sourceRow = $idx + 2;
-                $slip = trim((string) ($r[0] ?? ''));
-                $gr = trim((string) ($r[1] ?? ''));
-                $stuName = trim((string) ($r[2] ?? ''));
-                $regName = trim((string) ($r[3] ?? ''));
-                $famCode = trim((string) ($r[4] ?? ''));
-                $presentAt22 = trim((string) ($r[5] ?? ''));
-                $particular = trim((string) ($r[6] ?? ''));
-                $payDateRaw = $r[7] ?? null;
+                $slip = trim((string) ($r[$idxColSlip] ?? ''));
+                $gr = trim((string) ($r[$idxColGr] ?? ''));
+                $stuName = trim((string) ($r[$idxColStuName] ?? ''));
+                $regName = $idxColRegName !== null ? trim((string) ($r[$idxColRegName] ?? '')) : null;
+                $famCode = $idxColFam !== null ? trim((string) ($r[$idxColFam] ?? '')) : null;
+                $particular = trim((string) ($r[$idxColPart] ?? ''));
+                $payDateRaw = $r[$idxColDate] ?? null;
                 $payDateParsed = self::parseExcelDate($payDateRaw);
-                $payMethod = trim((string) ($r[9] ?? ''));
-                $curr = strtoupper(trim((string) ($r[10] ?? '')));
-                $currOriginal = trim((string) ($r[11] ?? ''));
+                $curr = strtoupper(trim((string) ($r[$idxColCurr] ?? '')));
                 $amtErr = null;
-                $amtDecimal = self::parseMoneyDecimal($r[12] ?? 0, $amtErr);
-                $amtMinor = self::parseMoneyMinor($r[12] ?? 0, $amtErr);
-                $regCurr = strtoupper(trim((string) ($r[13] ?? '')));
-                $currCompare = trim((string) ($r[14] ?? ''));
-                $pdfPage = trim((string) ($r[15] ?? ''));
-                $pdfY = trim((string) ($r[16] ?? ''));
-                $grnOriginal = trim((string) ($r[17] ?? ''));
-                $nameOriginal = trim((string) ($r[18] ?? ''));
-                $reviewFlags = trim((string) ($r[19] ?? ''));
+                $amtDecimal = self::parseMoneyDecimal($r[$idxColAmt] ?? 0, $amtErr);
+                $amtMinor = self::parseMoneyMinor($r[$idxColAmt] ?? 0, $amtErr);
+                $regCurr = $idxColRegCurr !== null ? strtoupper(trim((string) ($r[$idxColRegCurr] ?? ''))) : null;
+                $pdfPage = $idxColPdfPage !== null ? trim((string) ($r[$idxColPdfPage] ?? '')) : null;
+                $pdfY = $idxColPdfY !== null ? trim((string) ($r[$idxColPdfY] ?? '')) : null;
+                $grnOriginal = $idxColGrnOrig !== null ? trim((string) ($r[$idxColGrnOrig] ?? '')) : null;
+                $nameOriginal = $idxColNameOrig !== null ? trim((string) ($r[$idxColNameOrig] ?? '')) : null;
+                $reviewFlags = $idxColFlags !== null ? trim((string) ($r[$idxColFlags] ?? '')) : null;
 
-                $isUnresolved = ($curr === '' || $curr === 'UNRESOLVED' || str_contains($reviewFlags, 'UNRESOLVED'));
-                $hasConflict = ($curr !== '' && $regCurr !== '' && $curr !== $regCurr);
+                if ($slip === '' && $gr === '' && $amtDecimal == 0) {
+                    continue;
+                }
+
+                $isUnresolved = ($curr === '' || $curr === 'UNRESOLVED' || ($reviewFlags && str_contains($reviewFlags, 'UNRESOLVED')));
+                $hasConflict = ($curr !== '' && $regCurr !== null && $regCurr !== '' && $curr !== $regCurr);
 
                 if ($amtErr !== null) {
                     $exceptionsToInsert[] = [
                         'batch_id' => $batchId,
-                        'sheet_name' => self::SHEET_COLLECTION,
+                        'sheet_name' => $collectionSheet,
                         'source_row' => $sourceRow,
                         'gr_number' => $gr,
                         'issue_code' => 'INVALID_MONETARY_AMOUNT',
@@ -593,7 +775,7 @@ class ReviewedWorkbookImportService
                     $stats['unresolved_collections']++;
                     $exceptionsToInsert[] = [
                         'batch_id' => $batchId,
-                        'sheet_name' => self::SHEET_COLLECTION,
+                        'sheet_name' => $collectionSheet,
                         'source_row' => $sourceRow,
                         'gr_number' => $gr,
                         'issue_code' => 'UNRESOLVED_COLLECTION_CURRENCY',
@@ -607,7 +789,7 @@ class ReviewedWorkbookImportService
                 if ($hasConflict) {
                     $exceptionsToInsert[] = [
                         'batch_id' => $batchId,
-                        'sheet_name' => self::SHEET_COLLECTION,
+                        'sheet_name' => $collectionSheet,
                         'source_row' => $sourceRow,
                         'gr_number' => $gr,
                         'issue_code' => 'COLLECTION_CURRENCY_CONFLICT',
@@ -626,17 +808,17 @@ class ReviewedWorkbookImportService
                     'student_name' => $stuName ?: null,
                     'registration_name' => $regName ?: null,
                     'family_code' => $famCode ?: null,
-                    'present_at_22oct' => $presentAt22 ?: null,
+                    'present_at_22oct' => null,
                     'fee_particular' => $particular ?: null,
                     'payment_date_raw' => (string) $payDateRaw,
                     'payment_date_parsed' => $payDateParsed,
-                    'payment_method' => $payMethod ?: null,
+                    'payment_method' => null,
                     'currency' => $curr ?: null,
-                    'currency_original' => $currOriginal ?: null,
+                    'currency_original' => $curr ?: null,
                     'amount' => $amtDecimal,
                     'amount_minor' => $amtMinor,
                     'registration_currency' => $regCurr ?: null,
-                    'currency_compare' => $currCompare ?: null,
+                    'currency_compare' => null,
                     'source_pdf_page' => $pdfPage ?: null,
                     'source_pdf_y' => $pdfY ?: null,
                     'source_grn_original' => $grnOriginal ?: null,
@@ -660,47 +842,67 @@ class ReviewedWorkbookImportService
             }
 
             // 7. Process Sheet 3: Outstanding
-            $reader->setLoadSheetsOnly([self::SHEET_OUTSTANDING]);
+            $reader->setLoadSheetsOnly([$outstandingSheet]);
             $sp = $reader->load($filePath);
-            $sheetDue = $sp->getSheetByName(self::SHEET_OUTSTANDING);
+            $sheetDue = $sp->getSheetByName($outstandingSheet);
             $dueData = $sheetDue->toArray(null, false, false, false);
             $sp->disconnectWorksheets();
             unset($sp);
 
-            array_shift($dueData); // remove header
+            $dueHeaders = array_shift($dueData) ?: [];
+            $hdrDue = $this->buildHeaderMap($dueHeaders);
+
+            $idxDueGr = $hdrDue['grn'] ?? ($hdrDue['gr'] ?? 0);
+            $idxDueStuName = $hdrDue['studentname'] ?? 1;
+            $idxDueRegName = $hdrDue['registrationname'] ?? null;
+            $idxDueFamFinal = $hdrDue['familycodefinal'] ?? ($hdrDue['familycode'] ?? null);
+            $idxDueFamPdf = $hdrDue['familycodepdf'] ?? null;
+            $idxDueFamReg = $hdrDue['familycoderegistration'] ?? null;
+            $idxDueClass = $hdrDue['classinduesreport'] ?? null;
+            $idxDuePart = $hdrDue['particular'] ?? 3;
+            $idxDueCurr = $hdrDue['currency'] ?? 4;
+            $idxDueBal = $hdrDue['balance'] ?? ($hdrDue['outstandingamount'] ?? ($hdrDue['amount'] ?? 5));
+            $idxDueRegCurr = $hdrDue['regcurr'] ?? ($hdrDue['registrationcurrency'] ?? null);
+            $idxDuePdfPage = $hdrDue['pdfpage'] ?? null;
+            $idxDuePdfY = $hdrDue['pdfy'] ?? null;
+            $idxDueGrnOrig = $hdrDue['grnoriginal'] ?? null;
+            $idxDueNameOrig = $hdrDue['nameoriginal'] ?? null;
+            $idxDueFlags = $hdrDue['reviewflags'] ?? null;
 
             $dueRowsToInsert = [];
 
             foreach ($dueData as $idx => $r) {
                 $sourceRow = $idx + 2;
-                $gr = trim((string) ($r[0] ?? ''));
-                $stuName = trim((string) ($r[1] ?? ''));
-                $regName = trim((string) ($r[2] ?? ''));
-                $famFinal = trim((string) ($r[3] ?? ''));
-                $famPdf = trim((string) ($r[4] ?? ''));
-                $famReg = trim((string) ($r[5] ?? ''));
-                $presentAt22 = trim((string) ($r[6] ?? ''));
-                $classDues = trim((string) ($r[7] ?? ''));
-                $particular = trim((string) ($r[8] ?? ''));
-                $curr = strtoupper(trim((string) ($r[9] ?? '')));
-                $currOriginal = trim((string) ($r[10] ?? ''));
+                $gr = trim((string) ($r[$idxDueGr] ?? ''));
+                $stuName = trim((string) ($r[$idxDueStuName] ?? ''));
+                $regName = $idxDueRegName !== null ? trim((string) ($r[$idxDueRegName] ?? '')) : null;
+                $famFinal = $idxDueFamFinal !== null ? trim((string) ($r[$idxDueFamFinal] ?? '')) : null;
+                $famPdf = $idxDueFamPdf !== null ? trim((string) ($r[$idxDueFamPdf] ?? '')) : null;
+                $famReg = $idxDueFamReg !== null ? trim((string) ($r[$idxDueFamReg] ?? '')) : null;
+                $classDues = $idxDueClass !== null ? trim((string) ($r[$idxDueClass] ?? '')) : null;
+                $particular = trim((string) ($r[$idxDuePart] ?? ''));
+                $curr = strtoupper(trim((string) ($r[$idxDueCurr] ?? '')));
                 $dueAmtErr = null;
-                $amtDecimal = self::parseMoneyDecimal($r[11] ?? 0, $dueAmtErr);
-                $amtMinor = self::parseMoneyMinor($r[11] ?? 0, $dueAmtErr);
-                $regCurr = strtoupper(trim((string) ($r[12] ?? '')));
-                $pdfPage = trim((string) ($r[13] ?? ''));
-                $pdfY = trim((string) ($r[14] ?? ''));
-                $grnOriginal = trim((string) ($r[15] ?? ''));
-                $nameOriginal = trim((string) ($r[16] ?? ''));
-                $reviewFlags = trim((string) ($r[17] ?? ''));
+                $amtDecimal = self::parseMoneyDecimal($r[$idxDueBal] ?? 0, $dueAmtErr);
+                $amtMinor = self::parseMoneyMinor($r[$idxDueBal] ?? 0, $dueAmtErr);
+                $regCurr = $idxDueRegCurr !== null ? strtoupper(trim((string) ($r[$idxDueRegCurr] ?? ''))) : null;
+                $pdfPage = $idxDuePdfPage !== null ? trim((string) ($r[$idxDuePdfPage] ?? '')) : null;
+                $pdfY = $idxDuePdfY !== null ? trim((string) ($r[$idxDuePdfY] ?? '')) : null;
+                $grnOriginal = $idxDueGrnOrig !== null ? trim((string) ($r[$idxDueGrnOrig] ?? '')) : null;
+                $nameOriginal = $idxDueNameOrig !== null ? trim((string) ($r[$idxDueNameOrig] ?? '')) : null;
+                $reviewFlags = $idxDueFlags !== null ? trim((string) ($r[$idxDueFlags] ?? '')) : null;
 
-                $isUnresolved = ($curr === '' || $curr === 'UNRESOLVED' || str_contains($reviewFlags, 'UNRESOLVED'));
-                $hasConflict = ($curr !== '' && $regCurr !== '' && $curr !== $regCurr);
+                if ($gr === '' && $particular === '' && $amtDecimal == 0) {
+                    continue;
+                }
+
+                $isUnresolved = ($curr === '' || $curr === 'UNRESOLVED' || ($reviewFlags && str_contains($reviewFlags, 'UNRESOLVED')));
+                $hasConflict = ($curr !== '' && $regCurr !== null && $regCurr !== '' && $curr !== $regCurr);
 
                 if ($dueAmtErr !== null) {
                     $exceptionsToInsert[] = [
                         'batch_id' => $batchId,
-                        'sheet_name' => self::SHEET_OUTSTANDING,
+                        'sheet_name' => $outstandingSheet,
                         'source_row' => $sourceRow,
                         'gr_number' => $gr,
                         'issue_code' => 'INVALID_MONETARY_AMOUNT',
@@ -715,7 +917,7 @@ class ReviewedWorkbookImportService
                     $stats['unresolved_dues']++;
                     $exceptionsToInsert[] = [
                         'batch_id' => $batchId,
-                        'sheet_name' => self::SHEET_OUTSTANDING,
+                        'sheet_name' => $outstandingSheet,
                         'source_row' => $sourceRow,
                         'gr_number' => $gr,
                         'issue_code' => 'UNRESOLVED_OUTSTANDING_CURRENCY',
@@ -729,7 +931,7 @@ class ReviewedWorkbookImportService
                 if ($hasConflict) {
                     $exceptionsToInsert[] = [
                         'batch_id' => $batchId,
-                        'sheet_name' => self::SHEET_OUTSTANDING,
+                        'sheet_name' => $outstandingSheet,
                         'source_row' => $sourceRow,
                         'gr_number' => $gr,
                         'issue_code' => 'OUTSTANDING_CURRENCY_CONFLICT',
@@ -749,11 +951,11 @@ class ReviewedWorkbookImportService
                     'family_code_final' => $famFinal ?: null,
                     'family_code_pdf' => $famPdf ?: null,
                     'family_code_registration' => $famReg ?: null,
-                    'present_at_22oct' => $presentAt22 ?: null,
+                    'present_at_22oct' => null,
                     'class_in_dues_report' => $classDues ?: null,
                     'fee_particular' => $particular ?: null,
                     'currency' => $curr ?: null,
-                    'currency_original' => $currOriginal ?: null,
+                    'currency_original' => $curr ?: null,
                     'outstanding_amount' => $amtDecimal,
                     'outstanding_amount_minor' => $amtMinor,
                     'registration_currency' => $regCurr ?: null,
@@ -804,7 +1006,7 @@ class ReviewedWorkbookImportService
             $qa->table('qa_import_versions')->updateOrInsert(
                 ['batch_id' => $batchId],
                 [
-                    'version_key' => config('imports.active_version', 'v2_reviewed_20261022'),
+                    'version_key' => config('imports.active_version', self::APPROVED_VERSION_KEY),
                     'source_file' => $filePath,
                     'sha256' => hash_file('sha256', $filePath),
                     'registration_rows' => $stats['registration_rows'],
@@ -851,14 +1053,14 @@ class ReviewedWorkbookImportService
         }
     }
 
-    private function validateFileAndHash(string $filePath, ?string $expectedSha256): void
+    public function validateFileAndHash(string $filePath, ?string $expectedSha256): void
     {
         $normalized = str_replace('\\', '/', $filePath);
         $disallowed = config('imports.disallowed_legacy_sources', []);
         foreach ($disallowed as $legacy) {
             if (str_ends_with($normalized, $legacy) || basename($filePath) === basename($legacy)) {
-                $activeKey = config('imports.active_version', 'v2_reviewed_20261022');
-                throw new RuntimeException("DISALLOWED SOURCE: Legacy CSV '{$filePath}' is blocked. The active import version is '{$activeKey}' (storage/app/imports/UPdated school record for portal.xlsx).");
+                $activeKey = config('imports.active_version', self::APPROVED_VERSION_KEY);
+                throw new RuntimeException("DISALLOWED SOURCE: Legacy CSV '{$filePath}' is blocked. The active import version is '{$activeKey}'.");
             }
         }
 
@@ -869,18 +1071,30 @@ class ReviewedWorkbookImportService
         if ($expectedSha256 !== null) {
             $actual = strtolower(hash_file('sha256', $filePath));
             $expected = strtolower($expectedSha256);
+            $approved = strtolower(self::APPROVED_WORKBOOK_SHA256);
             $revised = strtolower(self::REVISED_SHA256);
-            if ($actual !== $expected && $actual !== $revised) {
-                throw new RuntimeException("SHA-256 mismatch for '{$filePath}'. Expected {$expected} (or revised {$revised}), found {$actual}.");
+            $legacy = strtolower(self::LEGACY_OCT22_SHA256);
+            if ($actual !== $expected && $actual !== $approved && $actual !== $revised && $actual !== $legacy) {
+                throw new RuntimeException("SHA-256 mismatch for '{$filePath}'. Expected approved hash {$approved}, found {$actual}.");
             }
         }
     }
 
+    public function validateConnection(string $conn): void
+    {
+        DatabaseSafetyGuard::assertNotQuarantineDatabase($conn);
+        DatabaseSafetyGuard::assertNotStagingDatabase($conn);
+
+        if (config("database.connections.{$conn}.driver") === 'sqlite') {
+            return;
+        }
+
+        DatabaseSafetyGuard::assertTargetDatabase($conn);
+    }
+
     private function validateQaConnection(string $qaConn): void
     {
-        DatabaseSafetyGuard::assertQaDatabase($qaConn);
-        DatabaseSafetyGuard::assertNotQuarantineDatabase($qaConn);
-        DatabaseSafetyGuard::assertNotStagingDatabase($qaConn);
+        $this->validateConnection($qaConn);
     }
 
     public static function parseExcelDate(mixed $val): ?string

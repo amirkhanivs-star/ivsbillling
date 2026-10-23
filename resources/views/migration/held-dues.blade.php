@@ -4,7 +4,7 @@
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
     <div>
         <h2 style="font-size:22px;font-weight:700;color:#2c2c2c;margin:0;">Financial Exceptions — Held Dues Lines</h2>
-        <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Staff-review screen identifying all 790 held dues lines by source row, reason, and required correction.</p>
+        <p style="color:#6e6b7b;font-size:13px;margin:4px 0 0;">Staff-review screen identifying held dues lines by source row, reason, and required correction.</p>
     </div>
     <div style="display:flex;gap:10px;">
         <a href="{{ route('migration.held_dues.export', ['category' => request('category'), 'q' => request('q')]) }}" class="btn" style="background:#28c76f;color:#fff;text-decoration:none;font-size:12px;padding:7px 16px;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:6px;">
@@ -20,7 +20,7 @@
 <div style="background:#fff4e5;border-left:4px solid #ea5455;padding:14px 18px;border-radius:4px;margin-bottom:20px;">
     <strong style="color:#b91c1c;font-size:14px;">🔒 STRICT AUDIT POLICY: REVIEW-ONLY EXCEPTION SCREEN</strong>
     <p style="margin:4px 0 0;font-size:13px;color:#5e5873;">
-        These 790 dues lines were <strong>held from opening-balance invoice posting</strong> to protect ledger integrity. They cannot be automatically approved or silently billed. Staff must audit physical vouchers and resolve student/currency records before any held item can be converted into a valid invoice.
+        These dues lines were <strong>held from opening-balance invoice posting</strong> to protect ledger integrity. They cannot be automatically approved or silently billed. Staff must audit physical vouchers and resolve student/currency records before any held item can be converted into a valid invoice.
     </p>
 </div>
 
@@ -35,7 +35,7 @@
     <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
         <small style="color:#b9b9c3;text-transform:uppercase;font-size:11px;font-weight:600;">Student Review Hold</small>
         <h3 style="font-size:24px;margin:6px 0 0;color:#d9480f;">{{ number_format($counts['review_hold_student']) }}</h3>
-        <small style="color:#d9480f;">72 students pending currency audit</small>
+        <small style="color:#d9480f;">Students pending currency audit</small>
     </div>
 
     <div style="background:#fff;border:1px solid #ebe9f1;border-radius:6px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
@@ -93,7 +93,7 @@
             Held Dues Detail (Showing {{ $records->firstItem() ?? 0 }} to {{ $records->lastItem() ?? 0 }} of {{ $records->total() }})
         </h3>
         <span style="font-size:11px;background:#fef2f2;color:#991b1b;padding:3px 10px;border-radius:12px;font-weight:700;border:1px solid #fecaca;">
-            Batch: BATCH-20261022-PORTAL-V2-REVISED
+            Batch: {{ config('imports.active_batch_id', 'BATCH-20261023-FINAL-MYSKOOL') }}
         </span>
     </div>
 
