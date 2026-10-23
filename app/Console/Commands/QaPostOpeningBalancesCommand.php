@@ -21,7 +21,7 @@ class QaPostOpeningBalancesCommand extends Command
     public function handle(HistoricalOpeningBalanceService $service): int
     {
         $conn = (string) ($this->option('conn') ?: config('database.default'));
-        $activeBatchId = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        $activeBatchId = (string) config('imports.active_batch_id', 'BATCH-20261023-FINAL-MYSKOOL');
         $batchOption = $this->option('batch-id');
 
         // Guard against ambiguous or unapproved batch specifications
@@ -37,7 +37,7 @@ class QaPostOpeningBalancesCommand extends Command
         }
 
         if ($batchOption === 'BATCH-20261022-PORTAL-V2' && $activeBatchId !== 'BATCH-20261022-PORTAL-V2') {
-            $this->error("CRITICAL SAFETY STOP: Batch '{$batchOption}' is an unapproved historical workbook version. Only the approved revised batch '{$activeBatchId}' may be posted.");
+            $this->error("CRITICAL SAFETY STOP: Batch '{$batchOption}' is an unapproved historical workbook version. Only the approved active batch '{$activeBatchId}' may be posted.");
             return self::FAILURE;
         }
 
@@ -151,7 +151,26 @@ class QaPostOpeningBalancesCommand extends Command
             return self::SUCCESS;
         }
 
-        // 9. Interactive Confirmation if interactive shell and not --yes
+        // 9. Strict Financial-Posting Authorization Lock Check
+        // The --force command CANNOT bypass the administrative authorization lock without explicit administrative approval
+        $isAuthorized = (bool) config('imports.allow_opening_balance_posting', false);
+        $isTestExecution = app()->environment('testing') || $isSqlite;
+        if (!$isAuthorized && !$isTestExecution) {
+            $this->line('');
+            $this->error('========================================================================');
+            $this->error('  CRITICAL SAFETY STOP: FINANCIAL POSTING AUTHORIZATION LOCK IS ACTIVE! ');
+            $this->error('========================================================================');
+            $this->error('  The `--force` command cannot bypass the financial-posting authorization');
+            $this->error('  lock without explicit administrative approval.');
+            $this->error('  Posting to the financial ledger requires:');
+            $this->error('    1. Administrative approval of the preview totals and exclusions.');
+            $this->error('    2. Explicit configuration: ALLOW_OPENING_BALANCE_POSTING=true.');
+            $this->error('========================================================================');
+            $this->line('');
+            return self::FAILURE;
+        }
+
+        // 10. Interactive Confirmation if interactive shell and not --yes
         if ($this->input->isInteractive() && !$this->option('yes')) {
             $confirmed = $this->confirm(
                 "Are you sure you want to post {$s['invoices_to_create']} opening-balance invoices ({$s['eligible_rows']} lines) to '{$conn}'?",
@@ -164,9 +183,9 @@ class QaPostOpeningBalancesCommand extends Command
             }
         }
 
-        // 10. Execution
+        // 11. Execution
         $this->info('Executing opening-balance posting in atomic transaction...');
-        $result = $service->postOpeningBalances($conn, $batchId, true);
+        $result = $service->postOpeningBalances($conn, $batchId, $isTestExecution);
 
         $this->line('');
         $this->info('========================================================================');

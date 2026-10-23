@@ -428,11 +428,15 @@ class HistoricalOpeningBalanceService
         $conn = $conn ?: config('database.default', 'mysql');
         $this->validateQaConnection($conn);
 
-        // Security Lock: Only allowed if config authorizes it or explicit test flag is active
-        if (!$allowTestExecution && !config('imports.allow_opening_balance_posting', false)) {
+        // Security Lock: Opening balance posting requires explicit administrative authorization
+        // An automated test flag is only respected in sqlite / testing environments
+        $isTestEnv = app()->environment('testing') || (config("database.connections.{$conn}.driver") === 'sqlite');
+        $isAuthorized = (bool) config('imports.allow_opening_balance_posting', false);
+
+        if (!$isAuthorized && !($allowTestExecution && $isTestEnv)) {
             throw new RuntimeException(
                 'CRITICAL SAFETY STOP: Opening balance ledger posting is STRICTLY BLOCKED. ' .
-                'The test-ledger reset decision and preview must be approved by the administrator before ledger mutation is authorized.'
+                'Financial-posting authorization lock is active. Explicit administrative approval (ALLOW_OPENING_BALANCE_POSTING=true) is required.'
             );
         }
 
@@ -441,7 +445,7 @@ class HistoricalOpeningBalanceService
             throw new RuntimeException('CRITICAL SAFETY STOP: Source batch ID cannot be empty. Ambiguous source identity is strictly rejected.');
         }
 
-        $activeBatchId = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+        $activeBatchId = (string) config('imports.active_batch_id', 'BATCH-20261023-FINAL-MYSKOOL');
         $batchId = $batchId ?: $activeBatchId;
 
         // Safeguard 2: Enforce posting ONLY the explicitly selected approved source batch
@@ -457,7 +461,7 @@ class HistoricalOpeningBalanceService
         if ($batchId === 'BATCH-20261022-PORTAL-V2' && $activeBatchId !== 'BATCH-20261022-PORTAL-V2') {
             throw new RuntimeException(
                 "CRITICAL SAFETY STOP: Batch '{$batchId}' is an unapproved historical workbook version. " .
-                "Only the approved revised batch '{$activeBatchId}' may be posted."
+                "Only the approved active batch '{$activeBatchId}' may be posted."
             );
         }
 
