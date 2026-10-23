@@ -20,6 +20,8 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/fee-creator',[B::class,'creator']);Route::post('/fee-creator',[B::class,'generate']);
  Route::get('/invoices',[B::class,'invoices']);Route::post('/invoices/send',[B::class,'approveSend']);
  Route::get('/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invoices.pdf');
+ Route::get('/students/{student}/challan/pdf',[B::class,'studentConsolidatedChallanPdf'])->name('students.challan.pdf');
+ Route::get('/families/{family}/challan/pdf',[B::class,'familyConsolidatedChallanPdf'])->name('families.challan.pdf');
  Route::get('/challan',[B::class,'collection'])->name('challan.index');
  Route::post('/challan/create-fee',[B::class,'createChallanFee'])->name('challan.create_fee');
  Route::post('/challan/receive',[B::class,'receive'])->name('challan.receive');

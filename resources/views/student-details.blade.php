@@ -31,7 +31,7 @@
    <nav class="iq-tabs" aria-label="Student profile sections"><span class="active">♧ &nbsp; Fee</span><span title="Future module">◉ &nbsp; Attendance</span><span title="Future module">ⓘ &nbsp; Complaints</span><span title="Future module">◇ &nbsp; Assessment</span><span title="Future module">✎ &nbsp; PTM</span><span title="Future module">♧ &nbsp; Siblings</span><span title="Future module">⇄ &nbsp; Transfer History</span></nav>
    <section class="iq-dues-card">
     <div class="iq-card-actions" style="justify-content:flex-end;">
-      <a href="{{ $feeItems->isNotEmpty() ? route('invoices.pdf', $feeItems->first()->invoice_id) : route('challan.index', ['search' => $student->gr_number]) }}" target="_blank" class="iq-print-challan-btn">Print Challan</a>
+      <a href="{{ route('students.challan.pdf', $student->id) }}" target="_blank" class="iq-print-challan-btn">Print Challan</a>
     </div>
     <div class="iq-scroll"><table class="iq-due-table"><thead><tr><th style="width:36px;"><input type="checkbox" checked disabled></th><th>FEE TYPE</th><th>DETAILS</th><th>BALANCE</th></tr></thead><tbody>
     @php $unpaidCount = 0; @endphp

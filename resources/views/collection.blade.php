@@ -599,7 +599,20 @@
                     {{ $firstStudent?->student_name ?? ($family?->guardian_name ?? 'Laiqa Nazim') }}
                 </div>
                 <div class="myskool-father-name">
-                    F/N: {{ $family?->guardian_name ?? 'Nazim Ch' }}
+                    @php
+                        $fatherDisplay = null;
+                        if (!empty($family?->id)) {
+                            $firstReg = DB::table('students as s')
+                                ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
+                                ->where('s.family_id', $family->id)
+                                ->whereNotNull('sd.father_name')
+                                ->first();
+                            $fatherDisplay = $firstReg?->father_name;
+                        }
+                        $isFormula = !empty($family?->guardian_name) && str_starts_with(trim($family->guardian_name), '=');
+                        $guardianDisplay = (!$isFormula && !empty($family?->guardian_name)) ? $family->guardian_name : null;
+                    @endphp
+                    F/N: {{ $fatherDisplay ?: ($guardianDisplay ?: 'Not provided') }}
                 </div>
                 <div class="myskool-class-name">
                     {{ $firstStudent?->class_name ?? '11th (FED) - A' }}
@@ -609,7 +622,7 @@
                     <span class="myskool-campus-badge">Main Campus</span>
                 </div>
                 <div class="myskool-profile-actions">
-                    <a href="/reports?family={{ urlencode($family?->family_code ?: (string)($family?->id ?? '')) }}" target="_blank" class="myskool-profile-btn" style="text-decoration: none;">
+                    <a href="{{ $family ? route('families.challan.pdf', $family->id) : '#' }}" target="_blank" class="myskool-profile-btn" style="text-decoration: none;" title="Print Family Consolidated Challan">
                         &#128438; Print
                     </a>
                     <button type="button" class="myskool-profile-btn" onclick="alertNotice('Message dialog opened for family')">&#9993;</button>

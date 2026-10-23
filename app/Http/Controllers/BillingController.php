@@ -895,9 +895,228 @@ class BillingController {
    ->stream('historical-slip-' . $receipt->slip_number . '.pdf');
  }
  public function invoicePdf(int $invoice,Request $r){$i=DB::table('invoices')->where('id',$invoice)->first();abort_unless($i,404);if(!$r->hasValidSignature()){$this->assertAccess($r,$i->department_id,$i->campus_id);}return $this->renderInvoice($i);}
- private function renderInvoice(object $i){$family=DB::table('families')->where('id',$i->family_id)->first();$items=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')->where('item.invoice_id',$i->id)->select('item.*','s.name','s.gr_number')->get();$dept=DB::table('departments')->where('id',$i->department_id)->first();$branding=DB::table('department_branding')->where('department_id',$i->department_id)->first();$currentPeriod=DB::table('billing_runs')->where('id',$i->billing_run_id)->value('period_start');$previous=(int)DB::table('invoices as older')->join('billing_runs as b','b.id','=','older.billing_run_id')->where('older.id','<>',$i->id)->where('older.family_id',$i->family_id)->where('older.department_id',$i->department_id)->where('older.campus_id',$i->campus_id)->where('older.currency',$i->currency)->where('b.period_start','<',$currentPeriod)->selectRaw('COALESCE(SUM(older.total_minor-older.paid_minor),0) as dues')->value('dues');$history=[];$month=\Carbon\Carbon::parse($currentPeriod)->startOfMonth();
-  for($back=6;$back>=1;$back--){$d=$month->copy()->subMonths($back);$stats=DB::table('invoice_items as x')->join('invoices as ix','ix.id','=','x.invoice_id')->where('ix.family_id',$i->family_id)->where('ix.department_id',$i->department_id)->where('ix.campus_id',$i->campus_id)->where('ix.currency',$i->currency)->where('x.period_start','>=',$d->toDateString())->where('x.period_start','<',$d->copy()->addMonth()->toDateString())->selectRaw('COALESCE(SUM(x.net_minor),0) AS billed,COALESCE(SUM(x.paid_minor),0) AS paid')->first();$status=!(int)$stats->billed?'Not billed':((int)$stats->paid>=(int)$stats->billed?'Paid':((int)$stats->paid>0?'Partial':'Unpaid'));$history[]=['month'=>$d->format('F'),'status'=>$status];}
-  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.invoice',['i'=>$i,'family'=>$family,'items'=>$items,'dept'=>$dept,'branding'=>$branding,'previous'=>max(0,$previous),'history'=>$history,'banner'=>$this->bannerDataUri($branding)])->setPaper('a4')->stream($i->invoice_number.'.pdf');}
+ private function renderInvoice(object $i){
+  $family=DB::table('families')->where('id',$i->family_id)->first();
+  $fatherName = DB::table('students as s')
+   ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
+   ->where('s.family_id', $i->family_id)
+   ->whereNotNull('sd.father_name')
+   ->value('sd.father_name');
+  $parentDisplay = $this->resolveParentDisplay($family?->guardian_name, $fatherName);
+  $items=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')->where('item.invoice_id',$i->id)->select('item.*','s.name','s.gr_number')->get();
+  $dept=DB::table('departments')->where('id',$i->department_id)->first();
+  $branding=DB::table('department_branding')->where('department_id',$i->department_id)->first();
+  $currentPeriod=DB::table('billing_runs')->where('id',$i->billing_run_id)->value('period_start');
+  $previous=(int)DB::table('invoices as older')->join('billing_runs as b','b.id','=','older.billing_run_id')->where('older.id','<>',$i->id)->where('older.family_id',$i->family_id)->where('older.department_id',$i->department_id)->where('older.campus_id',$i->campus_id)->where('older.currency',$i->currency)->where('b.period_start','<',$currentPeriod)->selectRaw('COALESCE(SUM(older.total_minor-older.paid_minor),0) as dues')->value('dues');
+  $history=[];
+  $month=\Carbon\Carbon::parse($currentPeriod)->startOfMonth();
+  for($back=6;$back>=1;$back--){
+   $d=$month->copy()->subMonths($back);
+   $stats=DB::table('invoice_items as x')->join('invoices as ix','ix.id','=','x.invoice_id')->where('ix.family_id',$i->family_id)->where('ix.department_id',$i->department_id)->where('ix.campus_id',$i->campus_id)->where('ix.currency',$i->currency)->where('x.period_start','>=',$d->toDateString())->where('x.period_start','<',$d->copy()->addMonth()->toDateString())->selectRaw('COALESCE(SUM(x.net_minor),0) AS billed,COALESCE(SUM(x.paid_minor),0) AS paid')->first();
+   $status=!(int)$stats->billed?'Not billed':((int)$stats->paid>=(int)$stats->billed?'Paid':((int)$stats->paid>0?'Partial':'Unpaid'));
+   $history[]=['month'=>$d->format('F'),'status'=>$status];
+  }
+  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.invoice',[
+   'i'=>$i,
+   'family'=>$family,
+   'parentDisplay'=>$parentDisplay,
+   'items'=>$items,
+   'dept'=>$dept,
+   'branding'=>$branding,
+   'previous'=>max(0,$previous),
+   'history'=>$history,
+   'banner'=>$this->bannerDataUri($branding)
+  ])->setPaper('a4')->stream($i->invoice_number.'.pdf');
+ }
+
+ public function studentConsolidatedChallanPdf(int $student, Request $r){
+  $s = DB::table('students as s')
+   ->join('families as f', 'f.id', '=', 's.family_id')
+   ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
+   ->where('s.id', $student)
+   ->select('s.*', 'f.id as family_id', 'f.family_code', 'f.guardian_name', 'f.whatsapp', 'sd.father_name', 'sd.section_current')
+   ->first();
+  abort_unless($s, 404);
+
+  if (!in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
+   $hasAccess = DB::table('enrollments')
+    ->where('student_id', $student)
+    ->where('campus_id', $r->user()->campus_id)
+    ->when($r->user()->department_id, fn($q) => $q->where('department_id', $r->user()->department_id))
+    ->exists();
+   abort_unless($hasAccess, 403);
+  }
+
+  $items = DB::table('invoice_items as ii')
+   ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+   ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+   ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
+   ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
+   ->where('ii.student_id', $student)
+   ->whereRaw('ii.net_minor > ii.paid_minor')
+   ->whereNotIn('ii.status', ['voided', 'exempted', 'paid'])
+   ->whereNotIn('i.status', ['void', 'voided', 'paid'])
+   ->when(!in_array($r->user()->role, ['super_admin', 'finance_admin'], true), function($q) use ($r) {
+    $q->where('i.campus_id', $r->user()->campus_id)
+      ->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id));
+   })
+   ->select(
+    'ii.*',
+    'i.invoice_number',
+    'i.issued_on',
+    'i.due_date',
+    'i.department_id',
+    'i.campus_id',
+    'd.name as department_name',
+    'e.grade_label',
+    'b.period_start as billing_period'
+   )
+   ->orderBy('ii.currency')
+   ->orderBy('ii.period_start')
+   ->orderBy('ii.id')
+   ->get();
+
+  $currencyGroups = $items->groupBy('currency')->map(function($cItems, $currency) {
+   return [
+    'currency' => $currency,
+    'items' => $cItems,
+    'total_net_minor' => $cItems->sum('net_minor'),
+    'total_paid_minor' => $cItems->sum('paid_minor'),
+    'total_balance_minor' => $cItems->sum(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor)),
+   ];
+  });
+
+  $enrollment = DB::table('enrollments')->where('student_id', $student)->orderByDesc('id')->first();
+  $primaryDeptId = $items->first()?->department_id ?? $enrollment?->department_id ?? 1;
+  $dept = DB::table('departments')->where('id', $primaryDeptId)->first();
+  $branding = DB::table('department_branding')->where('department_id', $primaryDeptId)->first();
+  $banner = $this->bannerDataUri($branding);
+  $parentDisplay = $this->resolveParentDisplay($s->guardian_name, $s->father_name);
+
+  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.consolidated-challan', [
+   'mode' => 'student',
+   'student' => $s,
+   'enrollment' => $enrollment,
+   'parentDisplay' => $parentDisplay,
+   'currencyGroups' => $currencyGroups,
+   'totalItemsCount' => $items->count(),
+   'dept' => $dept,
+   'branding' => $branding,
+   'banner' => $banner,
+   'statementNumber' => 'CHL-STU-' . $s->gr_number . '-' . now()->format('Ymd'),
+   'generatedAt' => now(),
+  ])->setPaper('a4')->stream('challan-student-' . $s->gr_number . '.pdf');
+ }
+
+ public function familyConsolidatedChallanPdf(int $family, Request $r){
+  $f = DB::table('families')->where('id', $family)->first();
+  abort_unless($f, 404);
+
+  if (!in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
+   $hasAccess = DB::table('enrollments as e')
+    ->join('students as s', 's.id', '=', 'e.student_id')
+    ->where('s.family_id', $family)
+    ->where('e.campus_id', $r->user()->campus_id)
+    ->when($r->user()->department_id, fn($q) => $q->where('e.department_id', $r->user()->department_id))
+    ->exists();
+   abort_unless($hasAccess, 403);
+  }
+
+  $items = DB::table('invoice_items as ii')
+   ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+   ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+   ->join('students as s', 's.id', '=', 'ii.student_id')
+   ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
+   ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
+   ->where('i.family_id', $family)
+   ->whereRaw('ii.net_minor > ii.paid_minor')
+   ->whereNotIn('ii.status', ['voided', 'exempted', 'paid'])
+   ->whereNotIn('i.status', ['void', 'voided', 'paid'])
+   ->when(!in_array($r->user()->role, ['super_admin', 'finance_admin'], true), function($q) use ($r) {
+    $q->where('i.campus_id', $r->user()->campus_id)
+      ->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id));
+   })
+   ->select(
+    'ii.*',
+    's.name as student_name',
+    's.gr_number',
+    'i.invoice_number',
+    'i.issued_on',
+    'i.due_date',
+    'i.department_id',
+    'i.campus_id',
+    'd.name as department_name',
+    'e.grade_label',
+    'b.period_start as billing_period'
+   )
+   ->orderBy('ii.currency')
+   ->orderBy('s.name')
+   ->orderBy('ii.period_start')
+   ->orderBy('ii.id')
+   ->get();
+
+  $currencyGroups = $items->groupBy('currency')->map(function($cItems, $currency) {
+   $studentsGroup = $cItems->groupBy('student_id')->map(function($sItems) {
+    $first = $sItems->first();
+    return [
+     'student_id' => $first->student_id,
+     'student_name' => $first->student_name,
+     'gr_number' => $first->gr_number,
+     'grade_label' => $first->grade_label,
+     'items' => $sItems,
+     'student_subtotal_balance_minor' => $sItems->sum(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor)),
+    ];
+   });
+   return [
+    'currency' => $currency,
+    'students' => $studentsGroup,
+    'total_net_minor' => $cItems->sum('net_minor'),
+    'total_paid_minor' => $cItems->sum('paid_minor'),
+    'total_balance_minor' => $cItems->sum(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor)),
+   ];
+  });
+
+  $familyStudents = DB::table('students as s')
+   ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
+   ->where('s.family_id', $family)
+   ->select('s.*', 'sd.father_name')
+   ->get();
+  $fatherName = $familyStudents->firstWhere('father_name', '!=', null)?->father_name;
+  $parentDisplay = $this->resolveParentDisplay($f->guardian_name, $fatherName);
+
+  $primaryDeptId = $items->first()?->department_id ?? 1;
+  $dept = DB::table('departments')->where('id', $primaryDeptId)->first();
+  $branding = DB::table('department_branding')->where('department_id', $primaryDeptId)->first();
+  $banner = $this->bannerDataUri($branding);
+
+  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.consolidated-challan', [
+   'mode' => 'family',
+   'family' => $f,
+   'familyStudents' => $familyStudents,
+   'parentDisplay' => $parentDisplay,
+   'currencyGroups' => $currencyGroups,
+   'totalItemsCount' => $items->count(),
+   'dept' => $dept,
+   'branding' => $branding,
+   'banner' => $banner,
+   'statementNumber' => 'CHL-FAM-' . ($f->family_code ?: $f->id) . '-' . now()->format('Ymd'),
+   'generatedAt' => now(),
+  ])->setPaper('a4')->stream('challan-family-' . ($f->family_code ?: $f->id) . '.pdf');
+ }
+
+ private function resolveParentDisplay(?string $guardianName, ?string $fatherName): array {
+  $isFormula = !empty($guardianName) && str_starts_with(trim($guardianName), '=');
+  $validGuardian = (!$isFormula && !empty(trim($guardianName ?? ''))) ? trim($guardianName) : null;
+  $validFather = (!empty(trim($fatherName ?? '')) && !str_starts_with(trim($fatherName), '=')) ? trim($fatherName) : null;
+
+  if ($validGuardian) {
+   return ['label' => "Guardian Name", 'name' => $validGuardian];
+  }
+  if ($validFather) {
+   return ['label' => "Father's Name", 'name' => $validFather];
+  }
+  return ['label' => "Father / Guardian Name", 'name' => 'Not provided'];
+ }
  public function callback(Request $r){$secret=config('services.n8n.callback_secret');$body=$r->getContent();$signature=$r->header('X-IQRA-Signature');abort_unless($secret&&$signature&&hash_equals(hash_hmac('sha256',$body,$secret),$signature),403);$d=$r->validate(['notification_id'=>'required|integer','status'=>'required|in:submitted,delivered,read,failed','provider_message_id'=>'nullable|string|max:255']);$current=DB::table('notifications')->where('id',$d['notification_id'])->value('status');if(!$current)return response()->json(['ok'=>false,'error'=>'Unknown notification'],404);
   if(($current==='read'&&$d['status']!=='read')||($current==='delivered'&&in_array($d['status'],['submitted','failed'],true)))return response()->json(['ok'=>true,'unchanged'=>true]);
   $update=['status'=>$d['status'],'updated_at'=>now()];if(!empty($d['provider_message_id']))$update['provider_message_id']=$d['provider_message_id'];if($d['status']==='delivered')$update['delivered_at']=now();DB::table('notifications')->where('id',$d['notification_id'])->update($update);return response()->json(['ok'=>true]);}
