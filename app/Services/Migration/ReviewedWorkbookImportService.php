@@ -878,10 +878,6 @@ class ReviewedWorkbookImportService
 
     private function validateQaConnection(string $qaConn): void
     {
-        if (config("database.connections.{$qaConn}.driver") === 'sqlite') {
-            return;
-        }
-
         DatabaseSafetyGuard::assertQaDatabase($qaConn);
         DatabaseSafetyGuard::assertNotQuarantineDatabase($qaConn);
         DatabaseSafetyGuard::assertNotStagingDatabase($qaConn);

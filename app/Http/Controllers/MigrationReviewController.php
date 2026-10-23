@@ -12,7 +12,7 @@ class MigrationReviewController
 {
     private function connection(): string
     {
-        return config('database.default') === 'sqlite' ? 'sqlite' : 'staging';
+        return config('database.default', 'mysql');
     }
 
     private function authorizeAdmin(Request $request): void
@@ -486,7 +486,7 @@ class MigrationReviewController
 
     private function qaConnection(): string
     {
-        return config('database.default') === 'sqlite' ? 'sqlite' : 'qa';
+        return config('database.default', 'mysql');
     }
 
     /**

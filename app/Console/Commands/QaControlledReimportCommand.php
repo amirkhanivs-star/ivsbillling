@@ -26,9 +26,7 @@ class QaControlledReimportCommand extends Command
         $this->info('========================================================================');
 
         if (config("database.connections.{$conn}.driver") !== 'sqlite') {
-            DatabaseSafetyGuard::assertQaDatabase($conn);
-            DatabaseSafetyGuard::assertNotQuarantineDatabase($conn);
-            DatabaseSafetyGuard::assertNotStagingDatabase($conn);
+            DatabaseSafetyGuard::assertTargetDatabase($conn);
         }
 
         $plan = $service->plan($conn, $batchId);

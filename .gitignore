@@ -49,6 +49,7 @@ PHASE_3B_3_1A_CURRENCY_RECONCILIATION_AUDIT.md
 PHASE_3C_0_QA_STUDENT_MIGRATION_REPORT.md
 PHASE_3C_1_UPDATED_WORKBOOK_QA_IMPORT_REPORT.md
 IQRA_22OCT_IMPLEMENTATION_PLAN.md
+Final database cleanup and single-database setup.md
 
 
 # Private Staging Exports, Scratch Scripts & Diagnostic Archives
@@ -65,6 +66,7 @@ IQRA_STAGING_ONLY*
 *.sql
 *.dump
 /backups/
+/storage/backups/
 *.sqlite
 *.sqlite3
 

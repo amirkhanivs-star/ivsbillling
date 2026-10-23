@@ -111,7 +111,9 @@ class Phase3cFinalPortalSecurityAndAcceptanceTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        // Insert duplicate row in older batch (audit) and row in revised batch (approved)
+        $activeBatch = config('imports.active_batch_id');
+
+        // Insert duplicate row in older batch (audit) and row in active batch (approved)
         DB::table('qa_staged_collections')->insert([
             [
                 'batch_id' => 'BATCH-20261022-PORTAL-V2',
@@ -129,7 +131,7 @@ class Phase3cFinalPortalSecurityAndAcceptanceTest extends TestCase
                 'updated_at' => now(),
             ],
             [
-                'batch_id' => 'BATCH-20261022-PORTAL-V2-REVISED',
+                'batch_id' => $activeBatch,
                 'source_row' => 102,
                 'gr_number' => 'GR-TEST-99',
                 'student_name' => 'Approved Staged Student',

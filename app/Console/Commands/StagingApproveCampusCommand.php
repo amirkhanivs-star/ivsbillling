@@ -45,7 +45,7 @@ class StagingApproveCampusCommand extends Command
         $this->info("===================================================================");
 
         try {
-            DatabaseSafetyGuard::assertStagingDatabase($connection);
+            DatabaseSafetyGuard::assertTargetDatabase($connection);
             $activeDb = DatabaseSafetyGuard::getActiveDatabaseName($connection);
             $this->info(" [SECURITY] Target database verified: {$activeDb} (Isolation confirmed)");
         } catch (DatabaseSafetyException $e) {

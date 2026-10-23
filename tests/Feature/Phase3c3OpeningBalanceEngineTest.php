@@ -66,14 +66,16 @@ class Phase3c3OpeningBalanceEngineTest extends TestCase
     public function test_active_batch_configuration_and_catalog(): void
     {
         $activeBatch = config('imports.active_batch_id');
-        $this->assertSame('BATCH-20261022-PORTAL-V2-REVISED', $activeBatch);
+        $this->assertSame('BATCH-20261023-FINAL-MYSKOOL', $activeBatch);
 
         $versions = config('imports.versions');
         $this->assertArrayHasKey('v2_reviewed_20261022', $versions);
         $this->assertArrayHasKey('v2_reviewed_20261022_revised', $versions);
+        $this->assertArrayHasKey('v3_final_myskool_20261023', $versions);
 
         $this->assertSame('d2276cf0c75a0c17b143d1815fda568c9b5cc7e0154f546b8075d1a98e225401', $versions['v2_reviewed_20261022']['expected_sha256']);
         $this->assertSame('f48f1ee57eb826776c2f1eb7cab0150640605d4b30f1c761044f7d0d12d0468e', $versions['v2_reviewed_20261022_revised']['expected_sha256']);
+        $this->assertSame('77d8e10f84726cc7b9708bfdb749948a7dbe717d60dab15b91361d5f2e4c4f4b', $versions['v3_final_myskool_20261023']['expected_sha256']);
     }
 
     /**

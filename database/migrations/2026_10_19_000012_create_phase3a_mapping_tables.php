@@ -12,11 +12,7 @@ return new class extends Migration
      */
     public function up(): void
     {
-        // Staging mapping tables belong strictly to iqra_billing_clean; skip on QA portal
-        if (DatabaseSafetyGuard::isQaDatabase($this->getConnection())) {
-            return;
-        }
-
+        // Enforce database identity guard (approved target iqra_billing or test sqlite)
         DatabaseSafetyGuard::assertAllowedMigration($this->getConnection());
 
         // 1. staging_student_identities

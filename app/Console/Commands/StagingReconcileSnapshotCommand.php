@@ -68,7 +68,7 @@ class StagingReconcileSnapshotCommand extends Command
 
         // 1. Database Safety Verification: Enforce clean staging database
         try {
-            DatabaseSafetyGuard::assertStagingDatabase($v1Conn);
+            DatabaseSafetyGuard::assertTargetDatabase($v1Conn);
             $activeDb = DatabaseSafetyGuard::getActiveDatabaseName($v1Conn);
             $this->info(" [SECURITY] V1 database connection verified: {$activeDb} (Clean database confirmed)");
         } catch (DatabaseSafetyException $e) {

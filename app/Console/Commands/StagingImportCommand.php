@@ -42,7 +42,7 @@ class StagingImportCommand extends Command
 
         // 1. Explicit database isolation check
         try {
-            DatabaseSafetyGuard::assertStagingDatabase($connection);
+            DatabaseSafetyGuard::assertTargetDatabase($connection);
             $activeDb = DatabaseSafetyGuard::getActiveDatabaseName($connection);
             $this->info(" [SECURITY] Target database verified: {$activeDb} (Isolation confirmed)");
         } catch (DatabaseSafetyException $e) {

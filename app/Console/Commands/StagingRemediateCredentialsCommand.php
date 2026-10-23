@@ -46,7 +46,7 @@ class StagingRemediateCredentialsCommand extends Command
 
         // 1. Safety Guard: Enforce clean staging database
         try {
-            DatabaseSafetyGuard::assertStagingDatabase($connection);
+            DatabaseSafetyGuard::assertTargetDatabase($connection);
             $activeDb = DatabaseSafetyGuard::getActiveDatabaseName($connection);
             $this->info(" [SECURITY] Target database verified: {$activeDb} (Clean database confirmed)");
         } catch (DatabaseSafetyException $e) {

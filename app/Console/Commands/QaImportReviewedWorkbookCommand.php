@@ -12,8 +12,8 @@ class QaImportReviewedWorkbookCommand extends Command
     protected $signature = 'qa:import-reviewed-workbook
                             {path? : Absolute or relative path to the reviewed workbook XLSX}
                             {--preview : Preview workbook metrics and reconciliation without writing to database}
-                            {--commit : Execute the import against iqra_billing_qa}
-                            {--qa-conn=qa : QA connection name}
+                            {--commit : Execute the import against iqra_billing}
+                            {--qa-conn=mysql : Database connection name}
                             {--skip-hash : Skip SHA-256 verification (strictly for testing fictional fixtures)}';
 
     protected $description = 'Ingest the reviewed October 22 workbook (registration, collections, and dues) into the QA portal';
@@ -80,11 +80,11 @@ class QaImportReviewedWorkbookCommand extends Command
         // 2. Verify Database Connection
         try {
             if (config("database.connections.{$qaConn}.driver") === 'mysql') {
-                DatabaseSafetyGuard::assertQaDatabase($qaConn);
+                DatabaseSafetyGuard::assertTargetDatabase($qaConn);
                 $qaDb = DatabaseSafetyGuard::getActiveDatabaseName($qaConn);
-                $this->info(" [OK] Target QA database verified: {$qaDb}");
+                $this->info(" [OK] Target database verified: {$qaDb}");
             } else {
-                $this->info(" [OK] Target QA database using SQLite test environment.");
+                $this->info(" [OK] Target database using SQLite test environment.");
             }
         } catch (Throwable $e) {
             $this->error("DATABASE SAFETY BREACH: " . $e->getMessage());

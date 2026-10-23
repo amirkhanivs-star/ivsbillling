@@ -536,7 +536,7 @@ class StagingToPortalMigrationService
             return;
         }
 
-        DatabaseSafetyGuard::assertStagingDatabase($conn);
+        DatabaseSafetyGuard::assertTargetDatabase($conn);
     }
 
     /**
@@ -548,13 +548,8 @@ class StagingToPortalMigrationService
             return;
         }
 
-        // Staging connection MUST be iqra_billing_clean
-        DatabaseSafetyGuard::assertStagingDatabase($stagingConn);
-
-        // Target connection MUST be iqra_billing_qa
-        DatabaseSafetyGuard::assertQaDatabase($qaConn);
-        DatabaseSafetyGuard::assertNotQuarantineDatabase($qaConn);
-        DatabaseSafetyGuard::assertNotStagingDatabase($qaConn);
+        DatabaseSafetyGuard::assertTargetDatabase($stagingConn);
+        DatabaseSafetyGuard::assertTargetDatabase($qaConn);
     }
 
     /**

@@ -48,7 +48,7 @@ class StagingApproveDepartmentCommand extends Command
 
         // 1. Pre-Approval Verification: Database Isolation Guard
         try {
-            DatabaseSafetyGuard::assertStagingDatabase($connection);
+            DatabaseSafetyGuard::assertTargetDatabase($connection);
             $activeDb = DatabaseSafetyGuard::getActiveDatabaseName($connection);
             $this->info(" [SECURITY] Target database verified: {$activeDb} (Clean database confirmed)");
         } catch (DatabaseSafetyException $e) {

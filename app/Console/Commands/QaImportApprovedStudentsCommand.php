@@ -12,11 +12,11 @@ class QaImportApprovedStudentsCommand extends Command
 {
     protected $signature = 'qa:import-approved-students
                             {--preview : Preview staging data and held student breakdowns without writing to database}
-                            {--commit : Commit approved students and enrollments into iqra_billing_qa}
-                            {--staging-conn=staging : Staging connection name (defaults to staging)}
-                            {--qa-conn=qa : QA connection name (defaults to qa)}';
+                            {--commit : Commit approved students and enrollments into iqra_billing}
+                            {--staging-conn=mysql : Staging connection name (defaults to mysql)}
+                            {--qa-conn=mysql : Target connection name (defaults to mysql)}';
 
-    protected $description = 'Migrate approved students and enrollments from staging (iqra_billing_clean) into the isolated QA portal (iqra_billing_qa)';
+    protected $description = 'Migrate approved students and enrollments into the canonical billing portal (iqra_billing)';
 
     public function handle(StagingToPortalMigrationService $service): int
     {
@@ -34,7 +34,7 @@ class QaImportApprovedStudentsCommand extends Command
         $this->line('Verifying database connections and isolation guards...');
         try {
             if (config("database.connections.{$stagingConn}.driver") === 'mysql') {
-                DatabaseSafetyGuard::assertStagingDatabase($stagingConn);
+                DatabaseSafetyGuard::assertTargetDatabase($stagingConn);
                 $stagingDb = DatabaseSafetyGuard::getActiveDatabaseName($stagingConn);
                 $this->info(" [OK] Staging connection '{$stagingConn}' verified: {$stagingDb}");
             } else {
@@ -42,11 +42,11 @@ class QaImportApprovedStudentsCommand extends Command
             }
 
             if (config("database.connections.{$qaConn}.driver") === 'mysql') {
-                DatabaseSafetyGuard::assertQaDatabase($qaConn);
+                DatabaseSafetyGuard::assertTargetDatabase($qaConn);
                 $qaDb = DatabaseSafetyGuard::getActiveDatabaseName($qaConn);
-                $this->info(" [OK] Target QA connection '{$qaConn}' verified: {$qaDb}");
+                $this->info(" [OK] Target connection '{$qaConn}' verified: {$qaDb}");
             } else {
-                $this->info(" [OK] Target QA connection '{$qaConn}' using SQLite test environment.");
+                $this->info(" [OK] Target connection '{$qaConn}' using SQLite test environment.");
             }
         } catch (Throwable $e) {
             $this->error('DATABASE SAFETY BREACH: ' . $e->getMessage());

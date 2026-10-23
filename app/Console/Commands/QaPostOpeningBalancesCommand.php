@@ -48,11 +48,9 @@ class QaPostOpeningBalancesCommand extends Command
         $this->info('  IQRA Virtual School — QA Controlled Opening Balance Posting Engine    ');
         $this->info('========================================================================');
 
-        // 1. Strict Physical QA Database Guard
+        // 1. Strict Physical Target Database Guard
         if (config("database.connections.{$conn}.driver") !== 'sqlite') {
-            DatabaseSafetyGuard::assertQaDatabase($conn);
-            DatabaseSafetyGuard::assertNotQuarantineDatabase($conn);
-            DatabaseSafetyGuard::assertNotStagingDatabase($conn);
+            DatabaseSafetyGuard::assertTargetDatabase($conn);
         }
 
         $db = DB::connection($conn);
