@@ -726,4 +726,214 @@ class Phase3c3OpeningBalanceEngineTest extends TestCase
         $this->assertSame('matched', $resolvedSchool['status']);
         $this->assertSame($deptSchool, (int) $resolvedSchool['enrollment']->department_id);
     }
+
+    /**
+     * Phase 7.2: Regression test for a student who previously paid in PKR but currently pays in SAR (GR 3230 scenario).
+     * Preserves historical PKR dues, preserves later SAR dues, keeps student enrollment currency as SAR,
+     * and strictly isolates currencies against cross-currency settlement.
+     */
+    public function test_historical_currency_change_student_preserves_pkr_dues_with_sar_enrollment(): void
+    {
+        $this->seed();
+        $campus = DB::table('campuses')->value('id');
+        $deptSchool = DB::table('departments')->where('code', 'school')->value('id');
+        $testBatchId = 'BATCH-TEST-HIST-CURR';
+
+        $family = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-HIST-3230',
+            'guardian_name' => 'Guardian Khan',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Student Amna Khan (currently enrolled in SAR with monthly fee SAR 350)
+        $student = DB::table('students')->insertGetId([
+            'gr_number' => '3230',
+            'family_id' => $family,
+            'name' => 'Amna Khan',
+            'status' => 'present',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $enrollment = DB::table('enrollments')->insertGetId([
+            'student_id' => $student,
+            'campus_id' => $campus,
+            'department_id' => $deptSchool,
+            'currency' => 'SAR',
+            'grade_label' => 'Grade 9 IGCSE - A',
+            'monthly_fee_minor' => 35000,
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Verified historical collection payments in PKR
+        DB::table('qa_staged_collections')->insert([
+            'batch_id' => $testBatchId,
+            'source_row' => 10,
+            'slip_number' => 'SLIP-001',
+            'gr_number' => '3230',
+            'student_name' => 'Amna Khan',
+            'fee_particular' => 'Monthly Fee - May-2025',
+            'currency' => 'PKR',
+            'currency_original' => 'PKR',
+            'amount' => 5000.00,
+            'amount_minor' => 500000,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // 3 historical PKR dues lines (Jun, Jul, Aug 2025 @ PKR 5,000 = PKR 15,000 total)
+        DB::table('qa_staged_dues')->insert([
+            [
+                'batch_id' => $testBatchId,
+                'source_row' => 584,
+                'gr_number' => '3230',
+                'student_name' => 'Amna Khan',
+                'class_in_dues_report' => '',
+                'fee_particular' => 'Monthly Fee - Jun-2025',
+                'currency' => 'PKR',
+                'currency_original' => 'PKR',
+                'outstanding_amount' => 5000.00,
+                'outstanding_amount_minor' => 500000,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'batch_id' => $testBatchId,
+                'source_row' => 585,
+                'gr_number' => '3230',
+                'student_name' => 'Amna Khan',
+                'class_in_dues_report' => '',
+                'fee_particular' => 'Monthly Fee - Jul-2025',
+                'currency' => 'PKR',
+                'currency_original' => 'PKR',
+                'outstanding_amount' => 5000.00,
+                'outstanding_amount_minor' => 500000,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'batch_id' => $testBatchId,
+                'source_row' => 586,
+                'gr_number' => '3230',
+                'student_name' => 'Amna Khan',
+                'class_in_dues_report' => '',
+                'fee_particular' => 'Monthly Fee - Aug-2025',
+                'currency' => 'PKR',
+                'currency_original' => 'PKR',
+                'outstanding_amount' => 5000.00,
+                'outstanding_amount_minor' => 500000,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            // Current SAR dues line (Sep 2025 @ SAR 350)
+            [
+                'batch_id' => $testBatchId,
+                'source_row' => 587,
+                'gr_number' => '3230',
+                'student_name' => 'Amna Khan',
+                'class_in_dues_report' => '',
+                'fee_particular' => 'Monthly Fee - Sep-2025',
+                'currency' => 'SAR',
+                'currency_original' => 'SAR',
+                'outstanding_amount' => 350.00,
+                'outstanding_amount_minor' => 35000,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        // Control student: Currency mismatch with NO historical payments or family history in that currency
+        $controlStudent = DB::table('students')->insertGetId([
+            'gr_number' => 'GR-UNVERIFIED',
+            'family_id' => $family,
+            'name' => 'Unverified Student',
+            'status' => 'present',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('enrollments')->insert([
+            'student_id' => $controlStudent,
+            'campus_id' => $campus,
+            'department_id' => $deptSchool,
+            'currency' => 'SAR',
+            'grade_label' => 'Grade 1 - A',
+            'monthly_fee_minor' => 20000,
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('qa_staged_dues')->insert([
+            'batch_id' => $testBatchId,
+            'source_row' => 999,
+            'gr_number' => 'GR-UNVERIFIED',
+            'student_name' => 'Unverified Student',
+            'class_in_dues_report' => 'Grade 1 - A',
+            'fee_particular' => 'Monthly Fee - Oct-2026',
+            'currency' => 'EUR', // Unverified currency mismatch
+            'currency_original' => 'EUR',
+            'outstanding_amount' => 100.00,
+            'outstanding_amount_minor' => 10000,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $service = app(HistoricalOpeningBalanceService::class);
+        $preview = $service->preview('sqlite', $testBatchId);
+
+        // 1. Verify eligibility: 4 lines for Amna Khan are eligible (3 PKR + 1 SAR)
+        $this->assertSame(5, $preview['summary']['total_staged_dues']);
+        $this->assertSame(4, $preview['summary']['eligible_rows']);
+        $this->assertSame(1, $preview['summary']['excluded_rows_count']);
+        $this->assertSame(1, $preview['exclusions']['currency_mismatch_count']);
+        $this->assertSame('GR-UNVERIFIED', $preview['exclusions']['samples']['currency_mismatch'][0]['gr_number']);
+
+        // 2. Verify totals by currency without conversion
+        $this->assertArrayHasKey('PKR', $preview['totals_by_currency']);
+        $this->assertSame(3, $preview['totals_by_currency']['PKR']['lines']);
+        $this->assertSame('15000.00', $preview['totals_by_currency']['PKR']['total_decimal']);
+
+        $this->assertArrayHasKey('SAR', $preview['totals_by_currency']);
+        $this->assertSame(1, $preview['totals_by_currency']['SAR']['lines']);
+        $this->assertSame('350.00', $preview['totals_by_currency']['SAR']['total_decimal']);
+
+        // 3. Verify student enrollment currency remains untouched as SAR
+        $currentEnrollment = DB::table('enrollments')->where('id', $enrollment)->first();
+        $this->assertSame('SAR', $currentEnrollment->currency);
+        $this->assertSame(35000, (int) $currentEnrollment->monthly_fee_minor);
+
+        // 4. Verify postOpeningBalances creates separated PKR and SAR invoices
+        $postResult = $service->postOpeningBalances('sqlite', $testBatchId, true);
+        $this->assertSame('success', $postResult['status']);
+        $this->assertSame(4, $postResult['posted_items']);
+
+        $postedInvoices = DB::table('invoices')->where('family_id', $family)->get();
+        $this->assertCount(4, $postedInvoices); // 3 PKR months + 1 SAR month
+        $pkrInvoices = $postedInvoices->where('currency', 'PKR');
+        $sarInvoices = $postedInvoices->where('currency', 'SAR');
+        $this->assertCount(3, $pkrInvoices);
+        $this->assertCount(1, $sarInvoices);
+        $this->assertSame(1500000, (int) $pkrInvoices->sum('total_minor'));
+        $this->assertSame(35000, (int) $sarInvoices->sum('total_minor'));
+
+        // 5. Verify cross-currency payment protection: A SAR payment cannot allocate against a PKR invoice
+        $pkrItem = DB::table('invoice_items')->where('currency', 'PKR')->first();
+        $user = DB::table('users')->first();
+        $receiveService = app(ReceivePaymentService::class);
+
+        $this->expectException(\Illuminate\Validation\ValidationException::class);
+        $receiveService->receive([
+            'family_id' => $family,
+            'campus_id' => $campus,
+            'department_id' => $deptSchool,
+            'currency' => 'SAR',
+            'monthly_amount' => '50.00',
+            'receiving_amount' => '50.00',
+            'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
+            'selected_item_ids' => [$pkrItem->id], // Attempting cross-currency allocation
+        ], $user->id);
+    }
 }
+

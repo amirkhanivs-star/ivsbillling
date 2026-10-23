@@ -68,6 +68,7 @@ class HistoricalOpeningBalanceService
         // 2. Preload active QA students and enrollments
         $students = $db->table('students')->get()->keyBy('gr_number');
         $enrollments = $db->table('enrollments')->get()->groupBy('student_id');
+        [$studentCollectionCurrencies, $familyEnrollmentCurrencies] = self::preloadCurrencyVerificationMaps($db, $batchId, $students, $enrollments);
 
         $eligibleRows = [];
         $excludedRows = [
@@ -197,7 +198,7 @@ class HistoricalOpeningBalanceService
             $matchedEnrollment = $resolved['enrollment'];
 
             // Check 9: Currency Conflict between Enrollment and Dues
-            if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {
+            if (!self::isVerifiedCurrency($curr, $matchedEnrollment, $student, $studentEnrollments, $studentCollectionCurrencies, $familyEnrollmentCurrencies)) {
                 $excludedRows['currency_mismatch'][] = [
                     'source_row' => $due->source_row,
                     'gr_number' => $due->gr_number,
@@ -825,6 +826,7 @@ class HistoricalOpeningBalanceService
 
         $students = $db->table('students')->get()->keyBy('gr_number');
         $enrollments = $db->table('enrollments')->get()->groupBy('student_id');
+        [$studentCollectionCurrencies, $familyEnrollmentCurrencies] = self::preloadCurrencyVerificationMaps($db, $batchId, $students, $enrollments);
 
         $invoicesGrouped = [];
 
@@ -857,7 +859,7 @@ class HistoricalOpeningBalanceService
 
             $matchedEnrollment = $resolved['enrollment'];
 
-            if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {
+            if (!self::isVerifiedCurrency($curr, $matchedEnrollment, $student, $studentEnrollments, $studentCollectionCurrencies, $familyEnrollmentCurrencies)) {
                 continue;
             }
 
@@ -947,7 +949,8 @@ class HistoricalOpeningBalanceService
             ->get();
 
         $students = $db->table('students')->get()->keyBy('gr_number');
-        $enrollments = $db->table('enrollments')->where('status', 'active')->get()->groupBy('student_id');
+        $enrollments = $db->table('enrollments')->get()->groupBy('student_id');
+        [$studentCollectionCurrencies, $familyEnrollmentCurrencies] = self::preloadCurrencyVerificationMaps($db, $batchId, $students, $enrollments);
 
         $deptCodes = $db->table('departments')->pluck('id', 'code')->all();
         $schoolDeptId = (int) ($deptCodes['school'] ?? 1);
@@ -1063,7 +1066,7 @@ class HistoricalOpeningBalanceService
             $matchedEnrollment = $resolved['enrollment'];
 
             // 9. Currency Conflict
-            if ($matchedEnrollment->currency && $matchedEnrollment->currency !== $curr) {
+            if (!self::isVerifiedCurrency($curr, $matchedEnrollment, $student, $studentEnrollments, $studentCollectionCurrencies, $familyEnrollmentCurrencies)) {
                 $heldItem['category'] = 'currency_mismatch';
                 $heldItem['category_label'] = 'Currency Conflict';
                 $heldItem['reason'] = "Dues currency '{$curr}' conflicts with enrollment currency '{$matchedEnrollment->currency}'.";
@@ -1074,6 +1077,81 @@ class HistoricalOpeningBalanceService
         }
 
         return $heldRecords;
+    }
+
+    /**
+     * Preload currency maps for fast, zero-query currency verification across batch rows.
+     */
+    public static function preloadCurrencyVerificationMaps($db, ?string $batchId, $students, $enrollments): array
+    {
+        $studentCollectionCurrencies = [];
+        if ($db->getSchemaBuilder()->hasTable('qa_staged_collections')) {
+            $collQuery = $db->table('qa_staged_collections')
+                ->whereNotNull('currency')
+                ->where('currency', '!=', '');
+            if ($batchId !== null && trim($batchId) !== '') {
+                $collQuery->where('batch_id', $batchId);
+            }
+            $studentCollectionCurrencies = $collQuery->select('gr_number', 'currency')
+                ->distinct()
+                ->get()
+                ->groupBy('gr_number')
+                ->map(fn($rows) => $rows->pluck('currency')->map(fn($c) => strtoupper(trim((string)$c)))->all())
+                ->all();
+        }
+
+        $familyEnrollmentCurrencies = [];
+        foreach ($students as $st) {
+            $stEnrs = $enrollments->get($st->id, collect());
+            foreach ($stEnrs as $enr) {
+                if (!empty($enr->currency)) {
+                    $familyEnrollmentCurrencies[$st->family_id][] = strtoupper(trim((string)$enr->currency));
+                }
+            }
+        }
+
+        return [$studentCollectionCurrencies, $familyEnrollmentCurrencies];
+    }
+
+    /**
+     * Verify whether a dues currency is valid for a student:
+     * - Matches current enrollment currency directly
+     * - OR verified by historical collection payments in that currency
+     * - OR verified by student having another enrollment in that currency
+     * - OR verified by family having enrollment in that currency
+     */
+    public static function isVerifiedCurrency(
+        string $dueCurrency,
+        $matchedEnrollment,
+        $student,
+        $studentEnrollments,
+        array $studentCollectionCurrencies,
+        array $familyEnrollmentCurrencies
+    ): bool {
+        if (!$matchedEnrollment || empty($matchedEnrollment->currency)) {
+            return true;
+        }
+
+        if (strtoupper(trim((string) $matchedEnrollment->currency)) === $dueCurrency) {
+            return true;
+        }
+
+        // Verified if student has historical collection payments in this currency
+        if ($student && isset($studentCollectionCurrencies[$student->gr_number]) && in_array($dueCurrency, $studentCollectionCurrencies[$student->gr_number], true)) {
+            return true;
+        }
+
+        // Verified if student has another enrollment in this currency
+        if ($studentEnrollments && $studentEnrollments->contains(fn($e) => strtoupper(trim((string)$e->currency)) === $dueCurrency)) {
+            return true;
+        }
+
+        // Verified if student's family has enrollment in this currency
+        if ($student && isset($familyEnrollmentCurrencies[$student->family_id]) && in_array($dueCurrency, $familyEnrollmentCurrencies[$student->family_id], true)) {
+            return true;
+        }
+
+        return false;
     }
 
     private function validateQaConnection(string $conn): void
