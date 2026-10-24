@@ -365,6 +365,80 @@ class BillingController {
   return back()->with('notice',$res['message']);
  }
 
+ public function deliveryQueue(Request $r){
+  $filters=[
+   'search'=>$r->query('search'),
+   'batch_id'=>$r->query('batch_id'),
+   'period'=>$r->query('period'),
+   'department_id'=>$r->query('department_id'),
+   'campus_id'=>$r->query('campus_id'),
+   'grade'=>$r->query('grade'),
+   'currency'=>$r->query('currency'),
+   'submission_status'=>$r->query('submission_status','all'),
+   'delivery_status'=>$r->query('delivery_status','all'),
+   'is_superseded'=>$r->query('is_superseded','all'),
+   'sort_by'=>$r->query('sort_by','id'),
+   'sort_dir'=>$r->query('sort_dir','desc'),
+  ];
+  $perPage=(int)$r->query('per_page',25);
+  $queueService=app(\App\Services\InvoiceDeliveryQueueService::class);
+  $notifications=$queueService->getPaginatedQueue($filters,$r->user(),$perPage);
+  $stats=$queueService->getQueueStats($filters,$r->user());
+
+  $campuses=DB::table('campuses')->orderBy('name')->get();
+  $departments=$this->basics($r)['departments'];
+  $grades=DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
+  $currencies=DB::table('invoices')->distinct()->pluck('currency')->filter()->values();
+  $batches=DB::table('notification_batches')->orderByDesc('id')->limit(50)->get(['batch_id','billing_period','created_at','status','chunks_total','total_recipients']);
+
+  $selectedBatch=null;
+  if(!empty($filters['batch_id'])){
+   $batchInfo=$queueService->getBatchDetails($filters['batch_id'],$r->user());
+   $selectedBatch=$batchInfo ? $batchInfo['batch'] : null;
+  }
+
+  return view('invoices-queue',[
+   'notifications'=>$notifications,
+   'stats'=>$stats,
+   'filters'=>$filters,
+   'perPage'=>$perPage,
+   'campuses'=>$campuses,
+   'departments'=>$departments,
+   'grades'=>$grades,
+   'currencies'=>$currencies,
+   'batches'=>$batches,
+   'selectedBatch'=>$selectedBatch,
+  ]);
+ }
+
+ public function batchDetails(Request $r, string $batch){
+  $queueService=app(\App\Services\InvoiceDeliveryQueueService::class);
+  $batchInfo=$queueService->getBatchDetails($batch,$r->user());
+  abort_unless($batchInfo, 404);
+
+  $r->merge(['batch_id'=>$batch]);
+  return $this->deliveryQueue($r);
+ }
+
+ public function exportDeliveryQueue(Request $r){
+  abort_if($r->user()->role==='auditor',403);
+  $filters=[
+   'search'=>$r->query('search'),
+   'batch_id'=>$r->query('batch_id'),
+   'period'=>$r->query('period'),
+   'department_id'=>$r->query('department_id'),
+   'campus_id'=>$r->query('campus_id'),
+   'grade'=>$r->query('grade'),
+   'currency'=>$r->query('currency'),
+   'submission_status'=>$r->query('submission_status','all'),
+   'delivery_status'=>$r->query('delivery_status','all'),
+   'is_superseded'=>$r->query('is_superseded','all'),
+  ];
+  $queueService=app(\App\Services\InvoiceDeliveryQueueService::class);
+  return $queueService->streamCsvExport($filters,$r->user());
+ }
+
+
  public function approveSend(Request $r){
   abort_if($r->user()->role==='auditor',403);
   if($r->input('selection_mode')==='all_matching'){
@@ -635,7 +709,16 @@ class BillingController {
    'updated_at'=>now(),
   ]);
 
-  DispatchInvoiceToN8n::dispatch($notification->id)->onQueue('notifications');
+  if(!empty($notification->batch_id)){
+   DB::table('notification_batches')->where('batch_id',$notification->batch_id)->update([
+    'status'=>'queued',
+    'error'=>null,
+    'updated_at'=>now(),
+   ]);
+   \App\Jobs\DispatchBatchToN8n::dispatch($notification->batch_id)->onQueue('notifications');
+  } else {
+   DispatchInvoiceToN8n::dispatch($notification->id)->onQueue('notifications');
+  }
 
   return back()->with('notice',"Notification for invoice {$invoice->invoice_number} has been re-queued for delivery.");
  }

@@ -400,14 +400,19 @@
                     <h3 style="margin:0 0 6px 0; font-size:15px; color:#1e293b;">Approved Outbound Batch Delivery Campaigns</h3>
                     <p class="muted" style="margin:0; font-size:12px;">Audit history of single-batch n8n submissions. Each batch contains multiple recipient payloads sent under one campaign ID.</p>
                 </div>
-                @if(!empty($queuedJobCount))
-                    <form method="post" action="{{ route('invoices.notifications.process_queue') }}" style="margin:0;">
-                        @csrf
-                        <button class="btn small" type="submit" style="background:#e0f2fe; color:#0369a1; border:1px solid #7dd3fc; font-weight:700;">
-                            ⚡ Process Pending Queue ({{ $queuedJobCount }})
-                        </button>
-                    </form>
-                @endif
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <a href="{{ route('invoices.delivery_queue') }}" class="btn small" style="background:#7367f0; color:#fff; text-decoration:none; padding:6px 12px; border-radius:4px; font-weight:600; display:inline-flex; align-items:center; gap:4px;">
+                        📋 Full Delivery Queue →
+                    </a>
+                    @if(!empty($queuedJobCount))
+                        <form method="post" action="{{ route('invoices.notifications.process_queue') }}" style="margin:0;">
+                            @csrf
+                            <button class="btn small" type="submit" style="background:#e0f2fe; color:#0369a1; border:1px solid #7dd3fc; font-weight:700;">
+                                ⚡ Process Pending Queue ({{ $queuedJobCount }})
+                            </button>
+                        </form>
+                    @endif
+                </div>
             </div>
 
             <div class="table-wrap">
@@ -438,7 +443,11 @@
                             };
                         ?>
                         <tr>
-                            <td><strong><code>{{ $batch->batch_id }}</code></strong></td>
+                            <td>
+                                <a href="{{ route('invoices.batch_details', $batch->batch_id) }}" style="color:#7367f0; text-decoration:none; font-weight:700;" title="View all recipients in this batch">
+                                    <code>{{ $batch->batch_id }}</code>
+                                </a>
+                            </td>
                             <td>
                                 <span style="font-weight:600;">{{ ucfirst($batch->webhook_type) }} Batch</span>
                                 <div class="muted" style="font-size:10px;">{{ $batch->event_type }}</div>
@@ -467,17 +476,20 @@
                                     Pending worker dispatch
                                 @endif
                             </td>
-                            <td>
-                                @if($batch->status === 'failed')
-                                    <form method="post" action="{{ route('invoices.batches.retry_failed', $batch->batch_id) }}" style="margin:0;">
-                                        @csrf
-                                        <button class="btn small" type="submit" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:700;">
-                                            Retry Failed Only
-                                        </button>
-                                    </form>
-                                @else
-                                    <span class="muted">—</span>
-                                @endif
+                            <td style="white-space:nowrap;">
+                                <div style="display:flex; gap:6px; align-items:center;">
+                                    <a href="{{ route('invoices.batch_details', $batch->batch_id) }}" class="btn small" style="background:#f8fafc; color:#475569; border:1px solid #cbd5e1; font-weight:600; text-decoration:none; padding:4px 8px; border-radius:4px; font-size:11px;">
+                                        View Batch Details
+                                    </a>
+                                    @if($batch->status === 'failed')
+                                        <form method="post" action="{{ route('invoices.batches.retry_failed', $batch->batch_id) }}" style="margin:0;">
+                                            @csrf
+                                            <button class="btn small" type="submit" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:700; padding:4px 8px; border-radius:4px; font-size:11px;">
+                                                Retry Failed
+                                            </button>
+                                        </form>
+                                    @endif
+                                </div>
                             </td>
                         </tr>
                     @empty
@@ -527,7 +539,9 @@
                             <td><strong>{{ $n->invoice_number }}</strong></td>
                             <td>
                                 @if(!empty($n->batch_id))
-                                    <code>{{ $n->batch_id }}</code>
+                                    <a href="{{ route('invoices.batch_details', $n->batch_id) }}" style="color:#7367f0; text-decoration:none; font-weight:600;" title="View batch details">
+                                        <code>{{ $n->batch_id }}</code>
+                                    </a>
                                 @else
                                     <span class="muted">Single</span>
                                 @endif

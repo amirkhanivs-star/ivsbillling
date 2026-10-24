@@ -167,6 +167,7 @@ class DispatchBatchToN8n implements ShouldQueue
             // Update notifications in chunk with payload & attempt
             $notifIds = array_map(fn($n) => $n->id, $notifChunk);
             DB::table('notifications')->whereIn('id', $notifIds)->update([
+                'chunk_index' => $chunkIndex,
                 'attempts' => DB::raw('attempts + 1'),
                 'last_attempt_at' => now(),
                 'payload' => $body,

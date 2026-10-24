@@ -25,6 +25,9 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/manage-fee/catalog',[FC::class,'store']);Route::put('/manage-fee/catalog/{rate}',[FC::class,'update']);Route::delete('/manage-fee/catalog/{rate}',[FC::class,'destroy'])->name('fee.catalog.destroy');Route::delete('/manage-fee/types/{type}',[FC::class,'destroyType'])->name('fee.types.destroy');Route::post('/manage-fee/increment',[FC::class,'increment']);
  Route::get('/fee-creator',[B::class,'creator']);Route::post('/fee-creator',[B::class,'generate']);
  Route::get('/invoices',[B::class,'invoices']);Route::post('/invoices/send',[B::class,'approveSend']);
+ Route::get('/invoices/queue',[B::class,'deliveryQueue'])->name('invoices.delivery_queue');
+ Route::get('/invoices/queue/export',[B::class,'exportDeliveryQueue'])->name('invoices.delivery_queue.export');
+ Route::get('/invoices/batches/{batch}',[B::class,'batchDetails'])->name('invoices.batch_details');
  Route::get('/invoices/selection-snapshot',[B::class,'selectionSnapshot'])->name('invoices.selection_snapshot');
  Route::post('/invoices/send-batch',[B::class,'approveSendBatch'])->name('invoices.send_batch');
  Route::post('/invoices/batches/{batch}/retry-failed',[B::class,'retryBatchFailed'])->name('invoices.batches.retry_failed');

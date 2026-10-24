@@ -429,7 +429,7 @@ class BatchDeliveryService
 
         // Generate unique batch ID
         $batchId = 'BATCH-' . now()->format('Ymd') . '-' . strtoupper(Str::random(6));
-        $chunkSize = config('services.n8n.batch_chunk_size', 50);
+        $chunkSize = max(1, (int)config('services.n8n.batch_chunk_size', 50));
         $totalRecipients = count($snapshot['eligible_recipients']);
         $chunksTotal = max(1, (int)ceil($totalRecipients / $chunkSize));
 
@@ -437,7 +437,7 @@ class BatchDeliveryService
 
         DB::transaction(function () use (
             $batchId, $webhookType, $eventType, $billingPeriod, $channels, $filters,
-            $totalRecipients, $chunksTotal, $user, $snapshot, $channelsStr, &$batchRecordId
+            $totalRecipients, $chunksTotal, $chunkSize, $user, $snapshot, $channelsStr, &$batchRecordId
         ) {
             // Insert notification batch record
             $batchRecordId = DB::table('notification_batches')->insertGetId([
@@ -473,8 +473,9 @@ class BatchDeliveryService
             }
 
             // Save or update recipient notification records
-            foreach ($snapshot['eligible_recipients'] as $recipient) {
+            foreach ($snapshot['eligible_recipients'] as $idx => $recipient) {
                 $invId = $recipient['invoice_id'];
+                $chunkIndex = (int)floor($idx / $chunkSize) + 1;
 
                 $existing = DB::table('notifications')
                     ->where('invoice_id', $invId)
@@ -484,10 +485,11 @@ class BatchDeliveryService
                     ->first();
 
                 if ($existing) {
-                    // Update existing notification to queued with new batch_id
+                    // Update existing notification to queued with new batch_id and chunk_index
                     DB::table('notifications')->where('id', $existing->id)->update([
                         'status' => 'queued',
                         'batch_id' => $batchId,
+                        'chunk_index' => $chunkIndex,
                         'error' => null,
                         'approved_by' => $user->id,
                         'updated_at' => now(),
@@ -504,6 +506,7 @@ class BatchDeliveryService
                         'idempotency_key' => $idempotencyKey,
                         'event_id' => (string)Str::uuid(),
                         'batch_id' => $batchId,
+                        'chunk_index' => $chunkIndex,
                         'status' => 'queued',
                         'approved_by' => $user->id,
                         'created_at' => now(),
