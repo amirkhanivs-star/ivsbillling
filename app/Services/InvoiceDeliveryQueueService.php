@@ -13,8 +13,9 @@ class InvoiceDeliveryQueueService
 {
     /**
      * Build the base query for notifications queue with authorization and filters.
+     * Contains joins and where clauses only; no select columns or order by.
      */
-    public function buildQueueQuery(array $filters, object $user): Builder
+    public function buildBaseQueueQuery(array $filters, object $user): Builder
     {
         $q = DB::table('notifications as n')
             ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
@@ -22,56 +23,7 @@ class InvoiceDeliveryQueueService
             ->leftJoin('families as f', 'f.id', '=', 'i.family_id')
             ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
             ->leftJoin('campuses as c', 'c.id', '=', 'i.campus_id')
-            ->leftJoin('notification_batches as nb', 'nb.batch_id', '=', 'n.batch_id')
-            ->select(
-                'n.id as notification_id',
-                'n.invoice_id',
-                'n.channel',
-                'n.channels',
-                'n.kind',
-                'n.webhook_type',
-                'n.event_type',
-                'n.status as notification_status',
-                'n.idempotency_key',
-                'n.event_id',
-                'n.batch_id',
-                'n.chunk_index',
-                'n.provider_message_id',
-                'n.error as notification_error',
-                'n.is_superseded',
-                'n.superseded_by_invoice_id',
-                'n.attempts',
-                'n.last_attempt_at',
-                'n.response_code',
-                'n.submitted_at',
-                'n.delivered_at',
-                'n.created_at as notification_created_at',
-                'n.updated_at as notification_updated_at',
-                'i.invoice_number',
-                'b.period_start as billing_period',
-                'i.issued_on as issue_date',
-                'i.due_date',
-                'i.currency',
-                'i.total_minor',
-                'i.paid_minor',
-                'i.status as invoice_status',
-                'i.family_id',
-                'i.department_id',
-                'i.campus_id',
-                'f.family_code',
-                'f.guardian_name',
-                'f.whatsapp',
-                'f.email as family_email',
-                'f.contact_verified',
-                'f.whatsapp_verified',
-                'f.email_verified',
-                'f.messaging_opt_in',
-                'd.name as department_name',
-                'c.name as campus_name',
-                'nb.chunks_total',
-                'nb.chunks_sent',
-                'nb.status as batch_status'
-            );
+            ->leftJoin('notification_batches as nb', 'nb.batch_id', '=', 'n.batch_id');
 
         // Role-based Campus / Department access control
         if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
@@ -204,6 +156,66 @@ class InvoiceDeliveryQueueService
                 });
             });
         }
+
+        return $q;
+    }
+
+    /**
+     * Build the query for paginated queue details and exports with specific columns and sorting.
+     */
+    public function buildQueueQuery(array $filters, object $user): Builder
+    {
+        $q = $this->buildBaseQueueQuery($filters, $user);
+
+        $q->select(
+            'n.id as notification_id',
+            'n.invoice_id',
+            'n.channel',
+            'n.channels',
+            'n.kind',
+            'n.webhook_type',
+            'n.event_type',
+            'n.status as notification_status',
+            'n.idempotency_key',
+            'n.event_id',
+            'n.batch_id',
+            'n.chunk_index',
+            'n.provider_message_id',
+            'n.error as notification_error',
+            'n.is_superseded',
+            'n.superseded_by_invoice_id',
+            'n.attempts',
+            'n.last_attempt_at',
+            'n.response_code',
+            'n.submitted_at',
+            'n.delivered_at',
+            'n.created_at as notification_created_at',
+            'n.updated_at as notification_updated_at',
+            'i.invoice_number',
+            'b.period_start as billing_period',
+            'i.issued_on as issue_date',
+            'i.due_date',
+            'i.currency',
+            'i.total_minor',
+            'i.paid_minor',
+            'i.status as invoice_status',
+            'i.family_id',
+            'i.department_id',
+            'i.campus_id',
+            'f.family_code',
+            'f.guardian_name',
+            'f.whatsapp',
+            'f.email as family_email',
+            'f.contact_verified',
+            'f.whatsapp_verified',
+            'f.email_verified',
+            'f.messaging_opt_in',
+            'd.name as department_name',
+            'c.name as campus_name',
+            'nb.chunks_total',
+            'nb.chunks_sent',
+            'nb.status as batch_status'
+        );
 
         // Sorting
         $sortBy = $filters['sort_by'] ?? 'id';
@@ -375,13 +387,10 @@ class InvoiceDeliveryQueueService
      */
     public function getQueueStats(array $filters, object $user): array
     {
-        $query = $this->buildQueueQuery($filters, $user);
+        $base = $this->buildBaseQueueQuery($filters, $user);
 
-        // Remove orderings and selects for faster aggregate query
-        $statsQuery = clone $query;
-        $statsQuery->orders = null;
-        $res = $statsQuery->selectRaw("
-            COUNT(*) as total,
+        $res = $base->selectRaw("
+            COUNT(n.id) as total,
             SUM(CASE WHEN n.status = 'queued' THEN 1 ELSE 0 END) as queued,
             SUM(CASE WHEN n.status IN ('submitted', 'delivered', 'read') THEN 1 ELSE 0 END) as submitted,
             SUM(CASE WHEN n.status = 'failed' THEN 1 ELSE 0 END) as failed,

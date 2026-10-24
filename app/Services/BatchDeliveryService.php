@@ -143,6 +143,12 @@ class BatchDeliveryService
                 'total_matched_invoices' => 0,
                 'total_eligible_recipients' => 0,
                 'total_eligible_invoices' => 0,
+                'matched_superseded_invoices_count' => 0,
+                'total_superseded_invoices_count' => 0,
+                'total_delivery_targets' => 0,
+                'already_submitted_recipients_count' => 0,
+                'contact_ineligible_count' => 0,
+                'actual_notifications_to_queue' => 0,
                 'distinct_family_count' => 0,
                 'currencies_summary' => [],
                 'all_grades' => [],
@@ -174,6 +180,7 @@ class BatchDeliveryService
         $eligibleRecipients = [];
         $eligibleInvoiceIds = [];
         $supersededInvoiceIds = [];
+        $matchedSupersededCount = 0;
         $excludedReasons = [];
         $currenciesSummary = [];
         $allFamilyIds = [];
@@ -210,6 +217,7 @@ class BatchDeliveryService
                     for ($idx = 1; $idx < $sorted->count(); $idx++) {
                         $superseded = $sorted->get($idx);
                         $supersededInvoiceIds[] = $superseded->id;
+                        $matchedSupersededCount++;
                         $excludedBreakdown['superseded']++;
                         $excludedReasons[$superseded->id] = "Superseded for delivery by invoice {$primaryInvoice->invoice_number}";
                     }
@@ -382,7 +390,13 @@ class BatchDeliveryService
             'filters' => $filters,
             'webhook_type' => $webhookType,
             'total_matched_invoices' => $totalMatchedInvoices,
+            'matched_superseded_invoices_count' => $matchedSupersededCount,
+            'total_superseded_invoices_count' => count($supersededInvoiceIds),
+            'total_delivery_targets' => $grouped->count(),
+            'already_submitted_recipients_count' => ($excludedBreakdown['already_submitted'] ?? 0) + ($excludedBreakdown['already_delivered'] ?? 0),
+            'contact_ineligible_count' => $excludedBreakdown['contact_ineligible'] ?? 0,
             'total_eligible_recipients' => count($eligibleRecipients),
+            'actual_notifications_to_queue' => count($eligibleRecipients),
             'total_eligible_invoices' => count($eligibleInvoiceIds),
             'distinct_family_count' => count($allFamilyIds),
             'currencies_summary' => $currenciesSummary,

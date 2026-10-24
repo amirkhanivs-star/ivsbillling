@@ -373,11 +373,11 @@ class BillingController {
 
  public function deliveryQueue(Request $r){
   $filters=[
-   'search'=>$r->query('search'),
-   'batch_id'=>$r->query('batch_id'),
-   'period'=>$r->query('period'),
-   'department_id'=>$r->query('department_id'),
-   'campus_id'=>$r->query('campus_id'),
+   'search'=>$r->input('search'),
+   'batch_id'=>$r->input('batch_id') ?: $r->query('batch_id'),
+   'period'=>$r->input('period'),
+   'department_id'=>$r->input('department_id'),
+   'campus_id'=>$r->input('campus_id'),
    'grade'=>$r->query('grade'),
    'currency'=>$r->query('currency'),
    'submission_status'=>$r->query('submission_status','all'),

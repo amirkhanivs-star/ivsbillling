@@ -197,38 +197,34 @@
 
         <div class="batch-snapshot-grid">
             <div class="batch-stat-box">
-                <div class="batch-stat-label">Eligible Families</div>
-                <div class="batch-stat-val" style="color:#059669;">{{ number_format($selectionSnapshot['distinct_family_count']) }}</div>
-                <div style="font-size:10px; color:#64748b; margin-top:2px;">Sibling Groups Preserved</div>
-            </div>
-            <div class="batch-stat-box">
-                <div class="batch-stat-label">Unique WhatsApp Recipients</div>
-                <div class="batch-stat-val" style="color:#059669;">{{ number_format($selectionSnapshot['total_eligible_recipients']) }}</div>
-                <div style="font-size:10px; color:#64748b; margin-top:2px;">Distinct Delivery Targets</div>
-            </div>
-            <div class="batch-stat-box">
-                <div class="batch-stat-label">Total Matched Invoices</div>
+                <div class="batch-stat-label">1. Raw Matched Invoices</div>
                 <div class="batch-stat-val">{{ number_format($selectionSnapshot['total_matched_invoices']) }}</div>
-                <div style="font-size:10px; color:#64748b; margin-top:2px;">Across all pagination pages</div>
+                <div style="font-size:10px; color:#64748b; margin-top:2px;">Financial invoice records matching filters</div>
             </div>
             <div class="batch-stat-box">
-                <div class="batch-stat-label">Excluded / Superseded</div>
-                <div class="batch-stat-val" style="color:#d97706;">
-                    {{ number_format($selectionSnapshot['excluded_breakdown']['total_excluded'] ?? array_sum($selectionSnapshot['excluded_breakdown'])) }}
-                </div>
+                <div class="batch-stat-label">2. Superseded Prior Invoices</div>
+                <div class="batch-stat-val" style="color:#d97706;">{{ number_format($selectionSnapshot['matched_superseded_invoices_count'] ?? 0) }}</div>
+                <div style="font-size:10px; color:#64748b; margin-top:2px;">Consolidated into previous dues</div>
+            </div>
+            <div class="batch-stat-box">
+                <div class="batch-stat-label">3. Excluded Targets</div>
+                <div class="batch-stat-val" style="color:#ef4444;">{{ number_format(($selectionSnapshot['already_submitted_recipients_count'] ?? 0) + ($selectionSnapshot['contact_ineligible_count'] ?? 0)) }}</div>
                 <div style="font-size:10px; color:#64748b; margin-top:2px;">
-                    {{ $selectionSnapshot['excluded_breakdown']['superseded'] }} superseded · 
-                    {{ $selectionSnapshot['excluded_breakdown']['contact_ineligible'] }} ineligible · 
-                    {{ $selectionSnapshot['excluded_breakdown']['already_submitted'] + $selectionSnapshot['excluded_breakdown']['already_delivered'] }} already sent
+                    {{ $selectionSnapshot['already_submitted_recipients_count'] ?? 0 }} already sent · {{ $selectionSnapshot['contact_ineligible_count'] ?? 0 }} contact-ineligible
                 </div>
             </div>
             <div class="batch-stat-box">
-                <div class="batch-stat-label">Notifications to Queue</div>
-                <div class="batch-stat-val" style="color:#7c3aed;">{{ number_format($selectionSnapshot['total_eligible_recipients']) }}</div>
-                <div style="font-size:10px; color:#64748b; margin-top:2px;">One Challan Per Eligible Family</div>
+                <div class="batch-stat-label">4. Distinct Eligible Families</div>
+                <div class="batch-stat-val" style="color:#059669;">{{ number_format($selectionSnapshot['distinct_family_count']) }}</div>
+                <div style="font-size:10px; color:#64748b; margin-top:2px;">Sibling groups unified (1 challan/family)</div>
             </div>
             <div class="batch-stat-box">
-                <div class="batch-stat-label">Currency Breakdown</div>
+                <div class="batch-stat-label">5. New Notifications to Queue</div>
+                <div class="batch-stat-val" style="color:#7c3aed;">{{ number_format($selectionSnapshot['total_eligible_recipients']) }}</div>
+                <div style="font-size:10px; color:#64748b; margin-top:2px;">Distinct (Family, Currency) challan targets</div>
+            </div>
+            <div class="batch-stat-box">
+                <div class="batch-stat-label">6. Scope Currency Breakdown</div>
                 <div style="font-size:12px; font-weight:700; color:#1e293b; margin-top:4px;">
                     @forelse($selectionSnapshot['currencies_summary'] as $curr => $cData)
                         <div>{{ $curr }} {{ \App\Services\Money::format($cData['outstanding_minor']) }} <span class="muted" style="font-size:10px;">({{ $cData['count'] }})</span></div>
@@ -238,6 +234,28 @@
                 </div>
             </div>
         </div>
+
+        {{-- SELECTION RECONCILIATION SUMMARY --}}
+        @if(!empty($selectionSnapshot['total_matched_invoices']))
+            <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:10px 14px; margin-top:12px; font-size:12px; color:#334155; line-height:1.5;">
+                <div style="font-weight:700; color:#0f172a; margin-bottom:4px; display:flex; align-items:center; gap:6px;">
+                    <span>📊 Selection &amp; Delivery Reconciliation:</span>
+                </div>
+                <div>
+                    • <strong>Financial Records:</strong> <strong>{{ number_format($selectionSnapshot['total_matched_invoices']) }}</strong> raw financial invoices match current filters across {{ number_format($selectionSnapshot['total_delivery_targets'] ?? 0) }} families/currencies. <strong>{{ number_format($selectionSnapshot['matched_superseded_invoices_count'] ?? 0) }}</strong> of these are prior unpaid monthly invoices consolidated into previous dues rather than sent as separate spam messages.
+                </div>
+                <div>
+                    • <strong>Delivery Targets:</strong> Out of the <strong>{{ number_format($selectionSnapshot['total_delivery_targets'] ?? 0) }}</strong> latest monthly challan targets,
+                    @if(!empty($selectionSnapshot['already_submitted_recipients_count']))
+                        <strong>{{ $selectionSnapshot['already_submitted_recipients_count'] }}</strong> was already submitted in a previous batch and excluded from re-sending.
+                    @endif
+                    @if(!empty($selectionSnapshot['contact_ineligible_count']))
+                        <strong>{{ $selectionSnapshot['contact_ineligible_count'] }}</strong> is excluded due to contact verification/consent requirements.
+                    @endif
+                    This leaves exactly <strong>{{ number_format($selectionSnapshot['total_eligible_recipients']) }} new notifications to queue</strong> across <strong>{{ number_format($selectionSnapshot['distinct_family_count']) }} eligible families</strong>.
+                </div>
+            </div>
+        @endif
 
         {{-- SIBLING CONSOLIDATION & ALL GRADES SECTION --}}
         <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:6px; padding:12px 16px; margin-top:14px;">
