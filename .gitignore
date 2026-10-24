@@ -6,6 +6,7 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 *.key
 /storage/*.key
 
@@ -64,6 +65,8 @@ IQRA_STAGING_ONLY*
 
 # Database Dumps, Backups & Local SQLite Files
 *.sql
+!deployment/scripts/*.sql
+!scripts/*.sql
 *.dump
 /backups/
 /storage/backups/

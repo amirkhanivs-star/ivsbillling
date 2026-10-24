@@ -121,4 +121,23 @@ class DatabaseBootSafetyGuardTest extends TestCase
         $this->expectException(DatabaseSafetyException::class);
         DatabaseSafetyGuard::assertMutatingOperationAllowed('quarantine');
     }
+
+    /**
+     * Confirms that DatabaseSafetyGuard resolves canonical default and accepts explicitly approved production database.
+     */
+    public function test_safety_guard_resolves_approved_target_database_with_default_and_override(): void
+    {
+        // Unset any override -> defaults strictly to iqra_billing
+        Config::set('database.approved_target_database', null);
+        putenv('APPROVED_DATABASE_NAME');
+        $this->assertSame('iqra_billing', DatabaseSafetyGuard::getApprovedTargetDatabase());
+
+        // Explicitly set approved production database name
+        Config::set('database.approved_target_database', 'iqra_production_live');
+        $this->assertSame('iqra_production_live', DatabaseSafetyGuard::getApprovedTargetDatabase());
+
+        // Reset
+        Config::set('database.approved_target_database', 'iqra_billing');
+        $this->assertSame('iqra_billing', DatabaseSafetyGuard::getApprovedTargetDatabase());
+    }
 }

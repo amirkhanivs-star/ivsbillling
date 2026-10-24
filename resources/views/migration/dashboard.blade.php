@@ -43,7 +43,7 @@
             <div style="font-size:16px;font-weight:700;color:{{ $dbVerified ? '#16a34a' : '#dc2626' }};margin-top:4px;">
                 {{ $dbVerified ? 'Verified' : 'Check Failed' }}
             </div>
-            <div style="font-size:11px;color:#64748b;margin-top:2px;">127.0.0.1:3306 (mysql driver)</div>
+            <div style="font-size:11px;color:#64748b;margin-top:2px;">{{ config('database.connections.' . config('database.default', 'mysql') . '.host', '127.0.0.1') }}:{{ config('database.connections.' . config('database.default', 'mysql') . '.port', '3306') }} ({{ config('database.default', 'mysql') }} driver)</div>
         </div>
 
         <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 14px;">

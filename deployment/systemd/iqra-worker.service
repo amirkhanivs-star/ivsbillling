@@ -1,0 +1,27 @@
+# ==============================================================================
+# IQRA VIRTUAL SCHOOL — SYSTEMD QUEUE WORKER SERVICE
+# ==============================================================================
+# Place in: /etc/systemd/system/iqra-worker.service
+# Enable via:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable iqra-worker
+#   sudo systemctl start iqra-worker
+# ==============================================================================
+
+[Unit]
+Description=IQRA Virtual School Billing Queue Worker
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+Restart=always
+RestartSec=5
+WorkingDirectory=/var/www/iqra-billing
+ExecStart=/usr/bin/php /var/www/iqra-billing/artisan queue:work database --sleep=3 --tries=3 --max-time=3600 --timeout=90
+StandardOutput=append:/var/www/iqra-billing/storage/logs/queue-worker.log
+StandardError=append:/var/www/iqra-billing/storage/logs/queue-worker-error.log
+
+[Install]
+WantedBy=multi-user.target

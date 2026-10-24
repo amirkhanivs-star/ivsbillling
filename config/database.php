@@ -13,6 +13,11 @@ return [
     'default' => env('DB_CONNECTION', 'mysql'),
 
     /*
+    | Explicitly approved canonical/production database name.
+    */
+    'approved_target_database' => env('APPROVED_DATABASE_NAME', 'iqra_billing'),
+
+    /*
     |--------------------------------------------------------------------------
     | Database Connections
     |--------------------------------------------------------------------------

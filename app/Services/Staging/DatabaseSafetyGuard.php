@@ -39,7 +39,19 @@ class DatabaseSafetyGuard
     public const ALLOWED_QA_DATABASE = 'iqra_billing';
 
     /**
-     * Assert that the connection is strictly verified against the approved target database `iqra_billing`.
+     * Resolve the explicitly approved target database name (defaults strictly to canonical 'iqra_billing').
+     */
+    public static function getApprovedTargetDatabase(): string
+    {
+        $configured = env('APPROVED_DATABASE_NAME') ?: config('database.approved_target_database');
+        if (!empty($configured)) {
+            return strtolower(trim((string) $configured));
+        }
+        return self::APPROVED_TARGET_DATABASE;
+    }
+
+    /**
+     * Assert that the connection is strictly verified against the approved target database.
      *
      * @param string|null $connection
      * @throws DatabaseSafetyException
@@ -89,6 +101,7 @@ class DatabaseSafetyGuard
         }
 
         $activeDbLower = strtolower(trim((string) $activeDb));
+        $approvedTarget = self::getApprovedTargetDatabase();
 
         // 1. Guard against system schemas
         if (in_array($activeDbLower, self::FORBIDDEN_SYSTEM_DATABASES, true)) {
@@ -100,15 +113,15 @@ class DatabaseSafetyGuard
         // 2. Guard against retired databases
         if (in_array($activeDbLower, self::RETIRED_DATABASES, true)) {
             throw new DatabaseSafetyException(
-                "RETIRED DATABASE ACCESSED: Connection '{$connName}' attempted to use retired database '{$activeDb}'. The portal must use '" . self::APPROVED_TARGET_DATABASE . "'."
+                "RETIRED DATABASE ACCESSED: Connection '{$connName}' attempted to use retired database '{$activeDb}'. The portal must use '{$approvedTarget}'."
             );
         }
 
         // 3. Ensure exact match with approved target database
-        $expectedDb = strtolower(config("database.connections.{$connName}.database", self::APPROVED_TARGET_DATABASE));
-        if ($activeDbLower !== self::APPROVED_TARGET_DATABASE || $activeDbLower !== $expectedDb) {
+        $expectedDb = strtolower(config("database.connections.{$connName}.database", $approvedTarget));
+        if ($activeDbLower !== $approvedTarget || $activeDbLower !== $expectedDb) {
             throw new DatabaseSafetyException(
-                "DATABASE IDENTITY CHECK FAILED: Expected approved database '" . self::APPROVED_TARGET_DATABASE . "', but connected to '{$activeDb}'. Execution aborted."
+                "DATABASE IDENTITY CHECK FAILED: Expected approved database '{$approvedTarget}', but connected to '{$activeDb}'. Execution aborted."
             );
         }
     }
@@ -225,7 +238,7 @@ class DatabaseSafetyGuard
         try {
             $row = $conn->selectOne('SELECT DATABASE() as current_db');
             $activeDb = strtolower((string) ($row?->current_db ?? $conn->getDatabaseName()));
-            return $activeDb === strtolower(self::APPROVED_TARGET_DATABASE);
+            return $activeDb === strtolower(self::getApprovedTargetDatabase());
         } catch (\Throwable $e) {
             return false;
         }
