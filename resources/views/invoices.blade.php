@@ -496,7 +496,7 @@
                                         @foreach($row->currencies_map as $cCode => $cData)
                                             <div style="margin-bottom:2px;">
                                                 <span class="badge" style="background:#fee2e2; color:#991b1b; font-weight:800; font-size:11px;">
-                                                    {{ $cData['formatted'] }}
+                                                    {{ $cData['formatted'] ?? $cData['formatted_total_payable'] ?? ($cCode . ' ' . \App\Services\Money::format($cData['total_payable_minor'] ?? 0)) }}
                                                 </span>
                                             </div>
                                         @endforeach

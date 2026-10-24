@@ -1025,6 +1025,7 @@ class InvoiceDeliveryQueueService
                     'formatted_previous_dues' => $curr . ' ' . Money::format($prevDues),
                     'total_payable_minor' => $totalPayable,
                     'formatted_total_payable' => $curr . ' ' . Money::format($totalPayable),
+                    'formatted' => $curr . ' ' . Money::format($totalPayable),
                 ];
 
                 $currencyBreakdowns[] = $breakdownItem;
@@ -1044,6 +1045,7 @@ class InvoiceDeliveryQueueService
                         'formatted_previous_dues' => $pCurr . ' ' . Money::format($pAmount),
                         'total_payable_minor' => $pAmount,
                         'formatted_total_payable' => $pCurr . ' ' . Money::format($pAmount),
+                        'formatted' => $pCurr . ' ' . Money::format($pAmount),
                     ];
                     $currencyBreakdowns[] = $breakdownItem;
                     $currenciesMap[$pCurr] = $breakdownItem;

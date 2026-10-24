@@ -300,4 +300,54 @@ class InvoiceUiHotfixTest extends TestCase
         $page = $qs->getNeedsAttentionCases(['period' => '2026-10'], $data['superAdmin'], 25);
         $this->assertSame(0, $page->total());
     }
+
+    /**
+     * Test Ready to Send tab renders multi-currency family without undefined array key formatted.
+     */
+    public function test_ready_to_send_tab_renders_multi_currency_family_without_undefined_array_key(): void
+    {
+        $data = $this->setupTestData();
+
+        // Create a family with 2 invoices in different currencies
+        $fam = $this->createFamilyWithInvoice($data, 901, 'Grade 1', true, true, '+966509998877');
+
+        // Add a second invoice in USD for the same family
+        $usdInvId = DB::table('invoices')->insertGetId([
+            'family_id' => $fam['famId'],
+            'campus_id' => $data['campus'],
+            'department_id' => $data['dept'],
+            'billing_run_id' => $data['run'],
+            'invoice_number' => 'SCH-USD-001',
+            'currency' => 'USD',
+            'total_minor' => 10000,
+            'paid_minor' => 0,
+            'status' => 'unpaid',
+            'issued_on' => '2026-10-01',
+            'due_date' => '2026-10-25',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('invoice_items')->insertGetId([
+            'invoice_id' => $usdInvId,
+            'student_id' => $fam['stuId'],
+            'enrollment_id' => $fam['enrId'],
+            'description' => 'USD Fee',
+            'amount_minor' => 10000,
+            'discount_minor' => 0,
+            'net_minor' => 10000,
+            'paid_minor' => 0,
+            'currency' => 'USD',
+            'period_key' => '2026-10',
+            'period_start' => '2026-10-01',
+            'period_end' => '2026-10-31',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $res = $this->actingAs($data['superAdmin'])->get('/invoices?tab=ready&period=2026-10');
+        $res->assertStatus(200);
+        $res->assertSee('USD', false);
+        $res->assertSee('SAR', false);
+    }
 }
