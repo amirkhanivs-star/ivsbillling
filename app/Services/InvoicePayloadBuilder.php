@@ -104,6 +104,24 @@ class InvoicePayloadBuilder
             $paymentStatus = 'partial';
         }
 
+        // Multi-currency breakdown for family if applicable
+        $familyCurrencies = DB::table('invoices as fi')
+            ->where('fi.family_id', $family->id)
+            ->whereNotIn('fi.status', ['void', 'voided', 'paid'])
+            ->whereRaw('fi.total_minor > fi.paid_minor')
+            ->select('fi.currency', DB::raw('SUM(fi.total_minor - fi.paid_minor) as outstanding_minor'))
+            ->groupBy('fi.currency')
+            ->get();
+
+        $currenciesBreakdown = [];
+        foreach ($familyCurrencies as $fc) {
+            $currenciesBreakdown[] = [
+                'currency' => $fc->currency,
+                'amount' => Money::format($fc->outstanding_minor),
+                'amount_minor' => (int)$fc->outstanding_minor,
+            ];
+        }
+
         // 5. Lineage reference (if opening balance or external reference)
         $lineageRef = null;
         if (Schema::hasTable('qa_opening_balance_lineage')) {
@@ -153,6 +171,8 @@ class InvoicePayloadBuilder
                 'amount_already_paid' => Money::format($paidMinor),
                 'remaining_amount' => Money::format($remainingMinor),
                 'payment_status' => $paymentStatus,
+                'is_multi_currency' => ($familyCurrencies->count() > 1),
+                'currencies_breakdown' => $currenciesBreakdown,
             ],
 
             'family' => [

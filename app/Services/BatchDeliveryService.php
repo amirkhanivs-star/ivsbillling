@@ -173,9 +173,11 @@ class BatchDeliveryService
             ];
         }
 
-        // Group invoices by family and currency
-        // For monthly mode, find the latest consolidated monthly challan per family + currency
-        $grouped = $allInvoices->groupBy(fn($inv) => "{$inv->family_id}_{$inv->currency}");
+        // Group invoices by family for monthly mode (one consolidated monthly challan and one notification per family)
+        // or by family + currency for paid mode
+        $grouped = ($webhookType === 'monthly')
+            ? $allInvoices->groupBy('family_id')
+            : $allInvoices->groupBy(fn($inv) => "{$inv->family_id}_{$inv->currency}");
 
         $eligibleRecipients = [];
         $eligibleInvoiceIds = [];
@@ -211,7 +213,7 @@ class BatchDeliveryService
 
             $primaryInvoice = $sorted->first();
 
-            // Any older invoices in the same group or in previous billing runs are superseded for delivery
+            // Any older invoices in the same family group or in previous billing runs are superseded for delivery
             if ($webhookType === 'monthly') {
                 if ($sorted->count() > 1) {
                     for ($idx = 1; $idx < $sorted->count(); $idx++) {
@@ -223,12 +225,11 @@ class BatchDeliveryService
                     }
                 }
 
-                // Check for older unsettled invoices in the database for this family and currency
+                // Check for older unsettled invoices in the database for this family across all currencies
                 if (!empty($primaryInvoice->billing_period_start)) {
                     $olderUnsettled = DB::table('invoices as older')
                         ->join('billing_runs as ob', 'ob.id', '=', 'older.billing_run_id')
                         ->where('older.family_id', $primaryInvoice->family_id)
-                        ->where('older.currency', $primaryInvoice->currency)
                         ->where('older.id', '<>', $primaryInvoice->id)
                         ->where('older.status', '!=', 'paid')
                         ->whereColumn('older.paid_minor', '<', 'older.total_minor')
@@ -316,6 +317,16 @@ class BatchDeliveryService
                 $samplePreviewFamilyId = $primaryInvoice->family_id;
             }
 
+            // Calculate multi-currency breakdowns for this family
+            $familyCurrencies = $invoicesGroup->groupBy('currency')->map(function ($cInvs, $cName) {
+                return [
+                    'currency' => $cName,
+                    'total_minor' => $cInvs->sum('total_minor'),
+                    'paid_minor' => $cInvs->sum('paid_minor'),
+                    'outstanding_minor' => $cInvs->sum(fn($i) => max(0, (int)$i->total_minor - (int)$i->paid_minor)),
+                ];
+            });
+
             $eligibleRecipients[] = [
                 'invoice_id' => $primaryInvoice->id,
                 'invoice_number' => $primaryInvoice->invoice_number,
@@ -327,6 +338,8 @@ class BatchDeliveryService
                 'total_minor' => (int)$primaryInvoice->total_minor,
                 'paid_minor' => (int)$primaryInvoice->paid_minor,
                 'outstanding_minor' => max(0, (int)$primaryInvoice->total_minor - (int)$primaryInvoice->paid_minor),
+                'currencies_breakdown' => $familyCurrencies->all(),
+                'is_multi_currency' => ($familyCurrencies->count() > 1),
                 'billing_period' => $primaryInvoice->billing_period_start ? substr($primaryInvoice->billing_period_start, 0, 7) : null,
                 'is_retry' => ($existingNotif && in_array($existingNotif->status, ['blocked', 'failed'], true)),
                 'existing_notification_id' => $existingNotif?->id,
@@ -335,13 +348,14 @@ class BatchDeliveryService
             $eligibleInvoiceIds[] = $primaryInvoice->id;
             $allFamilyIds[$primaryInvoice->family_id] = true;
 
-            $curr = $primaryInvoice->currency;
-            if (!isset($currenciesSummary[$curr])) {
-                $currenciesSummary[$curr] = ['total_minor' => 0, 'outstanding_minor' => 0, 'count' => 0];
+            foreach ($familyCurrencies as $cCurr => $cStat) {
+                if (!isset($currenciesSummary[$cCurr])) {
+                    $currenciesSummary[$cCurr] = ['total_minor' => 0, 'outstanding_minor' => 0, 'count' => 0];
+                }
+                $currenciesSummary[$cCurr]['total_minor'] += $cStat['total_minor'];
+                $currenciesSummary[$cCurr]['outstanding_minor'] += $cStat['outstanding_minor'];
+                $currenciesSummary[$cCurr]['count']++;
             }
-            $currenciesSummary[$curr]['total_minor'] += (int)$primaryInvoice->total_minor;
-            $currenciesSummary[$curr]['outstanding_minor'] += max(0, (int)$primaryInvoice->total_minor - (int)$primaryInvoice->paid_minor);
-            $currenciesSummary[$curr]['count']++;
         }
 
         // Get all grades and sibling student details across the eligible invoices

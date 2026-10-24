@@ -598,4 +598,477 @@ class InvoiceDeliveryQueueService
             'Content-Disposition' => "attachment; filename=\"{$filename}\"",
         ]);
     }
+
+    /**
+     * Get list of all available monthly billing periods from generated invoices.
+     */
+    public function getAvailableBillingMonths(): array
+    {
+        return DB::table('billing_runs as b')
+            ->join('invoices as i', 'i.billing_run_id', '=', 'b.id')
+            ->where('b.frequency', 'monthly')
+            ->selectRaw("DISTINCT SUBSTRING(b.period_start, 1, 7) as period_month")
+            ->orderByDesc('period_month')
+            ->pluck('period_month')
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Get the latest successfully generated monthly billing period.
+     */
+    public function getLatestBillingMonth(): string
+    {
+        $months = $this->getAvailableBillingMonths();
+        return $months[0] ?? date('Y-m');
+    }
+
+    /**
+     * Compute clean dashboard KPI statistics for the selected billing month (Section 8).
+     */
+    public function getDashboardKpiStats(string $period, object $user): array
+    {
+        $dt = \Carbon\Carbon::createFromFormat('Y-m', $period);
+        $monthName = $dt ? $dt->format('F Y') : $period;
+
+        $baseInv = DB::table('invoices as i')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->whereNotIn('i.status', ['void', 'voided']);
+
+        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $baseInv->where('i.campus_id', $user->campus_id);
+            if (!empty($user->department_id)) {
+                $baseInv->where('i.department_id', $user->department_id);
+            }
+        }
+
+        // Ready / Awaiting Review (unpaid, not superseded by newer run, not already queued/sent)
+        $readyQuery = (clone $baseInv)
+            ->where('i.status', '!=', 'paid')
+            ->whereRaw('i.total_minor > i.paid_minor')
+            ->whereNotExists(function ($sub) {
+                $sub->select(DB::raw(1))
+                    ->from('invoices as newer')
+                    ->join('billing_runs as nb', 'nb.id', '=', 'newer.billing_run_id')
+                    ->whereColumn('newer.family_id', 'i.family_id')
+                    ->whereColumn('nb.period_start', '>', 'b.period_start')
+                    ->whereNotIn('newer.status', ['void', 'voided']);
+            })
+            ->whereNotExists(function ($sub) {
+                $sub->select(DB::raw(1))
+                    ->from('notifications as n')
+                    ->whereColumn('n.invoice_id', 'i.id')
+                    ->where('n.kind', 'monthly')
+                    ->whereIn('n.status', ['submitted', 'delivered', 'read', 'queued']);
+            });
+
+        $awaitingReviewCount = (clone $readyQuery)->count();
+        $readyFamiliesCount = (clone $readyQuery)->distinct()->count('i.family_id');
+
+        // Processing (currently queued in active batches)
+        $procQuery = DB::table('notifications as n')
+            ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->where('n.kind', 'monthly')
+            ->where('n.status', 'queued');
+
+        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $procQuery->where('i.campus_id', $user->campus_id);
+            if (!empty($user->department_id)) {
+                $procQuery->where('i.department_id', $user->department_id);
+            }
+        }
+        $processingCount = $procQuery->count();
+
+        // Submitted / Sent (HTTP 200/202 accepted by n8n or delivered/read)
+        $sentQuery = DB::table('notifications as n')
+            ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->where('n.kind', 'monthly')
+            ->whereIn('n.status', ['submitted', 'delivered', 'read']);
+
+        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $sentQuery->where('i.campus_id', $user->campus_id);
+            if (!empty($user->department_id)) {
+                $sentQuery->where('i.department_id', $user->department_id);
+            }
+        }
+        $submittedCount = $sentQuery->count();
+
+        // Needs Attention (failed or blocked)
+        $attQuery = DB::table('notifications as n')
+            ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->where('n.kind', 'monthly')
+            ->whereIn('n.status', ['failed', 'blocked']);
+
+        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $attQuery->where('i.campus_id', $user->campus_id);
+            if (!empty($user->department_id)) {
+                $attQuery->where('i.department_id', $user->department_id);
+            }
+        }
+        $attentionCount = $attQuery->count();
+
+        return [
+            'selected_period' => $period,
+            'selected_month' => $monthName,
+            'awaiting_review' => $awaitingReviewCount,
+            'ready_families' => $readyFamiliesCount,
+            'processing' => $processingCount,
+            'submitted' => $submittedCount,
+            'attention' => $attentionCount,
+        ];
+    }
+
+    /**
+     * Get paginated active Ready to Send monthly family challans for selected billing month.
+     * Excludes old MySkool opening balances, already submitted challans, and superseded challans.
+     */
+    public function getReadyToSendChallans(array $filters, object $user, int $perPage = 25): LengthAwarePaginator
+    {
+        $period = !empty($filters['period']) ? $filters['period'] : $this->getLatestBillingMonth();
+
+        $q = DB::table('invoices as i')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->join('families as f', 'f.id', '=', 'i.family_id')
+            ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
+            ->leftJoin('campuses as c', 'c.id', '=', 'i.campus_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->where('i.status', '!=', 'paid')
+            ->whereRaw('i.total_minor > i.paid_minor')
+            ->whereNotIn('i.status', ['void', 'voided']);
+
+        // Scope check for campus/dept staff
+        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $q->where('i.campus_id', $user->campus_id);
+            if (!empty($user->department_id)) {
+                $q->where('i.department_id', $user->department_id);
+            }
+        }
+
+        // Filters
+        if (!empty($filters['campus_id'])) {
+            $q->where('i.campus_id', (int)$filters['campus_id']);
+        }
+        if (!empty($filters['department_id'])) {
+            $q->where('i.department_id', (int)$filters['department_id']);
+        }
+
+        // Grade filter
+        if (!empty($filters['grade'])) {
+            $grade = $filters['grade'];
+            $q->whereExists(function ($sub) use ($grade) {
+                $sub->select(DB::raw(1))
+                    ->from('invoice_items as sub_ii')
+                    ->join('enrollments as sub_e', 'sub_e.id', '=', 'sub_ii.enrollment_id')
+                    ->whereColumn('sub_ii.invoice_id', 'i.id')
+                    ->where('sub_e.grade_label', $grade);
+            });
+        }
+
+        // Contact eligibility filter
+        if (!empty($filters['contact_status']) && $filters['contact_status'] !== 'all') {
+            if ($filters['contact_status'] === 'eligible_only') {
+                $q->where('f.contact_verified', 1)->where('f.messaging_opt_in', 1)->whereNotNull('f.whatsapp');
+            } elseif ($filters['contact_status'] === 'ineligible_only') {
+                $q->where(function ($sub) {
+                    $sub->where('f.contact_verified', 0)
+                        ->orWhere('f.messaging_opt_in', 0)
+                        ->orWhereNull('f.whatsapp')
+                        ->orWhere('f.whatsapp', '');
+                });
+            }
+        }
+
+        // Search filter
+        if (!empty($filters['search'])) {
+            $s = trim($filters['search']);
+            $q->where(function ($sq) use ($s) {
+                $sq->where('i.invoice_number', 'like', "%{$s}%")
+                    ->orWhere('f.family_code', 'like', "%{$s}%")
+                    ->orWhere('f.guardian_name', 'like', "%{$s}%")
+                    ->orWhere('f.whatsapp', 'like', "%{$s}%")
+                    ->orWhere('f.email', 'like', "%{$s}%")
+                    ->orWhereExists(function ($stSub) use ($s) {
+                        $stSub->select(DB::raw(1))
+                            ->from('invoice_items as st_ii')
+                            ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
+                            ->whereColumn('st_ii.invoice_id', 'i.id')
+                            ->where(function ($stQuery) use ($s) {
+                                $stQuery->where('st_s.name', 'like', "%{$s}%")
+                                    ->orWhere('st_s.gr_number', 'like', "%{$s}%");
+                            });
+                    });
+            });
+        }
+
+        // Not superseded by a newer billing run for this family
+        $q->whereNotExists(function ($sub) {
+            $sub->select(DB::raw(1))
+                ->from('invoices as newer')
+                ->join('billing_runs as nb', 'nb.id', '=', 'newer.billing_run_id')
+                ->whereColumn('newer.family_id', 'i.family_id')
+                ->whereColumn('nb.period_start', '>', 'b.period_start')
+                ->whereNotIn('newer.status', ['void', 'voided']);
+        });
+
+        // Not already submitted or delivered
+        $q->whereNotExists(function ($sub) {
+            $sub->select(DB::raw(1))
+                ->from('notifications as n')
+                ->whereColumn('n.invoice_id', 'i.id')
+                ->where('n.kind', 'monthly')
+                ->whereIn('n.status', ['submitted', 'delivered', 'read']);
+        });
+
+        // Not currently in an active queue
+        $q->whereNotExists(function ($sub) {
+            $sub->select(DB::raw(1))
+                ->from('notifications as n')
+                ->whereColumn('n.invoice_id', 'i.id')
+                ->where('n.kind', 'monthly')
+                ->where('n.status', 'queued');
+        });
+
+        // Not superseded within notification lifecycle
+        $q->whereNotExists(function ($sub) {
+            $sub->select(DB::raw(1))
+                ->from('notifications as n')
+                ->whereColumn('n.invoice_id', 'i.id')
+                ->where('n.kind', 'monthly')
+                ->where('n.is_superseded', 1);
+        });
+
+        $q->select(
+            'i.id as invoice_id',
+            'i.invoice_number',
+            'i.family_id',
+            'i.campus_id',
+            'i.department_id',
+            'i.currency',
+            'i.total_minor',
+            'i.paid_minor',
+            'i.issued_on',
+            'i.due_date',
+            'i.status as invoice_status',
+            'b.period_start as billing_period',
+            'f.family_code',
+            'f.guardian_name',
+            'f.whatsapp',
+            'f.email',
+            'f.contact_verified',
+            'f.whatsapp_verified',
+            'f.email_verified',
+            'f.messaging_opt_in',
+            'd.name as department_name',
+            'c.name as campus_name'
+        )->orderByDesc('i.id');
+
+        $paginator = $q->paginate($perPage)->withQueryString();
+        $items = $paginator->getCollection();
+
+        if ($items->isEmpty()) {
+            return $paginator;
+        }
+
+        $invoiceIds = $items->pluck('invoice_id')->all();
+        $familyIds = $items->pluck('family_id')->unique()->all();
+
+        // Load students and grades for these invoices
+        $studentsByInvoice = DB::table('invoice_items as ii')
+            ->join('students as s', 's.id', '=', 'ii.student_id')
+            ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
+            ->whereIn('ii.invoice_id', $invoiceIds)
+            ->select(
+                'ii.invoice_id',
+                's.id as student_id',
+                's.name as student_name',
+                's.gr_number',
+                'e.grade_label'
+            )
+            ->distinct()
+            ->get()
+            ->groupBy('invoice_id');
+
+        // Load all active siblings for these families across other grades
+        $siblingsByFamily = DB::table('students as s')
+            ->join('enrollments as e', 'e.student_id', '=', 's.id')
+            ->whereIn('s.family_id', $familyIds)
+            ->where('s.status', 'active')
+            ->where('e.status', 'active')
+            ->select('s.family_id', 's.id as student_id', 's.name', 's.gr_number', 'e.grade_label')
+            ->distinct()
+            ->get()
+            ->groupBy('family_id');
+
+        // Load previous unpaid dues month-by-month for each family
+        $earliestPeriod = $items->min('billing_period') ?: ($period . '-01');
+        $previousDuesRows = DB::table('invoices as old_inv')
+            ->join('invoice_items as old_item', 'old_item.invoice_id', '=', 'old_inv.id')
+            ->join('billing_runs as ob', 'ob.id', '=', 'old_inv.billing_run_id')
+            ->whereIn('old_inv.family_id', $familyIds)
+            ->where('ob.period_start', '<', $earliestPeriod)
+            ->whereRaw('old_item.net_minor > old_item.paid_minor')
+            ->whereNotIn('old_item.status', ['voided', 'exempted', 'paid'])
+            ->whereNotIn('old_inv.status', ['void', 'voided', 'paid'])
+            ->select(
+                'old_inv.family_id',
+                'old_inv.currency',
+                DB::raw("SUBSTRING(ob.period_start, 1, 7) as period_month"),
+                DB::raw("SUM(old_item.net_minor - old_item.paid_minor) as dues_minor")
+            )
+            ->groupBy('old_inv.family_id', 'old_inv.currency', 'period_month')
+            ->orderBy('period_month')
+            ->get()
+            ->groupBy('family_id');
+
+        $enriched = $items->map(function ($row) use ($studentsByInvoice, $siblingsByFamily, $previousDuesRows) {
+            $invoiceStudents = $studentsByInvoice->get($row->invoice_id, collect());
+            $familySiblings = $siblingsByFamily->get($row->family_id, collect());
+            $familyPrevRows = $previousDuesRows->get($row->family_id, collect());
+
+            // Month by month previous dues
+            $duesByMonth = $familyPrevRows->map(function ($pRow) {
+                return [
+                    'month' => $pRow->period_month,
+                    'currency' => $pRow->currency,
+                    'dues_minor' => (int)$pRow->dues_minor,
+                    'formatted' => $pRow->currency . ' ' . Money::format($pRow->dues_minor),
+                ];
+            })->all();
+
+            $prevDuesSameCurrency = $familyPrevRows->where('currency', $row->currency)->sum('dues_minor');
+            $remainingBalanceMinor = max(0, (int)$row->total_minor - (int)$row->paid_minor);
+            $totalPayableMinor = $remainingBalanceMinor + $prevDuesSameCurrency;
+
+            // Multi-currency summaries if family has multiple currencies
+            $currenciesMap = [];
+            $currenciesMap[$row->currency] = [
+                'currency' => $row->currency,
+                'current_minor' => $remainingBalanceMinor,
+                'previous_minor' => $prevDuesSameCurrency,
+                'total_minor' => $totalPayableMinor,
+                'formatted' => $row->currency . ' ' . Money::format($totalPayableMinor),
+            ];
+
+            foreach ($familyPrevRows as $pRow) {
+                if ($pRow->currency !== $row->currency) {
+                    if (!isset($currenciesMap[$pRow->currency])) {
+                        $currenciesMap[$pRow->currency] = [
+                            'currency' => $pRow->currency,
+                            'current_minor' => 0,
+                            'previous_minor' => 0,
+                            'total_minor' => 0,
+                            'formatted' => '',
+                        ];
+                    }
+                    $currenciesMap[$pRow->currency]['previous_minor'] += (int)$pRow->dues_minor;
+                    $currenciesMap[$pRow->currency]['total_minor'] += (int)$pRow->dues_minor;
+                    $currenciesMap[$pRow->currency]['formatted'] = $pRow->currency . ' ' . Money::format($currenciesMap[$pRow->currency]['total_minor']);
+                }
+            }
+
+            $consolidatedChallanUrl = URL::temporarySignedRoute(
+                'families.signed_challan_pdf',
+                now()->addDays(7),
+                ['family' => $row->family_id]
+            );
+
+            $row->invoice_students = $invoiceStudents;
+            $row->family_siblings = $familySiblings;
+            $row->dues_by_month = $duesByMonth;
+            $row->prev_dues_minor = $prevDuesSameCurrency;
+            $row->formatted_prev_dues = $row->currency . ' ' . Money::format($prevDuesSameCurrency);
+            $row->remaining_balance_minor = $remainingBalanceMinor;
+            $row->formatted_remaining_balance = $row->currency . ' ' . Money::format($remainingBalanceMinor);
+            $row->total_payable_minor = $totalPayableMinor;
+            $row->formatted_total_payable = $row->currency . ' ' . Money::format($totalPayableMinor);
+            $row->currencies_map = $currenciesMap;
+            $row->is_multi_currency = count($currenciesMap) > 1;
+            $row->consolidated_challan_url = $consolidatedChallanUrl;
+
+            return $row;
+        });
+
+        $paginator->setCollection($enriched);
+        return $paginator;
+    }
+
+    /**
+     * Get paginated complete financial history across all time (Section 5.E).
+     * Includes imported MySkool opening balances, previous invoices, superseded challans, and paid records.
+     */
+    public function getFinancialHistory(array $filters, object $user, int $perPage = 25): LengthAwarePaginator
+    {
+        $q = DB::table('invoices as i')
+            ->leftJoin('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->leftJoin('families as f', 'f.id', '=', 'i.family_id')
+            ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
+            ->leftJoin('campuses as c', 'c.id', '=', 'i.campus_id');
+
+        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $q->where('i.campus_id', $user->campus_id);
+            if (!empty($user->department_id)) {
+                $q->where('i.department_id', $user->department_id);
+            }
+        }
+
+        if (!empty($filters['campus_id'])) {
+            $q->where('i.campus_id', (int)$filters['campus_id']);
+        }
+        if (!empty($filters['department_id'])) {
+            $q->where('i.department_id', (int)$filters['department_id']);
+        }
+        if (!empty($filters['period'])) {
+            $q->where('b.period_start', 'like', $filters['period'] . '%');
+        }
+        if (!empty($filters['payment_status']) && $filters['payment_status'] !== 'all') {
+            if ($filters['payment_status'] === 'paid') {
+                $q->where('i.status', 'paid');
+            } elseif ($filters['payment_status'] === 'unpaid') {
+                $q->where('i.status', '!=', 'paid')->where('i.paid_minor', 0);
+            } elseif ($filters['payment_status'] === 'partial') {
+                $q->where('i.status', '!=', 'paid')->where('i.paid_minor', '>', 0);
+            }
+        }
+
+        if (!empty($filters['search'])) {
+            $s = trim($filters['search']);
+            $q->where(function ($sq) use ($s) {
+                $sq->where('i.invoice_number', 'like', "%{$s}%")
+                    ->orWhere('f.family_code', 'like', "%{$s}%")
+                    ->orWhere('f.guardian_name', 'like', "%{$s}%")
+                    ->orWhere('f.whatsapp', 'like', "%{$s}%")
+                    ->orWhereExists(function ($stSub) use ($s) {
+                        $stSub->select(DB::raw(1))
+                            ->from('invoice_items as st_ii')
+                            ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
+                            ->whereColumn('st_ii.invoice_id', 'i.id')
+                            ->where(function ($stQuery) use ($s) {
+                                $stQuery->where('st_s.name', 'like', "%{$s}%")
+                                    ->orWhere('st_s.gr_number', 'like', "%{$s}%");
+                            });
+                    });
+            });
+        }
+
+        $q->select(
+            'i.*',
+            'b.period_start as billing_period',
+            'b.frequency',
+            'f.family_code',
+            'f.guardian_name',
+            'f.whatsapp',
+            'd.name as department_name',
+            'c.name as campus_name'
+        )->orderByDesc('i.id');
+
+        return $q->paginate($perPage)->withQueryString();
+    }
 }

@@ -197,81 +197,88 @@ class BillingController {
   return redirect('/invoices')->with('notice',"Created {$result['created']} invoices across ".count($periods)." period(s); skipped {$result['skipped']} previously billed items. Nothing has been sent.");
  }
  public function invoices(Request $r){
-  $batchService = app(BatchDeliveryService::class);
-  $filters = [
-   'campus_id' => $r->query('campus_id'),
-   'department_id' => $r->query('department_id'),
-   'grade' => $r->query('grade'),
-   'period' => $r->query('period'),
-   'contact_status' => $r->query('contact_status', 'all'),
-   'payment_status' => $r->query('payment_status', 'all'),
-   'paid_only' => $r->boolean('paid_only'),
-   'webhook_type' => $r->boolean('paid_only') ? 'paid' : 'monthly',
-   'send_mode' => $r->query('send_mode'),
-  ];
+   $batchService = app(BatchDeliveryService::class);
+   $queueService = app(\App\Services\InvoiceDeliveryQueueService::class);
 
-  $q = $batchService->buildFilterQuery($filters, $r->user())
-   ->select('i.*','f.family_code','f.whatsapp','f.email','f.contact_verified','f.messaging_opt_in','f.whatsapp_verified','f.email_verified','d.name as department_name','b.period_start')
-   ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_status')
-   ->selectSub(DB::table('notifications')->select('error')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_error')
-   ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%email%')->orWhere('channels','like','%email%'))->orderByDesc('id')->limit(1),'email_status');
+   $availableMonths = $queueService->getAvailableBillingMonths();
+   $selectedPeriod = $r->filled('period') ? $r->query('period') : $queueService->getLatestBillingMonth();
+   $currentTab = $r->query('tab', 'ready');
+   $perPage = in_array((int)$r->query('per_page'), [25, 50, 100], true) ? (int)$r->query('per_page') : 25;
 
-  $page = $q->orderByDesc('i.id')->paginate(30)->withQueryString();
-  $ids = $page->getCollection()->pluck('id')->all();
-  $gradesByInvoice = collect();
-  if($ids)$gradesByInvoice=DB::table('invoice_items as item')->join('enrollments as en','en.id','=','item.enrollment_id')->whereIn('item.invoice_id',$ids)->whereNotNull('en.grade_label')->select('item.invoice_id','en.grade_label')->distinct()->get()->groupBy('invoice_id')->map(fn($rows)=>$rows->pluck('grade_label')->unique()->sort()->values()->all());
-  $grByInvoice = collect();
-  if($ids)$grByInvoice=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')
-   ->whereIn('item.invoice_id',$ids)->select('item.invoice_id','s.gr_number')->distinct()->get()
-   ->groupBy('invoice_id')->map(fn($rows)=>$rows->pluck('gr_number')->filter()->unique()->sort()->values()->all());
-  $studentByInvoice = collect();
-  if($ids)$studentByInvoice=DB::table('invoice_items as item')->whereIn('item.invoice_id',$ids)->select('item.invoice_id','item.student_id')->distinct()->get()->groupBy('invoice_id')->map(fn($rows)=>(int)$rows->first()?->student_id);
-  $gradeOptions = DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
-  $campuses = DB::table('campuses')->orderBy('name')->get();
-  $queuedJobCount = DB::table('jobs')->where('queue', 'notifications')->count();
+   $filters = [
+    'campus_id' => $r->query('campus_id'),
+    'department_id' => $r->query('department_id'),
+    'grade' => $r->query('grade'),
+    'period' => $selectedPeriod,
+    'contact_status' => $r->query('contact_status', 'all'),
+    'payment_status' => $r->query('payment_status', 'all'),
+    'paid_only' => $r->boolean('paid_only'),
+    'webhook_type' => $r->boolean('paid_only') ? 'paid' : 'monthly',
+    'send_mode' => $r->query('send_mode'),
+    'search' => $r->query('search'),
+   ];
 
-  // Resolve server-side selection snapshot across ALL pages matching filters
-  $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
+   $dashboardStats = $queueService->getDashboardKpiStats($selectedPeriod, $r->user());
 
-  $recentBatches = DB::table('notification_batches as b')
-   ->leftJoin('users as u', 'u.id', '=', 'b.approved_by')
-   ->select('b.*', 'u.name as approver_name')
-   ->orderByDesc('b.id')
-   ->limit(10)
-   ->get();
+   // Tab content resolution
+   $readyChallans = null;
+   $tabQueuePage = null;
+   $financialHistoryPage = null;
+   $selectionSnapshot = null;
 
-  $recentNotifications=DB::table('notifications as n')
-   ->join('invoices as i','i.id','=','n.invoice_id')
-   ->leftJoin('users as u','u.id','=','n.approved_by')
-   ->select('n.*','i.invoice_number','u.name as approver_name')
-   ->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id)))
-   ->orderByDesc('n.id')
-   ->limit(20)
-   ->get();
+   if ($currentTab === 'ready') {
+    $readyChallans = $queueService->getReadyToSendChallans($filters, $r->user(), $perPage);
+    $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
+   } elseif ($currentTab === 'processing') {
+    $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'queued']), $r->user(), $perPage);
+   } elseif ($currentTab === 'sent') {
+    $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'submitted']), $r->user(), $perPage);
+   } elseif ($currentTab === 'attention') {
+    $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'failed']), $r->user(), $perPage);
+   } elseif ($currentTab === 'history') {
+    $financialHistoryPage = $queueService->getFinancialHistory($filters, $r->user(), $perPage);
+   } else {
+    // Default fallback to ready
+    $currentTab = 'ready';
+    $readyChallans = $queueService->getReadyToSendChallans($filters, $r->user(), $perPage);
+    $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
+   }
 
-  $webhookService=app(WebhookSettingService::class);
-  $monthlyWebhookSetting=$webhookService->getSettings('monthly');
-  $paidWebhookSetting=$webhookService->getSettings('paid');
+   $gradeOptions = \Illuminate\Support\Facades\DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
+   $campuses = \Illuminate\Support\Facades\DB::table('campuses')->orderBy('name')->get();
 
-  return view('invoices',[
-   'invoices'=>$page,
-   'departments'=>$this->basics($r)['departments'],
-   'campuses'=>$campuses,
-   'gradesByInvoice'=>$gradesByInvoice,
-   'grByInvoice'=>$grByInvoice,
-   'studentByInvoice'=>$studentByInvoice,
-   'queuedJobCount'=>$queuedJobCount,
-   'gradeOptions'=>$gradeOptions,
-   'recentNotifications'=>$recentNotifications,
-   'recentBatches'=>$recentBatches,
-   'selectionSnapshot'=>$selectionSnapshot,
-   'currentFilters'=>$filters,
-   'monthlyWebhookSetting'=>$monthlyWebhookSetting,
-   'paidWebhookSetting'=>$paidWebhookSetting,
-  ]);
- }
+   $recentBatches = \Illuminate\Support\Facades\DB::table('notification_batches as b')
+    ->leftJoin('users as u', 'u.id', '=', 'b.approved_by')
+    ->select('b.*', 'u.name as approver_name')
+    ->orderByDesc('b.id')
+    ->limit(10)
+    ->get();
 
- public function selectionSnapshot(Request $r){
+   $webhookService = app(\App\Services\WebhookSettingService::class);
+   $monthlyWebhookSetting = $webhookService->getSettings('monthly');
+   $paidWebhookSetting = $webhookService->getSettings('paid');
+
+   return view('invoices', [
+    'currentTab' => $currentTab,
+    'availableMonths' => $availableMonths,
+    'selectedPeriod' => $selectedPeriod,
+    'dashboardStats' => $dashboardStats,
+    'readyChallans' => $readyChallans,
+    'tabQueuePage' => $tabQueuePage,
+    'financialHistoryPage' => $financialHistoryPage,
+    'selectionSnapshot' => $selectionSnapshot,
+    'currentFilters' => $filters,
+    'perPage' => $perPage,
+    'departments' => $this->basics($r)['departments'],
+    'campuses' => $campuses,
+    'gradeOptions' => $gradeOptions,
+    'recentBatches' => $recentBatches,
+    'monthlyWebhookSetting' => $monthlyWebhookSetting,
+    'paidWebhookSetting' => $paidWebhookSetting,
+   ]);
+  }
+
+  public function selectionSnapshot(Request $r){
   abort_if($r->user()->role==='auditor',403);
   $batchService = app(BatchDeliveryService::class);
   $filters = [
