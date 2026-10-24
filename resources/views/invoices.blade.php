@@ -44,6 +44,11 @@
                     Monthly Webhook: {{ $monthlyWebhookSetting->is_enabled && $monthlyWebhookSetting->url ? 'Active & Configured' : 'Disabled / Unconfigured' }}
                 </span>
             @endif
+            @if(auth()->user()->role === 'super_admin')
+                <a href="{{ route('settings.webhooks') }}" class="btn small" style="margin-left:8px; background:#f8fafc; color:#475569; border:1px solid #cbd5e1; font-size:11px; padding:5px 10px;">
+                    ⚙️ Webhooks &amp; Authorizations
+                </a>
+            @endif
         </div>
     </div>
 

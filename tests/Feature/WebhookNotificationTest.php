@@ -6,6 +6,7 @@ use App\Jobs\DispatchInvoiceToN8n;
 use App\Models\User;
 use App\Models\WebhookSetting;
 use App\Services\InvoiceService;
+use App\Services\MySkoolAuthorizationCarryForwardService;
 use App\Services\WebhookSettingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -1084,6 +1085,174 @@ class WebhookNotificationTest extends TestCase
             ->post('/invoices/notifications/process-queue')
             ->assertRedirect()
             ->assertSessionHas('notice');
+    }
+
+    /**
+     * 20. Super Admin preview and bulk execution of MySkool WhatsApp authorization carry-forward.
+     */
+    public function test_myskool_whatsapp_authorizations_carry_forward_preview_and_execution(): void
+    {
+        $data = $this->setupBillingData();
+        $myskoolImportDate = '2026-10-23 11:12:21';
+
+        // Set up test families:
+        // A. Valid MySkool family with valid WhatsApp
+        $famValid = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-MS-001',
+            'guardian_name' => 'Guardian MS 1',
+            'email' => 'ms1@example.test',
+            'whatsapp' => '+966511111111',
+            'contact_verified' => false,
+            'whatsapp_verified' => false,
+            'email_verified' => false,
+            'messaging_opt_in' => false,
+            'created_at' => $myskoolImportDate,
+            'updated_at' => $myskoolImportDate,
+        ]);
+
+        // B. MySkool family with missing WhatsApp
+        $famMissing = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-MS-002',
+            'guardian_name' => 'Guardian MS 2',
+            'email' => 'ms2@example.test',
+            'whatsapp' => null,
+            'contact_verified' => false,
+            'whatsapp_verified' => false,
+            'email_verified' => false,
+            'messaging_opt_in' => false,
+            'created_at' => $myskoolImportDate,
+            'updated_at' => $myskoolImportDate,
+        ]);
+
+        // C. MySkool family with invalid WhatsApp format (missing +)
+        $famInvalid = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-MS-003',
+            'guardian_name' => 'Guardian MS 3',
+            'email' => 'ms3@example.test',
+            'whatsapp' => '966533333333',
+            'contact_verified' => false,
+            'whatsapp_verified' => false,
+            'email_verified' => false,
+            'messaging_opt_in' => false,
+            'created_at' => $myskoolImportDate,
+            'updated_at' => $myskoolImportDate,
+        ]);
+
+        // D. Manual test family / post-import admission (created later)
+        $famNew = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-NEW-004',
+            'guardian_name' => 'Guardian New 4',
+            'email' => 'new4@example.test',
+            'whatsapp' => '+966544444444',
+            'contact_verified' => false,
+            'whatsapp_verified' => false,
+            'email_verified' => false,
+            'messaging_opt_in' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $service = app(MySkoolAuthorizationCarryForwardService::class);
+
+        // 1. Preview checks
+        $preview = $service->preview();
+        $this->assertGreaterThanOrEqual(1, $preview['eligible_to_authorize_count']);
+        $this->assertContains($famValid, $preview['eligible_ids']);
+        $this->assertNotContains($famMissing, $preview['eligible_ids']);
+        $this->assertNotContains($famInvalid, $preview['eligible_ids']);
+        $this->assertNotContains($famNew, $preview['eligible_ids']);
+        $this->assertGreaterThanOrEqual(1, $preview['excluded_counts']['missing_whatsapp']);
+        $this->assertGreaterThanOrEqual(1, $preview['excluded_counts']['invalid_whatsapp']);
+        $this->assertGreaterThanOrEqual(1, $preview['excluded_counts']['test_or_new_admission']);
+
+        // 2. Execution rejected without explicit confirmation
+        $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/carry-forward', [])
+            ->assertSessionHasErrors('carry_forward');
+
+        // 3. Execution succeeded with confirmation
+        $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/carry-forward', [
+                'confirmation' => 'CONFIRM_AUTHORIZATION',
+                'confirm_carry_forward' => '1',
+            ])
+            ->assertRedirect('/settings/webhooks')
+            ->assertSessionHas('notice');
+
+        // Verify valid MySkool family was authorized
+        $updatedValid = DB::table('families')->where('id', $famValid)->first();
+        $this->assertTrue((bool)$updatedValid->contact_verified);
+        $this->assertTrue((bool)$updatedValid->whatsapp_verified);
+        $this->assertTrue((bool)$updatedValid->messaging_opt_in);
+        $this->assertSame('+966511111111', $updatedValid->whatsapp); // contact preserved!
+        $this->assertSame('ms1@example.test', $updatedValid->email); // email preserved!
+
+        // Verify excluded families remain unverified
+        $updatedMissing = DB::table('families')->where('id', $famMissing)->first();
+        $this->assertFalse((bool)$updatedMissing->contact_verified);
+
+        $updatedInvalid = DB::table('families')->where('id', $famInvalid)->first();
+        $this->assertFalse((bool)$updatedInvalid->contact_verified);
+        $this->assertFalse((bool)$updatedInvalid->whatsapp_verified);
+
+        $updatedNew = DB::table('families')->where('id', $famNew)->first();
+        $this->assertFalse((bool)$updatedNew->contact_verified);
+        $this->assertFalse((bool)$updatedNew->whatsapp_verified);
+
+        // 4. Audit log entry recorded with actor, timestamp, source, counts
+        $audit = DB::table('audit_logs')
+            ->where('action', 'myskool_whatsapp_authorizations_carried_forward')
+            ->latest('id')
+            ->first();
+
+        $this->assertNotNull($audit);
+        $this->assertSame($data['superAdmin']->id, $audit->actor_id);
+        $meta = json_decode($audit->metadata, true);
+        $this->assertSame('Previous MySkool verification and messaging consent', $meta['source']);
+        $this->assertGreaterThanOrEqual(1, $meta['authorized_count']);
+        $this->assertArrayHasKey('excluded_reasons', $meta);
+
+        // 5. Artisan command dry-run and execution
+        $this->artisan('billing:carry-forward-myskool-authorizations --dry-run')
+            ->assertExitCode(0);
+    }
+
+    /**
+     * 21. Carrying forward WhatsApp authorization does NOT falsely grant verification to email.
+     */
+    public function test_carrying_forward_whatsapp_does_not_verify_unrelated_channels_like_email(): void
+    {
+        $data = $this->setupBillingData();
+        $myskoolImportDate = '2026-10-23 11:12:21';
+
+        $familyId = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-MS-EMAIL-TEST',
+            'guardian_name' => 'Guardian Email Test',
+            'email' => 'parent@example.test',
+            'whatsapp' => '+966599999999',
+            'contact_verified' => false,
+            'whatsapp_verified' => false,
+            'email_verified' => false,
+            'messaging_opt_in' => false,
+            'created_at' => $myskoolImportDate,
+            'updated_at' => $myskoolImportDate,
+        ]);
+
+        $service = app(MySkoolAuthorizationCarryForwardService::class);
+        $service->execute($data['superAdmin']->id, 'Testing channel verification separation');
+
+        $family = DB::table('families')->where('id', $familyId)->first();
+        $this->assertTrue((bool)$family->whatsapp_verified);
+        $this->assertTrue((bool)$family->messaging_opt_in);
+        $this->assertFalse((bool)$family->email_verified); // EMAIL MUST REMAIN UNVERIFIED!
+
+        // Eligible for WhatsApp
+        $whatsappEligibility = WebhookSettingService::evaluateContactEligibility($family, ['whatsapp']);
+        $this->assertNull($whatsappEligibility, 'WhatsApp should be eligible for delivery');
+
+        // NOT eligible for Email
+        $emailEligibility = WebhookSettingService::evaluateContactEligibility($family, ['email']);
+        $this->assertSame('Unverified contact', $emailEligibility, 'Email must not be falsely verified by WhatsApp authorization');
     }
 }
 

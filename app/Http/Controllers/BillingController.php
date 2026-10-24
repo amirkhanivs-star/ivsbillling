@@ -54,7 +54,7 @@ class BillingController {
   return view('students',['students'=>$q->orderBy('s.id')->paginate(25)->withQueryString()]);
  }
  public function showStudent(int $student){
-  $s=DB::table('students as s')->join('families as f','f.id','=','s.family_id')->where('s.id',$student)->select('s.*','f.family_code','f.guardian_name','f.email','f.whatsapp','f.contact_verified','f.messaging_opt_in')->first();
+  $s=DB::table('students as s')->join('families as f','f.id','=','s.family_id')->where('s.id',$student)->select('s.*','f.family_code','f.guardian_name','f.email','f.whatsapp','f.contact_verified','f.messaging_opt_in','f.whatsapp_verified','f.email_verified')->first();
   abort_unless($s,404);
   if(!in_array(auth()->user()->role,['super_admin','finance_admin'],true)){
    abort_unless(DB::table('enrollments')->where('student_id',$student)->where('campus_id',auth()->user()->campus_id)->when(auth()->user()->department_id,fn($q)=>$q->where('department_id',auth()->user()->department_id))->exists(),403);
@@ -196,7 +196,7 @@ class BillingController {
  }
  public function invoices(Request $r){
   $q=DB::table('invoices as i')->join('families as f','f.id','=','i.family_id')->join('departments as d','d.id','=','i.department_id')->join('billing_runs as b','b.id','=','i.billing_run_id')
-   ->select('i.*','f.family_code','f.whatsapp','f.email','f.contact_verified','f.messaging_opt_in','d.name as department_name','b.period_start')
+   ->select('i.*','f.family_code','f.whatsapp','f.email','f.contact_verified','f.messaging_opt_in','f.whatsapp_verified','f.email_verified','d.name as department_name','b.period_start')
    ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_status')
    ->selectSub(DB::table('notifications')->select('error')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_error')
    ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%email%')->orWhere('channels','like','%email%'))->orderByDesc('id')->limit(1),'email_status');
@@ -1534,11 +1534,16 @@ class BillingController {
    $optIn=false;
   }
 
+  $newWhatsappVerified = $phoneChanged ? ($verified && $optIn) : ($verified ?: (bool)($targetFamily->whatsapp_verified ?? false));
+  $newEmailVerified = $emailChanged ? $verified : ($verified ?: (bool)($targetFamily->email_verified ?? false));
+
   DB::table('families')->where('id',$family)->update([
    'guardian_name'=>$d['guardian_name']??$targetFamily->guardian_name,
    'email'=>$newEmail,
    'whatsapp'=>$newPhone,
    'contact_verified'=>$verified,
+   'whatsapp_verified'=>$newWhatsappVerified,
+   'email_verified'=>$newEmailVerified,
    'messaging_opt_in'=>$optIn,
    'updated_at'=>now(),
   ]);

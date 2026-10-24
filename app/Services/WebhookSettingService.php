@@ -280,14 +280,17 @@ class WebhookSettingService
         $wantsWhatsapp = in_array('whatsapp', $channels, true);
         $wantsEmail = in_array('email', $channels, true);
 
+        $whatsappVerified = !empty($family->whatsapp_verified) || !empty($family->contact_verified);
         $whatsappValid = $wantsWhatsapp
             && !empty($family->whatsapp)
-            && !empty($family->contact_verified)
+            && $whatsappVerified
             && !empty($family->messaging_opt_in);
 
+        // Explicit email verification required; carrying forward WhatsApp authorizations does NOT grant email verification
+        $emailVerified = !empty($family->email_verified);
         $emailValid = $wantsEmail
             && !empty($family->email)
-            && !empty($family->contact_verified);
+            && $emailVerified;
 
         if ($whatsappValid || $emailValid) {
             return null; // Eligible for delivery
@@ -298,7 +301,7 @@ class WebhookSettingService
             if (empty($family->whatsapp)) {
                 return 'WhatsApp missing';
             }
-            if (empty($family->contact_verified)) {
+            if (!$whatsappVerified) {
                 return 'Unverified contact';
             }
             if (empty($family->messaging_opt_in)) {
@@ -310,7 +313,7 @@ class WebhookSettingService
             if (empty($family->email)) {
                 return 'Email missing';
             }
-            if (empty($family->contact_verified)) {
+            if (!$emailVerified) {
                 return 'Unverified contact';
             }
         }
@@ -319,7 +322,7 @@ class WebhookSettingService
             $parts = [];
             if (empty($family->whatsapp)) {
                 $parts[] = 'WhatsApp missing';
-            } elseif (empty($family->contact_verified)) {
+            } elseif (!$whatsappVerified) {
                 $parts[] = 'WhatsApp unverified';
             } elseif (empty($family->messaging_opt_in)) {
                 $parts[] = 'WhatsApp consent not recorded';
@@ -327,7 +330,7 @@ class WebhookSettingService
 
             if (empty($family->email)) {
                 $parts[] = 'Email missing';
-            } elseif (empty($family->contact_verified) && !in_array('WhatsApp unverified', $parts, true)) {
+            } elseif (!$emailVerified) {
                 $parts[] = 'Email unverified';
             }
 

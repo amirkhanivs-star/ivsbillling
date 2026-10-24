@@ -80,6 +80,137 @@
         <span class="badge" style="background:#7367f0; color:#fff; font-size:11px; padding:4px 10px; border-radius:4px; font-weight:600;">Super Admin Only</span>
     </div>
 
+    {{-- SECTION: MYSKOOL WHATSAPP AUTHORIZATION CARRY-FORWARD --}}
+    @if(isset($carryForwardPreview))
+    <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:20px; margin-bottom:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
+            <div>
+                <h3 style="font-size:16px; font-weight:700; color:#1e293b; margin:0 0 4px 0;">
+                    Carry Forward Existing MySkool WhatsApp Authorizations
+                </h3>
+                <p class="muted" style="margin:0; font-size:12px; line-height:1.5;">
+                    <strong>Confirmed School Policy:</strong> Parents' WhatsApp numbers were previously verified in MySkool and had already agreed to receive school fee notices.
+                    Carry forward their pre-existing contact verification and messaging consent without requiring individual reverification of thousands of families.
+                </p>
+            </div>
+            @if($carryForwardPreview['eligible_to_authorize_count'] === 0)
+                <span class="badge-status badge-enabled" style="white-space:nowrap;">Authorizations Active</span>
+            @else
+                <span class="badge-status" style="background:#fef3c7; color:#92400e; white-space:nowrap;">Action Ready ({{ $carryForwardPreview['eligible_to_authorize_count'] }} Pending)</span>
+            @endif
+        </div>
+
+        {{-- Statistics Row --}}
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:16px;">
+            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:12px;">
+                <div style="font-size:11px; color:#64748b; font-weight:600; text-transform:uppercase;">Eligible to Authorize</div>
+                <div style="font-size:22px; font-weight:700; color:#166534; margin-top:2px;">
+                    {{ number_format($carryForwardPreview['eligible_to_authorize_count']) }}
+                    <span style="font-size:12px; font-weight:normal; color:#64748b;">families</span>
+                </div>
+                <div style="font-size:11px; color:#64748b; margin-top:2px;">Valid WhatsApp &amp; MySkool dataset</div>
+            </div>
+
+            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:12px;">
+                <div style="font-size:11px; color:#64748b; font-weight:600; text-transform:uppercase;">Already Authorized</div>
+                <div style="font-size:22px; font-weight:700; color:#0284c7; margin-top:2px;">
+                    {{ number_format($carryForwardPreview['already_authorized_count']) }}
+                    <span style="font-size:12px; font-weight:normal; color:#64748b;">families</span>
+                </div>
+                <div style="font-size:11px; color:#64748b; margin-top:2px;">Verified in portal</div>
+            </div>
+
+            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:12px;">
+                <div style="font-size:11px; color:#64748b; font-weight:600; text-transform:uppercase;">Excluded Families</div>
+                <div style="font-size:22px; font-weight:700; color:#991b1b; margin-top:2px;">
+                    {{ number_format($carryForwardPreview['excluded_counts']['total']) }}
+                    <span style="font-size:12px; font-weight:normal; color:#64748b;">families</span>
+                </div>
+                <div style="font-size:11px; color:#64748b; margin-top:2px;">Missing, invalid, or test records</div>
+            </div>
+
+            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:12px;">
+                <div style="font-size:11px; color:#64748b; font-weight:600; text-transform:uppercase;">Invoice Impact</div>
+                <div style="font-size:18px; font-weight:700; color:#7367f0; margin-top:2px;">
+                    {{ number_format($carryForwardPreview['invoice_impact']['before_eligible']) }} &rarr; <span style="color:#166534;">{{ number_format($carryForwardPreview['invoice_impact']['after_eligible']) }}</span>
+                </div>
+                <div style="font-size:11px; color:#64748b; margin-top:2px;">Eligible invoices for WhatsApp delivery</div>
+            </div>
+        </div>
+
+        {{-- Execution Form or Success Banner --}}
+        @if($carryForwardPreview['eligible_to_authorize_count'] > 0)
+            <form method="POST" action="{{ route('settings.webhooks.carry_forward') }}" style="background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:14px; margin-bottom:14px;">
+                @csrf
+                <input type="hidden" name="confirmation" value="CONFIRM_AUTHORIZATION">
+                <div style="display:flex; align-items:flex-start; gap:10px; margin-bottom:12px;">
+                    <input type="checkbox" id="confirm_carry_forward" name="confirm_carry_forward" value="1" required style="margin-top:3px;">
+                    <label for="confirm_carry_forward" style="font-size:12px; color:#92400e; font-weight:600; cursor:pointer;">
+                        I confirm that these {{ number_format($carryForwardPreview['eligible_to_authorize_count']) }} families originate from the approved final MySkool dataset, their WhatsApp numbers were previously verified, and messaging consent was continuously active.
+                    </label>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <button type="submit" class="btn" style="background:#166534; color:#fff; font-weight:600; padding:8px 18px;">
+                        Carry Forward MySkool WhatsApp Authorizations ({{ number_format($carryForwardPreview['eligible_to_authorize_count']) }} Families)
+                    </button>
+                    <span style="font-size:11px; color:#78350f;">
+                        🛡️ Zero financial ledger mutation · Preserves actual contact numbers · Independent review-and-confirm delivery
+                    </span>
+                </div>
+            </form>
+        @else
+            <div style="background:#dcfce7; border:1px solid #bbf7d0; border-radius:6px; padding:12px 16px; margin-bottom:14px; display:flex; justify-content:space-between; align-items:center;">
+                <div style="color:#166534; font-size:12px; font-weight:600;">
+                    ✅ All {{ number_format($carryForwardPreview['total_eligible_count']) }} eligible MySkool families have active WhatsApp authorizations! {{ number_format($carryForwardPreview['invoice_impact']['before_eligible']) }} invoices are ready for delivery review.
+                </div>
+                @if(!empty($carryForwardPreview['last_execution']))
+                    <span style="font-size:11px; color:#15803d;">
+                        Authorized on: {{ $carryForwardPreview['last_execution']['timestamp'] }}
+                    </span>
+                @endif
+            </div>
+        @endif
+
+        {{-- Collapsible Details for Excluded Families --}}
+        <details style="font-size:12px; color:#64748b; border-top:1px dashed #e2e8f0; padding-top:10px;">
+            <summary style="cursor:pointer; font-weight:600; color:#475569;">
+                View Breakdown of {{ $carryForwardPreview['excluded_counts']['total'] }} Excluded Families &amp; Safe Reasons
+            </summary>
+            <div style="margin-top:10px; display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px;">
+                <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:10px;">
+                    <strong style="color:#991b1b;">1. Missing WhatsApp Number ({{ $carryForwardPreview['excluded_counts']['missing_whatsapp'] }} families)</strong>
+                    <p style="font-size:11px; margin:4px 0 6px 0;">No phone number was recorded in the MySkool workbook. Requires phone number entry before verification.</p>
+                    <ul style="margin:0; padding-left:16px; font-size:11px;">
+                        @foreach($carryForwardPreview['excluded_samples']['missing_whatsapp'] as $sample)
+                            <li>Family #{{ $sample['id'] }} (Code: {{ $sample['family_code'] ?? 'None' }})</li>
+                        @endforeach
+                    </ul>
+                </div>
+
+                <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:10px;">
+                    <strong style="color:#991b1b;">2. Invalid WhatsApp Format ({{ $carryForwardPreview['excluded_counts']['invalid_whatsapp'] }} families)</strong>
+                    <p style="font-size:11px; margin:4px 0 6px 0;">Missing international country code (e.g. <code>+</code> prefix) or malformed digits:</p>
+                    <ul style="margin:0; padding-left:16px; font-size:11px;">
+                        @foreach($carryForwardPreview['excluded_samples']['invalid_whatsapp'] as $sample)
+                            <li>Family #{{ $sample['id'] }} (Code: {{ $sample['family_code'] }}): <code>{{ $sample['whatsapp'] }}</code></li>
+                        @endforeach
+                    </ul>
+                </div>
+
+                <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:10px;">
+                    <strong style="color:#991b1b;">3. Manual / New Admissions ({{ $carryForwardPreview['excluded_counts']['test_or_new_admission'] }} family)</strong>
+                    <p style="font-size:11px; margin:4px 0 6px 0;">Created after the MySkool batch import. Governed by normal admission verification workflow.</p>
+                    <ul style="margin:0; padding-left:16px; font-size:11px;">
+                        @foreach($carryForwardPreview['excluded_samples']['test_or_new_admission'] as $sample)
+                            <li>Family #{{ $sample['id'] }} (Code: {{ $sample['family_code'] }}): {{ $sample['guardian_name'] }}</li>
+                        @endforeach
+                    </ul>
+                </div>
+            </div>
+        </details>
+    </div>
+    @endif
+
     <div class="webhook-grid">
         {{-- PANEL 1: MONTHLY INVOICE WEBHOOK --}}
         <?php

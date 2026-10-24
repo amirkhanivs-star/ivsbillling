@@ -13,6 +13,8 @@ Route::get('/public/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invo
 Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/dashboard',[B::class,'dashboard']);Route::get('/settings/branding',[B::class,'branding']);Route::post('/settings/branding',[B::class,'saveBranding']);
  Route::get('/settings/webhooks',[\App\Http\Controllers\WebhookSettingsController::class,'index'])->name('settings.webhooks');
+ Route::post('/settings/webhooks/carry-forward',[\App\Http\Controllers\WebhookSettingsController::class,'carryForwardExecute'])->name('settings.webhooks.carry_forward');
+ Route::get('/settings/webhooks/carry-forward/preview',[\App\Http\Controllers\WebhookSettingsController::class,'carryForwardPreview'])->name('settings.webhooks.carry_forward.preview');
  Route::post('/settings/webhooks/{type}',[\App\Http\Controllers\WebhookSettingsController::class,'update'])->name('settings.webhooks.update');
  Route::post('/settings/webhooks/{type}/test',[\App\Http\Controllers\WebhookSettingsController::class,'test'])->name('settings.webhooks.test');
  Route::get('/manage-branches',[B::class,'campuses']);Route::post('/manage-branches',[B::class,'addCampus']);

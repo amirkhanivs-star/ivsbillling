@@ -2,13 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\MySkoolAuthorizationCarryForwardService;
 use App\Services\WebhookSettingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 
 class WebhookSettingsController
 {
-    public function __construct(protected WebhookSettingService $webhookService) {}
+    public function __construct(
+        protected WebhookSettingService $webhookService,
+        protected MySkoolAuthorizationCarryForwardService $carryForwardService
+    ) {}
 
     /**
      * Display the Webhook Settings dashboard for Super Admin.
@@ -19,8 +23,9 @@ class WebhookSettingsController
 
         $monthlySetting = $this->webhookService->getSettings('monthly');
         $paidSetting = $this->webhookService->getSettings('paid');
+        $carryForwardPreview = $this->carryForwardService->preview();
 
-        return view('settings.webhooks', compact('monthlySetting', 'paidSetting'));
+        return view('settings.webhooks', compact('monthlySetting', 'paidSetting', 'carryForwardPreview'));
     }
 
     /**
@@ -108,5 +113,44 @@ class WebhookSettingsController
         return redirect()->route('settings.webhooks')
             ->with($result['success'] ? 'notice' : 'error', $statusMsg)
             ->with('tested_webhook_type', $type);
+    }
+
+    /**
+     * Preview MySkool WhatsApp authorization carry-forward.
+     */
+    public function carryForwardPreview(Request $request)
+    {
+        abort_unless($request->user()->role === 'super_admin', 403, 'Unauthorized. Super Admin access required.');
+
+        $preview = $this->carryForwardService->preview();
+        if ($request->wantsJson()) {
+            return response()->json($preview);
+        }
+
+        return redirect()->route('settings.webhooks');
+    }
+
+    /**
+     * Execute one-time Super Admin bulk carry-forward of MySkool WhatsApp authorizations.
+     */
+    public function carryForwardExecute(Request $request)
+    {
+        abort_unless($request->user()->role === 'super_admin', 403, 'Unauthorized. Super Admin access required.');
+
+        $confirmation = $request->input('confirmation');
+        if ($confirmation !== 'CONFIRM_AUTHORIZATION' && !$request->boolean('confirm_carry_forward')) {
+            return redirect()->route('settings.webhooks')
+                ->withErrors(['carry_forward' => 'Explicit confirmation is required to carry forward MySkool authorizations.']);
+        }
+
+        $result = $this->carryForwardService->execute(
+            $request->user()->id,
+            $request->input('notes', 'Carried forward from Webhook Settings dashboard by Super Admin')
+        );
+
+        return redirect()->route('settings.webhooks')->with(
+            'notice',
+            "Successfully carried forward MySkool WhatsApp authorizations for {$result['authorized_count']} families! {$result['invoice_impact']['after_eligible']} invoices are now eligible for WhatsApp delivery."
+        );
     }
 }

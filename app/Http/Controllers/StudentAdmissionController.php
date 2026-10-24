@@ -214,12 +214,17 @@ class StudentAdmissionController
                 $finalVerified = (($emailChanged || $phoneChanged) && !$newVerified) ? false : $newVerified;
                 $finalOptIn = ($phoneChanged && !$newOptIn) ? false : $newOptIn;
 
+                $finalWhatsappVerified = $phoneChanged ? ($newVerified && $newOptIn) : ($newVerified ?: (bool)($curFamily->whatsapp_verified ?? false));
+                $finalEmailVerified = $emailChanged ? $newVerified : ($newVerified ?: (bool)($curFamily->email_verified ?? false));
+
                 DB::table('families')->where('id',$s->family_id)->update([
                     'family_code'=>$code,
                     'guardian_name'=>$d['guardian_name']??null,
                     'email'=>$d['family_email'],
                     'whatsapp'=>$d['family_whatsapp'],
                     'contact_verified'=>$finalVerified,
+                    'whatsapp_verified'=>$finalWhatsappVerified,
+                    'email_verified'=>$finalEmailVerified,
                     'messaging_opt_in'=>$finalOptIn,
                     'updated_at'=>now(),
                 ]);
@@ -346,6 +351,8 @@ class StudentAdmissionController
                     'email' => $existingFamily->email ?: $data['family_email'],
                     'whatsapp' => $existingFamily->whatsapp ?: $data['family_whatsapp'],
                     'contact_verified' => $existingFamily->contact_verified ?: $verified,
+                    'whatsapp_verified' => $existingFamily->whatsapp_verified ?: $verified,
+                    'email_verified' => $existingFamily->email_verified ?: $verified,
                     'messaging_opt_in' => $existingFamily->messaging_opt_in ?: $optIn,
                     'updated_at' => $now,
                 ]);
@@ -355,7 +362,10 @@ class StudentAdmissionController
             $familyId = $existingFamily?->id ?? DB::table('families')->insertGetId([
                 'family_code' => $code, 'guardian_name' => $data['guardian_name'] ?? ($data['father_name'] ?? null),
                 'email' => $data['family_email'], 'whatsapp' => $data['family_whatsapp'],
-                'contact_verified' => $verified, 'messaging_opt_in' => $optIn,
+                'contact_verified' => $verified,
+                'whatsapp_verified' => $verified,
+                'email_verified' => $verified,
+                'messaging_opt_in' => $optIn,
                 'created_at' => $now, 'updated_at' => $now,
             ]);
 
