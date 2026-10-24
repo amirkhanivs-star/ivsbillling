@@ -10,6 +10,7 @@ Route::post('/login',[AuthController::class,'login'])->middleware('guest')->midd
 Route::post('/logout',[AuthController::class,'logout'])->middleware('auth');
 Route::post('/webhook/n8n/callback',[B::class,'callback'])->name('n8n.callback')->middleware('throttle:120,1');
 Route::get('/public/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invoices.signed_pdf')->middleware('signed');
+Route::get('/public/families/{family}/challan/pdf',[B::class,'familyConsolidatedChallanPdf'])->name('families.signed_challan_pdf')->middleware('signed');
 Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/dashboard',[B::class,'dashboard']);Route::get('/settings/branding',[B::class,'branding']);Route::post('/settings/branding',[B::class,'saveBranding']);
  Route::get('/settings/webhooks',[\App\Http\Controllers\WebhookSettingsController::class,'index'])->name('settings.webhooks');
@@ -24,6 +25,9 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/manage-fee/catalog',[FC::class,'store']);Route::put('/manage-fee/catalog/{rate}',[FC::class,'update']);Route::delete('/manage-fee/catalog/{rate}',[FC::class,'destroy'])->name('fee.catalog.destroy');Route::delete('/manage-fee/types/{type}',[FC::class,'destroyType'])->name('fee.types.destroy');Route::post('/manage-fee/increment',[FC::class,'increment']);
  Route::get('/fee-creator',[B::class,'creator']);Route::post('/fee-creator',[B::class,'generate']);
  Route::get('/invoices',[B::class,'invoices']);Route::post('/invoices/send',[B::class,'approveSend']);
+ Route::get('/invoices/selection-snapshot',[B::class,'selectionSnapshot'])->name('invoices.selection_snapshot');
+ Route::post('/invoices/send-batch',[B::class,'approveSendBatch'])->name('invoices.send_batch');
+ Route::post('/invoices/batches/{batch}/retry-failed',[B::class,'retryBatchFailed'])->name('invoices.batches.retry_failed');
  Route::post('/invoices/notifications/{notification}/retry',[B::class,'retryNotification'])->name('invoices.notifications.retry');
  Route::post('/invoices/notifications/process-queue',[B::class,'processQueue'])->name('invoices.notifications.process_queue');
  Route::get('/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invoices.pdf');

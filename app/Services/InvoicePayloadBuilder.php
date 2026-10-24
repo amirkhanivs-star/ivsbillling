@@ -122,6 +122,11 @@ class InvoicePayloadBuilder
             $expiresAt,
             ['invoice' => $invoice->id]
         );
+        $consolidatedChallanUrl = URL::temporarySignedRoute(
+            'families.signed_challan_pdf',
+            $expiresAt,
+            ['family' => $family->id]
+        );
 
         $payload = [
             'event' => $eventType,
@@ -166,6 +171,7 @@ class InvoicePayloadBuilder
 
             'pdf_attachment' => [
                 'pdf_url' => $pdfUrl,
+                'consolidated_challan_url' => $consolidatedChallanUrl,
                 'suggested_filename' => "IQRA_Invoice_{$invoice->invoice_number}.pdf",
                 'expires_at' => $expiresAt->toIso8601String(),
             ],

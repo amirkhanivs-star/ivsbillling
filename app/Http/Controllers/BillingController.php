@@ -1,6 +1,8 @@
 <?php
 namespace App\Http\Controllers;
 use App\Jobs\DispatchInvoiceToN8n;
+use App\Jobs\DispatchBatchToN8n;
+use App\Services\BatchDeliveryService;
 use App\Services\InvoiceService;
 use App\Services\BillingPeriod;
 use App\Services\Money;
@@ -195,36 +197,48 @@ class BillingController {
   return redirect('/invoices')->with('notice',"Created {$result['created']} invoices across ".count($periods)." period(s); skipped {$result['skipped']} previously billed items. Nothing has been sent.");
  }
  public function invoices(Request $r){
-  $q=DB::table('invoices as i')->join('families as f','f.id','=','i.family_id')->join('departments as d','d.id','=','i.department_id')->join('billing_runs as b','b.id','=','i.billing_run_id')
+  $batchService = app(BatchDeliveryService::class);
+  $filters = [
+   'campus_id' => $r->query('campus_id'),
+   'department_id' => $r->query('department_id'),
+   'grade' => $r->query('grade'),
+   'period' => $r->query('period'),
+   'contact_status' => $r->query('contact_status', 'all'),
+   'payment_status' => $r->query('payment_status', 'all'),
+   'paid_only' => $r->boolean('paid_only'),
+   'webhook_type' => $r->boolean('paid_only') ? 'paid' : 'monthly',
+   'send_mode' => $r->query('send_mode'),
+  ];
+
+  $q = $batchService->buildFilterQuery($filters, $r->user())
    ->select('i.*','f.family_code','f.whatsapp','f.email','f.contact_verified','f.messaging_opt_in','f.whatsapp_verified','f.email_verified','d.name as department_name','b.period_start')
    ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_status')
    ->selectSub(DB::table('notifications')->select('error')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_error')
    ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%email%')->orWhere('channels','like','%email%'))->orderByDesc('id')->limit(1),'email_status');
-  if($dep=$r->query('department_id'))$q->where('i.department_id',$dep);
-  if($period=$r->query('period'))$q->where('b.period_start','like',$period.'%');
-  if($r->boolean('paid_only')){
-   $q->where(function($sub){
-    $sub->where('i.status','paid')->orWhere(function($sq){
-     $sq->where('i.total_minor','>',0)->whereColumn('i.paid_minor','>=','i.total_minor');
-    });
-   });
-  } else {
-   $q->where('i.status','!=','paid')->whereColumn('i.paid_minor','<','i.total_minor');
-  }
-  if($grade=$r->query('grade'))$q->whereExists(fn($sub)=>$sub->selectRaw('1')->from('invoice_items as fi')->join('enrollments as fe','fe.id','=','fi.enrollment_id')->whereColumn('fi.invoice_id','i.id')->where('fe.grade_label',$grade));
-  if(!in_array($r->user()->role,['super_admin','finance_admin'],true)){$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id));}
-  $page=$q->orderByDesc('i.id')->paginate(30)->withQueryString();
-  $ids=$page->getCollection()->pluck('id')->all();
-  $gradesByInvoice=collect();
+
+  $page = $q->orderByDesc('i.id')->paginate(30)->withQueryString();
+  $ids = $page->getCollection()->pluck('id')->all();
+  $gradesByInvoice = collect();
   if($ids)$gradesByInvoice=DB::table('invoice_items as item')->join('enrollments as en','en.id','=','item.enrollment_id')->whereIn('item.invoice_id',$ids)->whereNotNull('en.grade_label')->select('item.invoice_id','en.grade_label')->distinct()->get()->groupBy('invoice_id')->map(fn($rows)=>$rows->pluck('grade_label')->unique()->sort()->values()->all());
-  $grByInvoice=collect();
+  $grByInvoice = collect();
   if($ids)$grByInvoice=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')
    ->whereIn('item.invoice_id',$ids)->select('item.invoice_id','s.gr_number')->distinct()->get()
    ->groupBy('invoice_id')->map(fn($rows)=>$rows->pluck('gr_number')->filter()->unique()->sort()->values()->all());
-  $studentByInvoice=collect();
+  $studentByInvoice = collect();
   if($ids)$studentByInvoice=DB::table('invoice_items as item')->whereIn('item.invoice_id',$ids)->select('item.invoice_id','item.student_id')->distinct()->get()->groupBy('invoice_id')->map(fn($rows)=>(int)$rows->first()?->student_id);
-  $gradeOptions=DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
+  $gradeOptions = DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
+  $campuses = DB::table('campuses')->orderBy('name')->get();
   $queuedJobCount = DB::table('jobs')->where('queue', 'notifications')->count();
+
+  // Resolve server-side selection snapshot across ALL pages matching filters
+  $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
+
+  $recentBatches = DB::table('notification_batches as b')
+   ->leftJoin('users as u', 'u.id', '=', 'b.approved_by')
+   ->select('b.*', 'u.name as approver_name')
+   ->orderByDesc('b.id')
+   ->limit(10)
+   ->get();
 
   $recentNotifications=DB::table('notifications as n')
    ->join('invoices as i','i.id','=','n.invoice_id')
@@ -242,18 +256,120 @@ class BillingController {
   return view('invoices',[
    'invoices'=>$page,
    'departments'=>$this->basics($r)['departments'],
+   'campuses'=>$campuses,
    'gradesByInvoice'=>$gradesByInvoice,
    'grByInvoice'=>$grByInvoice,
    'studentByInvoice'=>$studentByInvoice,
    'queuedJobCount'=>$queuedJobCount,
    'gradeOptions'=>$gradeOptions,
    'recentNotifications'=>$recentNotifications,
+   'recentBatches'=>$recentBatches,
+   'selectionSnapshot'=>$selectionSnapshot,
+   'currentFilters'=>$filters,
    'monthlyWebhookSetting'=>$monthlyWebhookSetting,
    'paidWebhookSetting'=>$paidWebhookSetting,
   ]);
  }
+
+ public function selectionSnapshot(Request $r){
+  abort_if($r->user()->role==='auditor',403);
+  $batchService = app(BatchDeliveryService::class);
+  $filters = [
+   'campus_id' => $r->query('campus_id'),
+   'department_id' => $r->query('department_id'),
+   'grade' => $r->query('grade'),
+   'period' => $r->query('period'),
+   'contact_status' => $r->query('contact_status', 'all'),
+   'payment_status' => $r->query('payment_status', 'all'),
+   'paid_only' => $r->boolean('paid_only'),
+   'webhook_type' => $r->query('webhook_type', $r->boolean('paid_only') ? 'paid' : 'monthly'),
+   'send_mode' => $r->query('send_mode'),
+  ];
+  $channels = (array)$r->query('channels', ['whatsapp']);
+  $snapshot = $batchService->resolveFilteredSelection($filters, $r->user(), $channels);
+  return response()->json($snapshot);
+ }
+
+ public function approveSendBatch(Request $r){
+  abort_if($r->user()->role==='auditor',403);
+  $d=$r->validate([
+   'selection_mode'=>'required|in:page,all_matching',
+   'invoice_ids'=>'nullable|array',
+   'invoice_ids.*'=>'integer|exists:invoices,id',
+   'channels'=>'required|array|min:1',
+   'channels.*'=>'in:whatsapp,email',
+   'confirmed_grades'=>'required|array|min:1',
+   'confirmed_grades.*'=>'string|max:190',
+   'review_confirmed'=>'accepted',
+   'webhook_type'=>'nullable|in:monthly,paid',
+   'send_mode'=>'nullable|in:whatsapp,email',
+   'selected_grade'=>'nullable|string|max:190',
+   'campus_id'=>'nullable|integer',
+   'department_id'=>'nullable|integer',
+   'grade'=>'nullable|string|max:190',
+   'period'=>'nullable|string|max:20',
+   'contact_status'=>'nullable|in:all,eligible_only,ineligible_only',
+   'payment_status'=>'nullable|in:all,unpaid,partial,paid',
+  ]);
+
+  $webhookType=$d['webhook_type']??($r->boolean('paid_only')?'paid':'monthly');
+  $filters=[
+   'campus_id'=>$d['campus_id']??null,
+   'department_id'=>$d['department_id']??null,
+   'grade'=>$d['grade']??null,
+   'period'=>$d['period']??null,
+   'contact_status'=>$d['contact_status']??'all',
+   'payment_status'=>$d['payment_status']??'all',
+   'paid_only'=>($webhookType==='paid'),
+   'webhook_type'=>$webhookType,
+   'send_mode'=>$d['send_mode']??null,
+  ];
+
+  $explicitIds=null;
+  if($d['selection_mode']==='page'){
+   if(empty($d['invoice_ids'])){
+    throw \Illuminate\Validation\ValidationException::withMessages([
+     'invoice_ids'=>'Please select at least one invoice on the current page.',
+    ]);
+   }
+   $explicitIds=array_values(array_unique(array_map('intval',$d['invoice_ids'])));
+  }
+
+  $batchService=app(BatchDeliveryService::class);
+  try {
+   $result=$batchService->createAndDispatchBatch(
+    $filters,
+    $d['confirmed_grades'],
+    $d['channels'],
+    $r->user(),
+    $d['period']??null,
+    $explicitIds
+   );
+  } catch (\RuntimeException $e) {
+   throw \Illuminate\Validation\ValidationException::withMessages([
+    'invoice_ids'=>$e->getMessage(),
+   ]);
+  }
+
+  return back()->with('notice',$result['message']);
+ }
+
+ public function retryBatchFailed(Request $r, string $batch){
+  abort_if($r->user()->role==='auditor',403);
+  $batchService=app(BatchDeliveryService::class);
+  try {
+   $res=$batchService->retryFailedBatchRecipients($batch,$r->user());
+  } catch (\RuntimeException $e) {
+   return back()->withErrors(['batch'=>$e->getMessage()]);
+  }
+  return back()->with('notice',$res['message']);
+ }
+
  public function approveSend(Request $r){
   abort_if($r->user()->role==='auditor',403);
+  if($r->input('selection_mode')==='all_matching'){
+   return $this->approveSendBatch($r);
+  }
   $d=$r->validate([
    'invoice_ids'=>'required|array|min:1|max:50',
    'invoice_ids.*'=>'integer|exists:invoices,id',
@@ -1476,7 +1592,9 @@ class BillingController {
   $f = DB::table('families')->where('id', $family)->first();
   abort_unless($f, 404);
 
-  if (!in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
+  $isSigned = $r->hasValidSignature();
+  if (!$isSigned && !in_array($r->user()?->role, ['super_admin', 'finance_admin'], true)) {
+   abort_unless($r->user(), 401);
    $hasAccess = DB::table('enrollments as e')
     ->join('students as s', 's.id', '=', 'e.student_id')
     ->where('s.family_id', $family)
@@ -1496,9 +1614,11 @@ class BillingController {
    ->whereRaw('ii.net_minor > ii.paid_minor')
    ->whereNotIn('ii.status', ['voided', 'exempted', 'paid'])
    ->whereNotIn('i.status', ['void', 'voided', 'paid'])
-   ->when(!in_array($r->user()->role, ['super_admin', 'finance_admin'], true), function($q) use ($r) {
-    $q->where('i.campus_id', $r->user()->campus_id)
-      ->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id));
+   ->when(!$isSigned && !in_array($r->user()?->role, ['super_admin', 'finance_admin'], true), function($q) use ($r) {
+    if ($r->user()) {
+     $q->where('i.campus_id', $r->user()->campus_id)
+       ->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id));
+    }
    })
    ->select(
     'ii.*',
