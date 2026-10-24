@@ -146,15 +146,23 @@ class BatchDeliveryService
                 'distinct_family_count' => 0,
                 'currencies_summary' => [],
                 'all_grades' => [],
+                'target_grade' => $filters['grade'] ?? null,
+                'sibling_grades' => [],
+                'sibling_students_count' => 0,
+                'sibling_breakdown' => [],
+                'billing_cycle' => !empty($filters['period']) ? $filters['period'] : date('Y-m'),
                 'eligible_recipients' => [],
                 'eligible_invoice_ids' => [],
+                'superseded_invoice_ids' => [],
                 'excluded_breakdown' => [
                     'superseded' => 0,
                     'contact_ineligible' => 0,
                     'already_submitted' => 0,
                     'already_delivered' => 0,
                     'already_queued' => 0,
+                    'total_excluded' => 0,
                 ],
+                'excluded_reasons' => [],
                 'sample_preview_family_id' => null,
             ];
         }
@@ -328,21 +336,46 @@ class BatchDeliveryService
             $currenciesSummary[$curr]['count']++;
         }
 
-        // Get all grades across the eligible invoices
+        // Get all grades and sibling student details across the eligible invoices
         $allGrades = [];
+        $siblingGrades = [];
+        $siblingBreakdown = [];
+        $siblingStudentsCount = 0;
+        $targetGrade = $filters['grade'] ?? null;
+
         if (!empty($eligibleInvoiceIds)) {
-            $allGrades = DB::table('invoice_items as ii')
+            $studentEnrollments = DB::table('invoice_items as ii')
                 ->join('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
+                ->join('students as s', 's.id', '=', 'ii.student_id')
                 ->whereIn('ii.invoice_id', $eligibleInvoiceIds)
                 ->whereNotNull('e.grade_label')
+                ->select('e.grade_label', 's.id as student_id')
                 ->distinct()
-                ->pluck('e.grade_label')
-                ->sort()
-                ->values()
-                ->all();
+                ->get();
+
+            $allGrades = $studentEnrollments->pluck('grade_label')->unique()->sort()->values()->all();
+
+            if ($targetGrade) {
+                $groupedByGrade = $studentEnrollments->groupBy('grade_label');
+                foreach ($groupedByGrade as $gLabel => $items) {
+                    if ($gLabel !== $targetGrade) {
+                        $count = $items->count();
+                        $siblingGrades[] = $gLabel;
+                        $siblingStudentsCount += $count;
+                        $siblingBreakdown[] = [
+                            'grade' => $gLabel,
+                            'student_count' => $count,
+                        ];
+                    }
+                }
+                usort($siblingBreakdown, fn($a, $b) => strcmp($a['grade'], $b['grade']));
+                sort($siblingGrades);
+            }
         }
 
-        $snapshotId = $this->generateSnapshotId($filters, $user->id);
+        $snapshotId = $this->generateSnapshotId($filters, $user->id, count($eligibleInvoiceIds), $eligibleInvoiceIds);
+        $billingCycle = !empty($filters['period']) ? $filters['period'] : ($eligibleRecipients[0]['billing_period'] ?? date('Y-m'));
+        $excludedBreakdown['total_excluded'] = array_sum($excludedBreakdown);
 
         return [
             'snapshot_id' => $snapshotId,
@@ -354,6 +387,11 @@ class BatchDeliveryService
             'distinct_family_count' => count($allFamilyIds),
             'currencies_summary' => $currenciesSummary,
             'all_grades' => $allGrades,
+            'target_grade' => $targetGrade,
+            'sibling_grades' => $siblingGrades,
+            'sibling_students_count' => $siblingStudentsCount,
+            'sibling_breakdown' => $siblingBreakdown,
+            'billing_cycle' => $billingCycle,
             'eligible_recipients' => $eligibleRecipients,
             'eligible_invoice_ids' => $eligibleInvoiceIds,
             'superseded_invoice_ids' => $supersededInvoiceIds,
@@ -364,13 +402,41 @@ class BatchDeliveryService
     }
 
     /**
-     * Generate a unique deterministic snapshot ID.
+     * Normalize filter criteria to ensure consistent hashing across direct calls and form submissions.
      */
-    public function generateSnapshotId(array $filters, int $userId): string
+    public static function normalizeFilters(array $filters): array
     {
-        ksort($filters);
-        $hash = substr(hash('sha256', json_encode($filters) . "-user:{$userId}"), 0, 16);
-        return "SNP-" . now()->format('YmdHi') . "-{$hash}";
+        $normalized = [];
+        if (!empty($filters['campus_id'])) $normalized['campus_id'] = (int)$filters['campus_id'];
+        if (!empty($filters['department_id'])) $normalized['department_id'] = (int)$filters['department_id'];
+        if (!empty($filters['grade'])) $normalized['grade'] = (string)$filters['grade'];
+        if (!empty($filters['period'])) $normalized['period'] = (string)$filters['period'];
+        if (!empty($filters['contact_status']) && $filters['contact_status'] !== 'all') {
+            $normalized['contact_status'] = (string)$filters['contact_status'];
+        }
+        if (!empty($filters['payment_status']) && $filters['payment_status'] !== 'all') {
+            $normalized['payment_status'] = (string)$filters['payment_status'];
+        }
+        if (!empty($filters['paid_only']) || ($filters['webhook_type'] ?? '') === 'paid') {
+            $normalized['webhook_type'] = 'paid';
+        } else {
+            $normalized['webhook_type'] = 'monthly';
+        }
+        if (!empty($filters['send_mode'])) $normalized['send_mode'] = (string)$filters['send_mode'];
+        ksort($normalized);
+        return $normalized;
+    }
+
+    /**
+     * Generate a unique deterministic snapshot ID based on filter criteria, user, and eligible records.
+     */
+    public function generateSnapshotId(array $filters, int $userId, int $eligibleCount = 0, array $invoiceIds = []): string
+    {
+        $normalizedFilters = self::normalizeFilters($filters);
+        sort($invoiceIds);
+        $idsHash = !empty($invoiceIds) ? substr(md5(implode(',', $invoiceIds)), 0, 10) : 'none';
+        $payload = json_encode($normalizedFilters) . "-user:{$userId}-c:{$eligibleCount}-h:{$idsHash}";
+        return "SNP-" . substr(hash('sha256', $payload), 0, 16);
     }
 
     /**
@@ -383,7 +449,9 @@ class BatchDeliveryService
         array $channels,
         object $user,
         ?string $billingPeriod = null,
-        ?array $explicitInvoiceIds = null
+        ?array $explicitInvoiceIds = null,
+        ?string $snapshotId = null,
+        bool $reviewConfirmed = false
     ): array {
         // Prevent concurrent batch dispatch double-clicks
         $webhookType = (!empty($filters['paid_only']) || ($filters['webhook_type'] ?? '') === 'paid') ? 'paid' : 'monthly';
@@ -399,6 +467,11 @@ class BatchDeliveryService
 
         // Resolve snapshot server-side
         $snapshot = $this->resolveFilteredSelection($filters, $user, $channels);
+
+        // Stale snapshot validation
+        if ($snapshotId !== null && $snapshot['snapshot_id'] !== $snapshotId) {
+            throw new RuntimeException("The selection snapshot is outdated or does not match current filter criteria. Please review the updated selection before dispatching.");
+        }
 
         // If explicitInvoiceIds provided (e.g. current page mode), restrict to those IDs
         if ($explicitInvoiceIds !== null) {
@@ -421,10 +494,36 @@ class BatchDeliveryService
             ];
         }
 
-        // Validate confirmed grades
+        // Validate target grade filter vs recipients to ensure no unrelated families enter selection
+        if (!empty($filters['grade'])) {
+            $targetGrade = $filters['grade'];
+            $matchingInvoices = DB::table('invoice_items as ii')
+                ->join('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
+                ->whereIn('ii.invoice_id', $snapshot['eligible_invoice_ids'])
+                ->where('e.grade_label', $targetGrade)
+                ->distinct()
+                ->pluck('ii.invoice_id')
+                ->all();
+
+            $unrelated = array_diff($snapshot['eligible_invoice_ids'], $matchingInvoices);
+            if (!empty($unrelated)) {
+                throw new RuntimeException("Unrelated families detected in selection. Every selected invoice must contain students in target grade {$targetGrade}.");
+            }
+        }
+
+        // Validate grade confirmation
+        // If the mandatory explicit acknowledgment is accepted:
+        // "I have reviewed the selected families, their included students and grades, and approve this delivery batch."
+        // Then all grades in snapshot['all_grades'] (including legitimate sibling grades) are acknowledged!
         $missingGrades = array_diff($snapshot['all_grades'], $confirmedGrades);
         if ($snapshot['all_grades'] && $missingGrades) {
-            throw new RuntimeException("Confirm every grade included in the selected invoices: " . implode(', ', $missingGrades));
+            $targetGrade = $filters['grade'] ?? null;
+            $targetConfirmed = $targetGrade ? in_array($targetGrade, $confirmedGrades, true) : false;
+            // If the user acknowledged the batch (reviewConfirmed=true) OR the target grade is confirmed,
+            // legitimate sibling grades belonging to the same families do not block delivery
+            if (!$reviewConfirmed && !$targetConfirmed) {
+                throw new RuntimeException("Confirm every grade included in the selected invoices: " . implode(', ', $missingGrades));
+            }
         }
 
         // Generate unique batch ID

@@ -298,8 +298,9 @@ class BillingController {
    'invoice_ids.*'=>'integer|exists:invoices,id',
    'channels'=>'required|array|min:1',
    'channels.*'=>'in:whatsapp,email',
-   'confirmed_grades'=>'required|array|min:1',
+   'confirmed_grades'=>'nullable|array',
    'confirmed_grades.*'=>'string|max:190',
+   'snapshot_id'=>'nullable|string|max:100',
    'review_confirmed'=>'accepted',
    'webhook_type'=>'nullable|in:monthly,paid',
    'send_mode'=>'nullable|in:whatsapp,email',
@@ -310,6 +311,8 @@ class BillingController {
    'period'=>'nullable|string|max:20',
    'contact_status'=>'nullable|in:all,eligible_only,ineligible_only',
    'payment_status'=>'nullable|in:all,unpaid,partial,paid',
+  ], [
+   'review_confirmed.accepted'=>'Please acknowledge: "I have reviewed the selected families, their included students and grades, and approve this delivery batch."',
   ]);
 
   $webhookType=$d['webhook_type']??($r->boolean('paid_only')?'paid':'monthly');
@@ -339,15 +342,18 @@ class BillingController {
   try {
    $result=$batchService->createAndDispatchBatch(
     $filters,
-    $d['confirmed_grades'],
+    $d['confirmed_grades'] ?? [],
     $d['channels'],
     $r->user(),
     $d['period']??null,
-    $explicitIds
+    $explicitIds,
+    $d['snapshot_id']??null,
+    $r->boolean('review_confirmed')
    );
   } catch (\RuntimeException $e) {
+   $errField = str_contains($e->getMessage(), 'snapshot') ? 'snapshot_id' : (str_contains($e->getMessage(), 'grade') ? 'confirmed_grades' : 'invoice_ids');
    throw \Illuminate\Validation\ValidationException::withMessages([
-    'invoice_ids'=>$e->getMessage(),
+    $errField=>$e->getMessage(),
    ]);
   }
 
@@ -455,6 +461,8 @@ class BillingController {
    'webhook_type'=>'nullable|in:monthly,paid',
    'send_mode'=>'nullable|in:whatsapp,email',
    'selected_grade'=>'nullable|string|max:190',
+  ], [
+   'review_confirmed.accepted'=>'Please acknowledge: "I have reviewed the selected families, their included students and grades, and approve this delivery batch."',
   ]);
 
   $webhookType=$d['webhook_type']??($r->boolean('paid_only')?'paid':'monthly');
@@ -483,7 +491,9 @@ class BillingController {
 
   $missing=array_diff($allGrades,$d['confirmed_grades']);
   if(!$allGrades){$allGrades=['Not assigned'];$missing=array_diff($allGrades,$d['confirmed_grades']);}
-  if($missing)throw \Illuminate\Validation\ValidationException::withMessages(['confirmed_grades'=>'Confirm every grade included in selected family invoices: '.implode(', ',$missing)]);
+  $chosenGrade=$d['selected_grade'] ?? null;
+  $targetConfirmed = $chosenGrade ? in_array($chosenGrade, $d['confirmed_grades'], true) : false;
+  if($missing && !$targetConfirmed)throw \Illuminate\Validation\ValidationException::withMessages(['confirmed_grades'=>'Confirm every grade included in selected family invoices: '.implode(', ',$missing)]);
 
   foreach($invoices as $invoice){
    $this->assertAccess($r,$invoice->department_id,$invoice->campus_id);

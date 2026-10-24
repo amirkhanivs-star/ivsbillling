@@ -141,9 +141,9 @@
 
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             @if($selectedBatch && $stats['failed'] > 0)
-                <form method="post" action="{{ route('invoices.batches.retry_failed', $selectedBatch->batch_id) }}" style="margin:0;">
+                <form method="post" action="{{ route('invoices.batches.retry_failed', $selectedBatch->batch_id) }}" style="margin:0;" onsubmit="return confirm('Authorize retry for {{ $stats['failed'] }} failed recipient(s) in batch {{ $selectedBatch->batch_id }}? Successful and already-submitted recipients will NOT be resent.');">
                     @csrf
-                    <button class="btn" type="submit" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:700; padding:6px 14px; border-radius:4px; font-size:12px;">
+                    <button class="btn" type="submit" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:700; padding:6px 14px; border-radius:4px; font-size:12px; cursor:pointer;">
                         ⚡ Retry Failed Only ({{ $stats['failed'] }})
                     </button>
                 </form>

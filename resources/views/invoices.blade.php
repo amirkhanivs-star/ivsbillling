@@ -167,18 +167,29 @@
     </form>
 
     {{-- BOUNDED SELECTION SNAPSHOT CARD --}}
+    {{-- BOUNDED SELECTION SNAPSHOT & BATCH APPROVAL PREVIEW CARD --}}
     <div class="batch-snapshot-card" id="snapshot-summary-card">
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
             <div>
-                <h3 style="margin:0 0 4px 0; font-size:15px; color:#4c1d95;">
-                    Server-Side Batch Selection Snapshot
+                <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:#6d28d9;">
+                    Server-Side Batch Selection Snapshot &amp; Confirmation Preview
+                </div>
+                <h3 style="margin:4px 0 6px 0; font-size:16px; color:#1e1b4b; font-weight:800;">
+                    @if(!empty($selectionSnapshot['target_grade']))
+                        Selected Grade: <span style="background:#ede9fe; color:#5b21b6; padding:2px 8px; border-radius:4px;">{{ $selectionSnapshot['target_grade'] }}</span>
+                    @else
+                        Selected Grade: <span style="background:#f1f5f9; color:#334155; padding:2px 8px; border-radius:4px;">All Grades</span>
+                    @endif
+                    <span style="font-weight:400; font-size:13px; color:#64748b; margin-left:10px;">
+                        Billing Cycle: <strong>{{ $selectionSnapshot['billing_cycle'] ?? date('Y-m') }}</strong> · Pipeline: <strong>{{ request('paid_only') ? 'Paid Webhook' : 'Monthly Fee Webhook' }}</strong>
+                    </span>
                 </h3>
                 <p class="muted" style="margin:0; font-size:12px;">
-                    Consolidated across ALL matching pages for routine monthly delivery (1 latest challan per eligible recipient/cycle, including previous dues).
+                    Consolidated across ALL matching pages for routine monthly delivery (1 latest challan per eligible recipient/cycle, including previous unpaid dues).
                 </p>
             </div>
             @if(!empty($selectionSnapshot['sample_preview_family_id']))
-                <a href="{{ route('families.challan.pdf', $selectionSnapshot['sample_preview_family_id']) }}" target="_blank" rel="noopener" class="btn small" style="background:#ffffff; color:#6d28d9; border:1px solid #c4b5fd; font-weight:600;">
+                <a href="{{ route('families.challan.pdf', $selectionSnapshot['sample_preview_family_id']) }}" target="_blank" rel="noopener" class="btn small" style="background:#ffffff; color:#6d28d9; border:1px solid #c4b5fd; font-weight:700;">
                     📄 Preview Sample Consolidated Challan
                 </a>
             @endif
@@ -186,14 +197,14 @@
 
         <div class="batch-snapshot-grid">
             <div class="batch-stat-box">
-                <div class="batch-stat-label">Eligible Recipients</div>
-                <div class="batch-stat-val" style="color:#059669;">{{ number_format($selectionSnapshot['total_eligible_recipients']) }}</div>
-                <div style="font-size:10px; color:#64748b; margin-top:2px;">Distinct Delivery Targets</div>
+                <div class="batch-stat-label">Eligible Families</div>
+                <div class="batch-stat-val" style="color:#059669;">{{ number_format($selectionSnapshot['distinct_family_count']) }}</div>
+                <div style="font-size:10px; color:#64748b; margin-top:2px;">Sibling Groups Preserved</div>
             </div>
             <div class="batch-stat-box">
-                <div class="batch-stat-label">Distinct Families</div>
-                <div class="batch-stat-val">{{ number_format($selectionSnapshot['distinct_family_count']) }}</div>
-                <div style="font-size:10px; color:#64748b; margin-top:2px;">Sibling Groups Preserved</div>
+                <div class="batch-stat-label">Unique WhatsApp Recipients</div>
+                <div class="batch-stat-val" style="color:#059669;">{{ number_format($selectionSnapshot['total_eligible_recipients']) }}</div>
+                <div style="font-size:10px; color:#64748b; margin-top:2px;">Distinct Delivery Targets</div>
             </div>
             <div class="batch-stat-box">
                 <div class="batch-stat-label">Total Matched Invoices</div>
@@ -201,9 +212,9 @@
                 <div style="font-size:10px; color:#64748b; margin-top:2px;">Across all pagination pages</div>
             </div>
             <div class="batch-stat-box">
-                <div class="batch-stat-label">Excluded / Blocked / Superseded</div>
+                <div class="batch-stat-label">Excluded / Superseded</div>
                 <div class="batch-stat-val" style="color:#d97706;">
-                    {{ number_format(array_sum($selectionSnapshot['excluded_breakdown'])) }}
+                    {{ number_format($selectionSnapshot['excluded_breakdown']['total_excluded'] ?? array_sum($selectionSnapshot['excluded_breakdown'])) }}
                 </div>
                 <div style="font-size:10px; color:#64748b; margin-top:2px;">
                     {{ $selectionSnapshot['excluded_breakdown']['superseded'] }} superseded · 
@@ -212,14 +223,54 @@
                 </div>
             </div>
             <div class="batch-stat-box">
+                <div class="batch-stat-label">Notifications to Queue</div>
+                <div class="batch-stat-val" style="color:#7c3aed;">{{ number_format($selectionSnapshot['total_eligible_recipients']) }}</div>
+                <div style="font-size:10px; color:#64748b; margin-top:2px;">One Challan Per Eligible Family</div>
+            </div>
+            <div class="batch-stat-box">
                 <div class="batch-stat-label">Currency Breakdown</div>
-                <div style="font-size:13px; font-weight:700; color:#1e293b; margin-top:4px;">
+                <div style="font-size:12px; font-weight:700; color:#1e293b; margin-top:4px;">
                     @forelse($selectionSnapshot['currencies_summary'] as $curr => $cData)
                         <div>{{ $curr }} {{ \App\Services\Money::format($cData['outstanding_minor']) }} <span class="muted" style="font-size:10px;">({{ $cData['count'] }})</span></div>
                     @empty
                         <span class="muted">No dues</span>
                     @endforelse
                 </div>
+            </div>
+        </div>
+
+        {{-- SIBLING CONSOLIDATION & ALL GRADES SECTION --}}
+        <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:6px; padding:12px 16px; margin-top:14px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <strong style="color:#1e293b; font-size:13px;">Grades Represented in Final Consolidated Challans:</strong>
+                    <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; align-items:center;">
+                        @if(!empty($selectionSnapshot['target_grade']))
+                            <span style="background:#7c3aed; color:#fff; font-size:12px; font-weight:700; padding:3px 10px; border-radius:4px;">
+                                ★ Target Filter: {{ $selectionSnapshot['target_grade'] }}
+                            </span>
+                        @endif
+                        @if(!empty($selectionSnapshot['sibling_students_count']))
+                            <span style="background:#dbeafe; color:#1e40af; font-size:12px; font-weight:600; padding:3px 10px; border-radius:4px;">
+                                + {{ $selectionSnapshot['sibling_students_count'] }} Legitimate Sibling(s) across {{ count($selectionSnapshot['sibling_grades']) }} other grade(s)
+                            </span>
+                        @endif
+                    </div>
+                </div>
+                @if(!empty($selectionSnapshot['sibling_breakdown']))
+                    <details style="width:100%; margin-top:10px; cursor:pointer;">
+                        <summary style="font-size:12px; font-weight:600; color:#6d28d9; outline:none;">
+                            ▼ View additional sibling grades ({{ count($selectionSnapshot['sibling_grades']) }} grades, {{ $selectionSnapshot['sibling_students_count'] }} students)
+                        </summary>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; padding-top:8px; border-top:1px dashed #cbd5e1;">
+                            @foreach($selectionSnapshot['sibling_breakdown'] as $sib)
+                                <span style="background:#f1f5f9; color:#334155; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #e2e8f0;">
+                                    <strong>{{ $sib['grade'] }}</strong>: {{ $sib['student_count'] }} student{{ $sib['student_count'] > 1 ? 's' : '' }}
+                                </span>
+                            @endforeach
+                        </div>
+                    </details>
+                @endif
             </div>
         </div>
     </div>
@@ -235,6 +286,12 @@
         <input type="hidden" name="period" value="{{ request('period') }}">
         <input type="hidden" name="contact_status" value="{{ request('contact_status', 'all') }}">
         <input type="hidden" name="payment_status" value="{{ request('payment_status', 'all') }}">
+        <input type="hidden" name="snapshot_id" value="{{ $selectionSnapshot['snapshot_id'] }}">
+        <div id="confirmed-grades-container">
+            @foreach($selectionSnapshot['all_grades'] as $g)
+                <input type="hidden" name="confirmed_grades[]" value="{{ $g }}">
+            @endforeach
+        </div>
         @if(in_array(request('send_mode'),['whatsapp','email'],true))
             <input type="hidden" name="send_mode" value="{{ request('send_mode') }}">
             <input type="hidden" name="selected_grade" value="{{ request('grade') }}">
@@ -371,18 +428,27 @@
             </table>
         </div>
 
-        <div class="iq-confirm" id="send-preview" role="status" aria-live="polite" style="margin-top:14px;">
+        <div class="iq-confirm" id="send-preview" role="status" aria-live="polite" style="margin-top:14px; padding:12px 16px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; font-weight:600; color:#334155;">
             0 invoice(s) selected on this page. Select invoices or choose "Select All Matching Filters" to approve batch delivery.
         </div>
 
-        <div id="grade-confirmations" style="margin-top:10px;"></div>
+        <div class="batch-approval-card" style="background:#fdf4ff; border:1px solid #d8b4fe; border-radius:8px; padding:16px 20px; margin:20px 0;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                <span style="background:#7c3aed; color:#fff; font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px; text-transform:uppercase;">Mandatory Authorization</span>
+                <h4 style="margin:0; color:#581c87; font-size:14px; font-weight:700;">
+                    Review &amp; Batch Approval Acknowledgment
+                </h4>
+            </div>
+            <p style="margin:0 0 14px 0; font-size:12px; color:#6b21a8; line-height:1.5;">
+                One consolidated monthly challan will be queued per authorized family and currency for cycle <strong>{{ $selectionSnapshot['billing_cycle'] ?? date('Y-m') }}</strong>, carrying forward prior unpaid dues. Delivery throttling and message scheduling are handled securely by n8n.
+            </p>
+            <label style="display:flex; align-items:flex-start; gap:10px; font-weight:700; color:#3b0764; font-size:13px; cursor:pointer;">
+                <input type="checkbox" name="review_confirmed" id="review-confirmed-input" value="1" required style="width:18px; height:18px; margin-top:2px; accent-color:#7367f0;">
+                <span>I have reviewed the selected families, their included students and grades, and approve this delivery batch.</span>
+            </label>
+        </div>
 
-        <label style="display:block; margin:16px 0; font-size:13px; font-weight:600; cursor:pointer;">
-            <input type="checkbox" name="review_confirmed" value="1" required>
-            I reviewed the consolidated challans, included grades, and recipients, and approve queuing this batch for delivery to the {{ request('paid_only') ? 'Paid' : 'Monthly' }} Invoice Webhook.
-        </label>
-
-        <button class="btn purple" type="submit" id="btn-submit-send-bottom">
+        <button class="btn purple" type="submit" id="btn-submit-send-bottom" style="font-weight:700; font-size:14px; padding:10px 22px;">
             {{ request('paid_only') ? 'Confirm & Queue Paid Batch Delivery' : 'Confirm & Queue Monthly Batch Delivery' }}
         </button>
     </form>
@@ -600,48 +666,34 @@
     const boxes = [...document.querySelectorAll('.invoice-check')];
     const all = document.getElementById('invoice-select-all');
     const summary = document.getElementById('send-preview');
-    const out = document.getElementById('grade-confirmations');
     const form = document.getElementById('iq-send-form');
     const webhookType = form.querySelector('input[name="webhook_type"]').value;
     const modeInput = document.getElementById('selection-mode');
+    const reviewCheckbox = document.getElementById('review-confirmed-input');
+    const confirmedGradesContainer = document.getElementById('confirmed-grades-container');
 
     const btnScopePage = document.getElementById('btn-scope-page');
     const btnScopeAll = document.getElementById('btn-scope-all');
     const btnScopeClear = document.getElementById('btn-scope-clear');
 
-    // Server-resolved all-grades from snapshot
     const serverSnapshotGrades = @json($selectionSnapshot['all_grades'] ?? []);
     const serverTotalEligible = {{ (int)($selectionSnapshot['total_eligible_recipients'] ?? 0) }};
+    const targetGrade = @json($selectionSnapshot['target_grade'] ?? null);
+    const siblingCount = {{ (int)($selectionSnapshot['sibling_students_count'] ?? 0) }};
 
     let selectionMode = 'page'; // 'page' or 'all_matching'
 
-    function renderGradeConfirmations(gradesList) {
-        out.replaceChildren();
-        if (gradesList.length) {
-            const heading = document.createElement('strong');
-            heading.textContent = 'Confirm every grade in the selected delivery scope:';
-            out.append(heading);
-            gradesList.forEach(g => {
-                const label = document.createElement('label');
-                label.style.cssText = 'display:inline-flex;align-items:center;gap:5px;margin:8px 12px 4px 0;font-size:12px;font-weight:600;';
-                const checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.name = 'confirmed_grades[]';
-                checkbox.value = g;
-                checkbox.checked = true;
-                label.append(checkbox, document.createTextNode(g));
-                out.append(label);
-            });
-        } else {
-            const label = document.createElement('label');
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.name = 'confirmed_grades[]';
-            cb.value = 'Not assigned';
-            cb.checked = true;
-            label.append(cb, document.createTextNode(' Confirm invoices without assigned grade'));
-            out.append(label);
-        }
+    function setConfirmedGrades(gradesList) {
+        if (!confirmedGradesContainer) return;
+        confirmedGradesContainer.replaceChildren();
+        const list = gradesList.length ? gradesList : (serverSnapshotGrades.length ? serverSnapshotGrades : ['Not assigned']);
+        list.forEach(g => {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'confirmed_grades[]';
+            input.value = g;
+            confirmedGradesContainer.appendChild(input);
+        });
     }
 
     function update() {
@@ -649,8 +701,12 @@
             modeInput.value = 'all_matching';
             btnScopeAll.classList.add('active');
             btnScopePage.classList.remove('active');
-            summary.textContent = `All Matching Filters selected: ${serverTotalEligible} eligible recipients across all pagination pages ready for single-batch delivery.`;
-            renderGradeConfirmations(serverSnapshotGrades);
+            let gradeLabel = targetGrade ? `Target Grade: ${targetGrade}` : 'All Grades';
+            if (siblingCount > 0) {
+                gradeLabel += ` (+ ${siblingCount} siblings across other grades included)`;
+            }
+            summary.textContent = `All Matching Filters selected: ${serverTotalEligible} eligible families / WhatsApp recipients across all pages ready for batch delivery (${gradeLabel}).`;
+            setConfirmedGrades(serverSnapshotGrades);
             return;
         }
 
@@ -659,18 +715,14 @@
         btnScopeAll.classList.remove('active');
 
         const chosen = boxes.filter(b => b.checked);
-        const grades = [...new Set(chosen.flatMap(b => b.dataset.grades.split(' | ').filter(Boolean)))].sort();
+        const grades = [...new Set(chosen.flatMap(b => b.dataset.grades ? b.dataset.grades.split(' | ').filter(Boolean) : []))].sort();
 
         if (chosen.length) {
             summary.textContent = `${chosen.length} invoice(s) selected on this page: ${chosen.map(b => b.dataset.invoice + ' [' + (b.dataset.grades || 'unassigned grade') + ']').join(', ')}`;
+            setConfirmedGrades(grades);
         } else {
             summary.textContent = '0 invoice(s) selected on this page. Select invoices or choose "Select All Matching Filters" to approve batch delivery.';
-        }
-
-        if (chosen.length) {
-            renderGradeConfirmations(grades);
-        } else {
-            out.replaceChildren();
+            setConfirmedGrades(serverSnapshotGrades);
         }
     }
 
@@ -707,12 +759,18 @@
     });
 
     form.addEventListener('submit', e => {
-        const grades = [...out.querySelectorAll('input[name="confirmed_grades[]"]')];
         const channels = [...form.querySelectorAll('input[name="channels[]"]')].filter(c => c.checked).map(c => c.value);
 
         if (!channels.length) {
             e.preventDefault();
             alert('Please choose at least one delivery channel (WhatsApp or Email).');
+            return;
+        }
+
+        if (!reviewCheckbox || !reviewCheckbox.checked) {
+            e.preventDefault();
+            alert('Please acknowledge: "I have reviewed the selected families, their included students and grades, and approve this delivery batch."');
+            reviewCheckbox?.focus();
             return;
         }
 
@@ -722,17 +780,17 @@
                 alert('No eligible recipients match the applied filters.');
                 return;
             }
-            if (!grades.length || grades.some(b => !b.checked)) {
-                e.preventDefault();
-                alert('Confirm every included grade across all matching records before submitting.');
-                return;
-            }
 
             const promptMsg = webhookType === 'paid'
                 ? `Queue Paid Batch for ${serverTotalEligible} eligible recipients across ALL matching pages to the Paid Invoice Webhook?`
                 : `Queue Monthly Batch for ${serverTotalEligible} eligible recipients across ALL matching pages to the Monthly Invoice Webhook?`;
 
-            if (!confirm(`${promptMsg}\n\nChannels: ${channels.join(' and ')}\nGrades: ${grades.map(g => g.value).join(', ')}\n\nOne latest consolidated challan per recipient. Delivery delays handled inside n8n.`)) {
+            let gradeSummary = targetGrade ? `Target Grade: ${targetGrade}` : 'Scope: All Grades';
+            if (siblingCount > 0) {
+                gradeSummary += ` (+ ${siblingCount} siblings included from other grades)`;
+            }
+
+            if (!confirm(`${promptMsg}\n\nChannels: ${channels.join(' and ')}\nScope: ${gradeSummary}\n\nOne latest consolidated challan per family. Delivery delays handled inside n8n.`)) {
                 e.preventDefault();
             }
             return;
@@ -746,17 +804,11 @@
             return;
         }
 
-        if (!grades.length || grades.some(b => !b.checked)) {
-            e.preventDefault();
-            alert('Confirm every included grade before sending.');
-            return;
-        }
-
         const promptMsg = webhookType === 'paid'
-            ? `Send ${chosen.length} selected paid invoices to the Paid Invoice Webhook?`
-            : `Send ${chosen.length} selected monthly invoices to the Monthly Invoice Webhook?`;
+            ? `Send ${chosen.length} selected paid invoices on this page to the Paid Invoice Webhook?`
+            : `Send ${chosen.length} selected monthly invoices on this page to the Monthly Invoice Webhook?`;
 
-        if (!confirm(`${promptMsg}\n\nChannels: ${channels.join(' and ')}\nGrades: ${grades.map(g => g.value).join(', ')}\n\nReview the PDFs first. Sending requires verified recipients and consent.`)) {
+        if (!confirm(`${promptMsg}\n\nChannels: ${channels.join(' and ')}\n\nReview the PDFs first. Sending requires verified recipients and consent.`)) {
             e.preventDefault();
         }
     });

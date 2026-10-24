@@ -751,4 +751,169 @@ class InvoiceDeliveryQueueTest extends TestCase
         $this->assertSame($itemsBefore, $itemsAfter);
         $this->assertSame($paymentsBefore, $paymentsAfter);
     }
+
+    /**
+     * 13. Test Grade 4-A with siblings in other grades succeeds when legitimately approved.
+     */
+    public function test_grade_4a_with_siblings_in_other_grades_succeeds_when_approved(): void
+    {
+        $data = $this->setupTestData();
+        Queue::fake([DispatchBatchToN8n::class]);
+
+        // Family with Student 1 in Grade 4 - A
+        $f = $this->createFamilyWithInvoice($data, 9401, '4 - A');
+
+        // Add sibling in Grade 7 - A to the same invoice
+        $sibId = DB::table('students')->insertGetId([
+            'family_id' => $f['famId'],
+            'name' => 'Sibling 7A',
+            'gr_number' => 'GR-SIB-7A',
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $sibEnr = DB::table('enrollments')->insertGetId([
+            'student_id' => $sibId,
+            'campus_id' => $data['campus'],
+            'department_id' => $data['dept'],
+            'program_id' => $data['program'],
+            'grade_label' => '7 - A',
+            'currency' => 'SAR',
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('invoice_items')->insert([
+            'invoice_id' => $f['invId'],
+            'student_id' => $sibId,
+            'enrollment_id' => $sibEnr,
+            'period_key' => 'monthly:2026-10-01..2026-10-31',
+            'currency' => 'SAR',
+            'period_start' => '2026-10-01',
+            'period_end' => '2026-10-31',
+            'description' => 'Tuition Fee - Oct 2026',
+            'amount_minor' => 12000,
+            'net_minor' => 12000,
+            'paid_minor' => 0,
+            'status' => 'unpaid',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('invoices')->where('id', $f['invId'])->update(['total_minor' => 22000]);
+
+        // Resolve snapshot
+        $service = app(BatchDeliveryService::class);
+        $snapshot = $service->resolveFilteredSelection(['grade' => '4 - A'], $data['superAdmin'], ['whatsapp']);
+
+        $this->assertSame('4 - A', $snapshot['target_grade']);
+        $this->assertContains('7 - A', $snapshot['sibling_grades']);
+        $this->assertSame(1, $snapshot['sibling_students_count']);
+
+        // Post approval with review_confirmed = 1
+        $res = $this->actingAs($data['superAdmin'])->post('/invoices/send-batch', [
+            'selection_mode' => 'all_matching',
+            'channels' => ['whatsapp'],
+            'grade' => '4 - A',
+            'review_confirmed' => '1',
+            'snapshot_id' => $snapshot['snapshot_id'],
+            'confirmed_grades' => $snapshot['all_grades'],
+        ]);
+
+        $res->assertSessionHasNoErrors();
+        $res->assertRedirect();
+
+        // Notification created and queued
+        $notif = DB::table('notifications')->where('invoice_id', $f['invId'])->first();
+        $this->assertNotNull($notif);
+        $this->assertSame('queued', $notif->status);
+    }
+
+    /**
+     * 14. Test missing acknowledgment returns a helpful validation error.
+     */
+    public function test_missing_acknowledgment_returns_helpful_validation_error(): void
+    {
+        $data = $this->setupTestData();
+        Queue::fake([DispatchBatchToN8n::class]);
+
+        $f = $this->createFamilyWithInvoice($data, 9402, '4 - A');
+        $service = app(BatchDeliveryService::class);
+        $snapshot = $service->resolveFilteredSelection(['grade' => '4 - A'], $data['superAdmin'], ['whatsapp']);
+
+        // Submit without review_confirmed
+        $res = $this->actingAs($data['superAdmin'])->post('/invoices/send-batch', [
+            'selection_mode' => 'all_matching',
+            'channels' => ['whatsapp'],
+            'grade' => '4 - A',
+            'snapshot_id' => $snapshot['snapshot_id'],
+            'confirmed_grades' => $snapshot['all_grades'],
+        ]);
+
+        $res->assertSessionHasErrors('review_confirmed');
+        $errors = session('errors')->get('review_confirmed');
+        $this->assertStringContainsString('I have reviewed the selected families, their included students and grades, and approve this delivery batch.', $errors[0]);
+    }
+
+    /**
+     * 15. Test stale snapshots cannot be dispatched.
+     */
+    public function test_stale_snapshots_cannot_be_dispatched(): void
+    {
+        $data = $this->setupTestData();
+        Queue::fake([DispatchBatchToN8n::class]);
+
+        $this->createFamilyWithInvoice($data, 9403, '4 - A');
+
+        // Submit with an outdated/stale snapshot ID
+        $res = $this->actingAs($data['superAdmin'])->post('/invoices/send-batch', [
+            'selection_mode' => 'all_matching',
+            'channels' => ['whatsapp'],
+            'grade' => '4 - A',
+            'review_confirmed' => '1',
+            'snapshot_id' => 'SNP-STALE-OLD-SNAPSHOT-ID',
+            'confirmed_grades' => ['4 - A'],
+        ]);
+
+        $res->assertSessionHasErrors('snapshot_id');
+        $errors = session('errors')->get('snapshot_id');
+        $this->assertStringContainsString('The selection snapshot is outdated or does not match current filter criteria.', $errors[0]);
+    }
+
+    /**
+     * 16. Test unrelated families are strictly excluded from grade selection.
+     */
+    public function test_unrelated_families_are_excluded_from_grade_selection(): void
+    {
+        $data = $this->setupTestData();
+        Queue::fake([DispatchBatchToN8n::class]);
+
+        // Family 1: Grade 4 - A
+        $f1 = $this->createFamilyWithInvoice($data, 9404, '4 - A');
+
+        // Family 2: Grade 10th (FED) - A only (No student in 4 - A)
+        $f2 = $this->createFamilyWithInvoice($data, 9405, '10th (FED) - A');
+
+        $service = app(BatchDeliveryService::class);
+        $snapshot = $service->resolveFilteredSelection(['grade' => '4 - A'], $data['superAdmin'], ['whatsapp']);
+
+        $this->assertSame(1, $snapshot['total_eligible_recipients']);
+        $this->assertSame($f1['invId'], $snapshot['eligible_invoice_ids'][0]);
+        $this->assertNotContains($f2['invId'], $snapshot['eligible_invoice_ids']);
+
+        // Dispatch batch
+        $res = $this->actingAs($data['superAdmin'])->post('/invoices/send-batch', [
+            'selection_mode' => 'all_matching',
+            'channels' => ['whatsapp'],
+            'grade' => '4 - A',
+            'review_confirmed' => '1',
+            'snapshot_id' => $snapshot['snapshot_id'],
+            'confirmed_grades' => $snapshot['all_grades'],
+        ]);
+
+        $res->assertSessionHasNoErrors();
+
+        // Only Family 1 receives notification; Family 2 has zero notifications!
+        $this->assertDatabaseHas('notifications', ['invoice_id' => $f1['invId']]);
+        $this->assertDatabaseMissing('notifications', ['invoice_id' => $f2['invId']]);
+    }
 }
