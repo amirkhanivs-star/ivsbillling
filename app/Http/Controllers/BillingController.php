@@ -460,211 +460,308 @@ class BillingController {
 
   $createdItems=0;
   $skippedItems=0;
+  $paidDuplicatesCount=0;
+  $unpaidDuplicatesCount=0;
   $affectedInvoices=[];
 
-  DB::transaction(function() use ($d,$students,$family,$r,&$createdItems,&$skippedItems,&$affectedInvoices){
-   $year=(int)$d['year'];
-   $feeTypes=DB::table('fee_types')->whereIn('id',$d['fee_type_ids'])->get()->keyBy('id');
+  try {
+   DB::transaction(function() use ($d,$students,$family,$r,&$createdItems,&$skippedItems,&$paidDuplicatesCount,&$unpaidDuplicatesCount,&$affectedInvoices){
+    $year=(int)$d['year'];
+    $feeTypes=DB::table('fee_types')->whereIn('id',$d['fee_type_ids'])->get()->keyBy('id');
 
-   foreach($students as $student){
-    $this->assertAccess($r,$student->department_id,$student->campus_id);
-    $deptName=DB::table('departments')->where('id',$student->department_id)->value('name')?:'Department';
+    foreach($students as $student){
+     $this->assertAccess($r,$student->department_id,$student->campus_id);
+     $deptName=DB::table('departments')->where('id',$student->department_id)->value('name')?:'Department';
 
-    foreach($d['fee_type_ids'] as $ftId){
-     $feeType=$feeTypes->get($ftId);
-     if(!$feeType) continue;
+     foreach($d['fee_type_ids'] as $ftId){
+      $feeType=$feeTypes->get($ftId);
+      if(!$feeType) continue;
 
-     // Rule 4: One-time fee vs recurring monthly fee
-     $isOneTime=!in_array($feeType->code,['monthly','tuition'],true);
+      // Rule 4: One-time fee vs recurring monthly fee
+      $isOneTime=!in_array($feeType->code,['monthly','tuition'],true);
 
-     // Rule 1, 2, 3, 6: Rate resolution
-     $amountMinor=0;
-     $discountMinor=0;
+      // Rule 1, 2, 3, 6: Rate resolution
+      $amountMinor=0;
+      $discountMinor=0;
 
-     // Priority 1: Check student-specific active plan in fee_plan_items
-     $planItem=DB::table('fee_plan_items')
-      ->where('enrollment_id',$student->enrollment_id)
-      ->where('fee_type_id',$feeType->id)
-      ->where('is_active',true)
-      ->where('currency',$student->currency)
-      ->first();
-
-     if($planItem){
-      $amountMinor=(int)$planItem->amount_minor;
-      $discountMinor=\App\Services\Money::discount($amountMinor,$planItem->discount_kind,(int)$planItem->discount_value);
-     }elseif($feeType->code==='monthly' && !empty($student->monthly_fee_minor)){
-      $amountMinor=(int)$student->monthly_fee_minor;
-     }else{
-      // Priority 2: Check approved class catalog rate
-      $rate=DB::table('fee_catalog_rates')
+      // Priority 1: Check student-specific active plan in fee_plan_items
+      $planItem=DB::table('fee_plan_items')
+       ->where('enrollment_id',$student->enrollment_id)
        ->where('fee_type_id',$feeType->id)
-       ->where('department_id',$student->department_id)
-       ->where('class_label',$student->grade_label)
+       ->where('is_active',true)
        ->where('currency',$student->currency)
        ->first();
 
-      if($rate){
-       $amountMinor=(int)$rate->amount_minor;
-      }
-     }
-
-     // Rule 2 & 3: Never fall back to unrelated class/currency. Missing rate = clear error.
-     if($amountMinor<=0){
-      throw \Illuminate\Validation\ValidationException::withMessages([
-       'fee_type_ids'=>"No approved rate found for fee '{$feeType->name}' for student {$student->name} (GR {$student->gr_number}, Class: '{$student->grade_label}', Dept: {$deptName}, Currency: {$student->currency}). Configure this class rate in Fee Structure before generating fees."
-      ]);
-     }
-
-     // Determine target periods: one-time fee only bills once, monthly bills each selected month
-     $monthsToBill=$isOneTime?[ (int)reset($d['months']) ]:$d['months'];
-
-     foreach($monthsToBill as $m){
-      $month=(int)$m;
-      $periodStart=sprintf('%04d-%02d-01',$year,$month);
-      $periodEnd=date('Y-m-t',strtotime($periodStart));
-      $dueDate=sprintf('%04d-%02d-25',$year,$month);
-      $periodKey=$isOneTime?"one_time:{$feeType->code}:{$periodStart}":"monthly:{$periodStart}..{$periodEnd}";
-
-      // Rule 7: Prevent duplicate fee obligations in regular billing
-      $existsQuery=DB::table('invoice_items')
-       ->where('student_id',$student->id)
-       ->where('fee_type_id',$feeType->id)
-       ->where('status','!=','voided');
-
-      if($isOneTime){
-       $alreadyBilled=$existsQuery->exists();
+      if($planItem){
+       $amountMinor=(int)$planItem->amount_minor;
+       $discountMinor=\App\Services\Money::discount($amountMinor,$planItem->discount_kind,(int)$planItem->discount_value);
+      }elseif($feeType->code==='monthly' && !empty($student->monthly_fee_minor)){
+       $amountMinor=(int)$student->monthly_fee_minor;
       }else{
-       $alreadyBilled=$existsQuery->where('period_start',$periodStart)->exists();
-      }
-
-      if($alreadyBilled){
-       $skippedItems++;
-       continue;
-      }
-
-      // Rule 7: Prevent duplicate fee obligations already represented in opening balances
-      $obQuery=DB::table('invoice_items as ii')
-       ->join('invoices as inv','inv.id','=','ii.invoice_id')
-       ->join('billing_runs as br','br.id','=','inv.billing_run_id')
-       ->where('br.frequency','opening_balance')
-       ->where('ii.enrollment_id',$student->enrollment_id)
-       ->where('ii.fee_type_id',$feeType->id);
-
-      if($isOneTime){
-       $inHistorical=$obQuery->exists();
-      }else{
-       $inHistorical=$obQuery->where('ii.period_start',$periodStart)->exists();
-      }
-
-      if($inHistorical){
-       $skippedItems++;
-       continue;
-      }
-
-      // Rule 8 & 9: Find existing regular family invoice for this period. NEVER attach to opening balance invoices!
-      $invoice=DB::table('invoices as i')
-       ->join('billing_runs as b','b.id','=','i.billing_run_id')
-       ->where('i.family_id',$family->id)
-       ->where('i.department_id',$student->department_id)
-       ->where('i.campus_id',$student->campus_id)
-       ->where('i.currency',$student->currency)
-       ->where('b.frequency','!=','opening_balance')
-       ->where('b.period_start',$periodStart)
-       ->whereNotIn('i.status',['void','voided','paid'])
-       ->select('i.*')
-       ->lockForUpdate()
-       ->first();
-
-      if(!$invoice){
-       $billingRun=DB::table('billing_runs')
-        ->where('campus_id',$student->campus_id)
+       // Priority 2: Check approved class catalog rate
+       $rate=DB::table('fee_catalog_rates')
+        ->where('fee_type_id',$feeType->id)
         ->where('department_id',$student->department_id)
-        ->where('period_start',$periodStart)
-        ->where('frequency','!=','opening_balance')
-        ->where('frequency',$isOneTime?'one_time':'monthly')
+        ->where('class_label',$student->grade_label)
+        ->where('currency',$student->currency)
         ->first();
 
-       if(!$billingRun){
-        $runId=DB::table('billing_runs')->insertGetId([
+       if($rate){
+        $amountMinor=(int)$rate->amount_minor;
+       }
+      }
+
+      // Rule 2 & 3: Never fall back to unrelated class/currency. Missing rate = clear error.
+      if($amountMinor<=0){
+       throw \Illuminate\Validation\ValidationException::withMessages([
+        'fee_type_ids'=>"No approved rate found for fee '{$feeType->name}' for student {$student->name} (GR {$student->gr_number}, Class: '{$student->grade_label}', Dept: {$deptName}, Currency: {$student->currency}). Configure this class rate in Fee Structure before generating fees."
+       ]);
+      }
+
+      // Determine target periods: one-time fee only bills once, monthly bills each selected month
+      $monthsToBill=$isOneTime?[ (int)reset($d['months']) ]:$d['months'];
+
+      foreach($monthsToBill as $m){
+       $month=(int)$m;
+       $periodStart=sprintf('%04d-%02d-01',$year,$month);
+       $periodEnd=date('Y-m-t',strtotime($periodStart));
+       $dueDate=sprintf('%04d-%02d-25',$year,$month);
+       $periodKey=$isOneTime?"one_time:{$feeType->code}:{$periodStart}":"monthly:{$periodStart}..{$periodEnd}";
+
+       // Rule 7: Prevent duplicate fee obligations in regular billing
+       $existsQuery=DB::table('invoice_items as ii')
+        ->join('invoices as inv','inv.id','=','ii.invoice_id')
+        ->where('ii.student_id',$student->id)
+        ->where('ii.fee_type_id',$feeType->id)
+        ->where('ii.status','!=','voided')
+        ->whereNotIn('inv.status',['void','voided']);
+
+       if($isOneTime){
+        $alreadyBilledItems=$existsQuery->select('ii.*','inv.status as invoice_status','inv.paid_minor as inv_paid','inv.total_minor as inv_total')->get();
+       }else{
+        $alreadyBilledItems=$existsQuery->where('ii.period_start',$periodStart)
+         ->select('ii.*','inv.status as invoice_status','inv.paid_minor as inv_paid','inv.total_minor as inv_total')->get();
+       }
+
+       if($alreadyBilledItems->isNotEmpty()){
+        $skippedItems++;
+        $hasConfirmedPayment=false;
+        foreach($alreadyBilledItems as $it){
+         if((int)$it->paid_minor > 0 || $it->invoice_status === 'paid' || ((int)$it->inv_total > 0 && (int)$it->inv_paid >= (int)$it->inv_total)){
+          $hasConfirmedPayment=true;
+          break;
+         }
+        }
+        if($hasConfirmedPayment){
+         $paidDuplicatesCount++;
+        }else{
+         $unpaidDuplicatesCount++;
+        }
+        continue;
+       }
+
+       // Rule 7: Prevent duplicate fee obligations already represented in opening balances
+       $obQuery=DB::table('invoice_items as ii')
+        ->join('invoices as inv','inv.id','=','ii.invoice_id')
+        ->join('billing_runs as br','br.id','=','inv.billing_run_id')
+        ->where('br.frequency','opening_balance')
+        ->where('ii.enrollment_id',$student->enrollment_id)
+        ->where('ii.fee_type_id',$feeType->id)
+        ->where('ii.status','!=','voided')
+        ->whereNotIn('inv.status',['void','voided']);
+
+       if($isOneTime){
+        $inHistoricalItems=$obQuery->select('ii.*','inv.status as invoice_status')->get();
+       }else{
+        $inHistoricalItems=$obQuery->where('ii.period_start',$periodStart)
+         ->select('ii.*','inv.status as invoice_status')->get();
+       }
+
+       if($inHistoricalItems->isNotEmpty()){
+        $skippedItems++;
+        $hasConfirmedPayment=false;
+        foreach($inHistoricalItems as $it){
+         if((int)$it->paid_minor > 0 || $it->invoice_status === 'paid'){
+          $hasConfirmedPayment=true;
+          break;
+         }
+        }
+        if($hasConfirmedPayment){
+         $paidDuplicatesCount++;
+        }else{
+         $unpaidDuplicatesCount++;
+        }
+        continue;
+       }
+
+       // Rule 8 & 9: Find existing regular family invoice for this period. NEVER attach to opening balance invoices!
+       $invoice=DB::table('invoices as i')
+        ->join('billing_runs as b','b.id','=','i.billing_run_id')
+        ->where('i.family_id',$family->id)
+        ->where('i.department_id',$student->department_id)
+        ->where('i.campus_id',$student->campus_id)
+        ->where('i.currency',$student->currency)
+        ->where('b.frequency','!=','opening_balance')
+        ->where('b.period_start',$periodStart)
+        ->whereNotIn('i.status',['void','voided','paid'])
+        ->select('i.*')
+        ->lockForUpdate()
+        ->first();
+
+       if(!$invoice){
+        $existingPaidInvoice=DB::table('invoices as i')
+         ->join('billing_runs as b','b.id','=','i.billing_run_id')
+         ->where('i.family_id',$family->id)
+         ->where('i.department_id',$student->department_id)
+         ->where('i.campus_id',$student->campus_id)
+         ->where('i.currency',$student->currency)
+         ->where('b.frequency','!=','opening_balance')
+         ->where('b.period_start',$periodStart)
+         ->where('i.status','paid')
+         ->first();
+
+        if($existingPaidInvoice){
+         $paidDuplicatesCount++;
+         $skippedItems++;
+         continue;
+        }
+
+        $billingRun=DB::table('billing_runs')
+         ->where('campus_id',$student->campus_id)
+         ->where('department_id',$student->department_id)
+         ->where('period_start',$periodStart)
+         ->where('frequency','!=','opening_balance')
+         ->where('frequency',$isOneTime?'one_time':'monthly')
+         ->first();
+
+        if(!$billingRun){
+         $runId=DB::table('billing_runs')->insertGetId([
+          'campus_id'=>$student->campus_id,
+          'department_id'=>$student->department_id,
+          'frequency'=>$isOneTime?'one_time':'monthly',
+          'period_key'=>$periodKey,
+          'period_start'=>$periodStart,
+          'period_end'=>$periodEnd,
+          'due_date'=>$dueDate,
+          'status'=>'generated',
+          'created_by'=>$r->user()->id,
+          'created_at'=>now(),
+          'updated_at'=>now(),
+         ]);
+        }else{
+         $runId=$billingRun->id;
+        }
+
+        $existingRunInvoice=DB::table('invoices')
+         ->where('billing_run_id',$runId)
+         ->where('family_id',$family->id)
+         ->where('currency',$student->currency)
+         ->lockForUpdate()
+         ->first();
+
+        if($existingRunInvoice){
+         if($existingRunInvoice->status==='paid' || ((int)$existingRunInvoice->total_minor > 0 && (int)$existingRunInvoice->paid_minor >= (int)$existingRunInvoice->total_minor)){
+          $paidDuplicatesCount++;
+         }else{
+          $unpaidDuplicatesCount++;
+         }
+         $skippedItems++;
+         continue;
+        }
+
+        $deptCode=DB::table('departments')->where('id',$student->department_id)->value('code')?:'SCH';
+        $invoiceId=DB::table('invoices')->insertGetId([
+         'billing_run_id'=>$runId,
+         'family_id'=>$family->id,
          'campus_id'=>$student->campus_id,
          'department_id'=>$student->department_id,
-         'frequency'=>$isOneTime?'one_time':'monthly',
-         'period_key'=>$periodKey,
-         'period_start'=>$periodStart,
-         'period_end'=>$periodEnd,
+         'currency'=>$student->currency,
+         'invoice_number'=>'PENDING-'.\Illuminate\Support\Str::uuid(),
+         'issued_on'=>now()->toDateString(),
          'due_date'=>$dueDate,
+         'total_minor'=>0,
+         'paid_minor'=>0,
+         'previous_dues_snapshot_minor'=>0,
          'status'=>'generated',
-         'created_by'=>$r->user()->id,
          'created_at'=>now(),
          'updated_at'=>now(),
         ]);
-       }else{
-        $runId=$billingRun->id;
+        DB::table('invoices')->where('id',$invoiceId)->update([
+         'invoice_number'=>strtoupper(substr($deptCode,0,3)).'-'.date('Y').'-'.str_pad((string)$invoiceId,7,'0',STR_PAD_LEFT),
+        ]);
+        $invoice=DB::table('invoices')->where('id',$invoiceId)->first();
        }
 
-       $deptCode=DB::table('departments')->where('id',$student->department_id)->value('code')?:'SCH';
-       $invoiceId=DB::table('invoices')->insertGetId([
-        'billing_run_id'=>$runId,
-        'family_id'=>$family->id,
-        'campus_id'=>$student->campus_id,
-        'department_id'=>$student->department_id,
+       $netMinor=max(0,$amountMinor-$discountMinor);
+
+       DB::table('invoice_items')->insert([
+        'invoice_id'=>$invoice->id,
+        'student_id'=>$student->id,
+        'enrollment_id'=>$student->enrollment_id,
+        'fee_plan_item_id'=>$planItem?->id,
+        'fee_type_id'=>$feeType->id,
+        'description'=>$feeType->name,
+        'period_key'=>$periodKey,
+        'period_start'=>$periodStart,
+        'period_end'=>$periodEnd,
         'currency'=>$student->currency,
-        'invoice_number'=>'PENDING-'.\Illuminate\Support\Str::uuid(),
-        'issued_on'=>now()->toDateString(),
-        'due_date'=>$dueDate,
-        'total_minor'=>0,
+        'amount_minor'=>$amountMinor,
+        'discount_minor'=>$discountMinor,
+        'net_minor'=>$netMinor,
         'paid_minor'=>0,
-        'previous_dues_snapshot_minor'=>0,
-        'status'=>'generated',
+        'status'=>'active',
         'created_at'=>now(),
         'updated_at'=>now(),
        ]);
-       DB::table('invoices')->where('id',$invoiceId)->update([
-        'invoice_number'=>strtoupper(substr($deptCode,0,3)).'-'.date('Y').'-'.str_pad((string)$invoiceId,7,'0',STR_PAD_LEFT),
-       ]);
-       $invoice=DB::table('invoices')->where('id',$invoiceId)->first();
+
+       $createdItems++;
+       $affectedInvoices[$invoice->id]=[
+        'invoice_id'=>$invoice->id,
+        'family_id'=>$family->id,
+        'currency'=>$student->currency,
+        'department_id'=>$student->department_id,
+        'campus_id'=>$student->campus_id,
+       ];
       }
-
-      $netMinor=max(0,$amountMinor-$discountMinor);
-
-      DB::table('invoice_items')->insert([
-       'invoice_id'=>$invoice->id,
-       'student_id'=>$student->id,
-       'enrollment_id'=>$student->enrollment_id,
-       'fee_plan_item_id'=>$planItem?->id,
-       'fee_type_id'=>$feeType->id,
-       'description'=>$feeType->name,
-       'period_key'=>$periodKey,
-       'period_start'=>$periodStart,
-       'period_end'=>$periodEnd,
-       'currency'=>$student->currency,
-       'amount_minor'=>$amountMinor,
-       'discount_minor'=>$discountMinor,
-       'net_minor'=>$netMinor,
-       'paid_minor'=>0,
-       'status'=>'active',
-       'created_at'=>now(),
-       'updated_at'=>now(),
-      ]);
-
-      $createdItems++;
-      $affectedInvoices[$invoice->id]=[
-       'invoice_id'=>$invoice->id,
-       'family_id'=>$family->id,
-       'currency'=>$student->currency,
-       'department_id'=>$student->department_id,
-       'campus_id'=>$student->campus_id,
-      ];
      }
     }
-   }
 
-   $invoiceSvc=new \App\Services\InvoiceService();
-   foreach($affectedInvoices as $invData){
-    $invoiceSvc->refreshInvoice($invData['invoice_id']);
-    $invoiceSvc->allocatePrepayments($invData['family_id'],$invData['currency'],$invData['department_id'],$invData['campus_id']);
+    if($createdItems===0){
+     $friendlyMsg=($paidDuplicatesCount>0)
+      ?'Payment has already been received for this fee and period.'
+      :'An invoice has already been generated for this fee and period.';
+     $ve=\Illuminate\Validation\ValidationException::withMessages([
+      'fee_type_ids'=>$friendlyMsg,
+     ]);
+     $ve->redirectTo=url()->previous()?:('/challan?family='.urlencode($family->family_code?:(string)$family->id));
+     throw $ve;
+    }
+
+    $invoiceSvc=new \App\Services\InvoiceService();
+    foreach($affectedInvoices as $invData){
+     $invoiceSvc->refreshInvoice($invData['invoice_id']);
+     $invoiceSvc->allocatePrepayments($invData['family_id'],$invData['currency'],$invData['department_id'],$invData['campus_id']);
+    }
+   });
+  } catch (\Illuminate\Validation\ValidationException $ve) {
+   throw $ve;
+  } catch (\Illuminate\Database\QueryException $qe) {
+   if ($this->isInvoiceUniqueCollision($qe)) {
+    \Illuminate\Support\Facades\Log::info("Handled invoice unique constraint collision for family {$family->id}: {$qe->getMessage()}");
+    $friendlyMsg=$this->determineDuplicateFeeMessage((int)$family->id, $d);
+    $ve=\Illuminate\Validation\ValidationException::withMessages([
+     'fee_type_ids'=>$friendlyMsg,
+    ]);
+    $ve->redirectTo=url()->previous()?:('/challan?family='.urlencode($family->family_code?:(string)$family->id));
+    throw $ve;
    }
-  });
+   \Illuminate\Support\Facades\Log::error("Database error in createChallanFee: {$qe->getMessage()}", [
+    'family_id'=>$family->id,
+    'input'=>$d,
+    'exception'=>$qe,
+   ]);
+   throw $qe;
+  }
 
   if($r->wantsJson()){
    return response()->json([
@@ -677,6 +774,106 @@ class BillingController {
 
   return redirect('/challan?family='.urlencode($family->family_code?:(string)$family->id))
    ->with('notice',"Created {$createdItems} fee obligation(s)".($skippedItems>0?" ({$skippedItems} duplicates skipped)":"").".");
+ }
+
+ protected function isInvoiceUniqueCollision(\Throwable $e): bool {
+  $msg = $e->getMessage();
+  if (str_contains($msg, 'invoices_billing_run_id_family_id_currency_unique')) {
+   return true;
+  }
+  if (str_contains($msg, 'invoices.billing_run_id') && str_contains($msg, 'invoices.family_id')) {
+   return true;
+  }
+  $isUnique = ($e instanceof \Illuminate\Database\UniqueConstraintViolationException)
+   || (isset($e->errorInfo[1]) && in_array((int)$e->errorInfo[1], [1062, 19, 2067], true))
+   || str_contains($msg, 'Duplicate entry')
+   || str_contains($msg, 'UNIQUE constraint failed');
+
+  return $isUnique && (str_contains($msg, 'invoices') || str_contains($msg, 'invoice_items'));
+ }
+
+ protected function determineDuplicateFeeMessage(int $familyId, array $d): string {
+  $year = (int)$d['year'];
+  $months = $d['months'];
+  $feeTypeIds = $d['fee_type_ids'];
+  $studentIds = !empty($d['student_ids']) ? $d['student_ids'] : null;
+
+  $isPaid = false;
+
+  // 1. Check regular invoice items for this family, fee type, period
+  $itemsQuery = DB::table('invoice_items as ii')
+   ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+   ->where('inv.family_id', $familyId)
+   ->whereIn('ii.fee_type_id', $feeTypeIds)
+   ->where('ii.status', '!=', 'voided')
+   ->whereNotIn('inv.status', ['void', 'voided']);
+
+  if (!empty($studentIds)) {
+   $itemsQuery->whereIn('ii.student_id', $studentIds);
+  }
+
+  $periodStarts = array_map(fn($m) => sprintf('%04d-%02d-01', $year, (int)$m), $months);
+  $items = $itemsQuery->where(function($q) use ($periodStarts) {
+   $q->whereIn('ii.period_start', $periodStarts)
+     ->orWhere('ii.period_key', 'LIKE', 'one_time:%');
+  })->select('ii.paid_minor', 'ii.net_minor', 'inv.status as invoice_status', 'inv.paid_minor as inv_paid', 'inv.total_minor as inv_total')->get();
+
+  foreach ($items as $item) {
+   if ((int)$item->paid_minor > 0 || $item->invoice_status === 'paid' || ((int)$item->inv_total > 0 && (int)$item->inv_paid >= (int)$item->inv_total)) {
+    $isPaid = true;
+    break;
+   }
+  }
+
+  // 2. Check if regular family invoice for this billing run period is marked paid
+  if (!$isPaid) {
+   $invoices = DB::table('invoices as inv')
+    ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
+    ->where('inv.family_id', $familyId)
+    ->where('br.frequency', '!=', 'opening_balance')
+    ->whereIn('br.period_start', $periodStarts)
+    ->whereNotIn('inv.status', ['void', 'voided'])
+    ->select('inv.status', 'inv.paid_minor', 'inv.total_minor')
+    ->get();
+
+   foreach ($invoices as $inv) {
+    if ($inv->status === 'paid' || ((int)$inv->total_minor > 0 && (int)$inv->paid_minor >= (int)$inv->total_minor)) {
+     $isPaid = true;
+     break;
+    }
+   }
+  }
+
+  // 3. Check historical opening balances
+  if (!$isPaid) {
+   $obItems = DB::table('invoice_items as ii')
+    ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+    ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
+    ->where('br.frequency', 'opening_balance')
+    ->where('inv.family_id', $familyId)
+    ->whereIn('ii.fee_type_id', $feeTypeIds)
+    ->where('ii.status', '!=', 'voided')
+    ->whereNotIn('inv.status', ['void', 'voided'])
+    ->where(function($q) use ($periodStarts) {
+     $q->whereIn('ii.period_start', $periodStarts)
+       ->orWhere('ii.period_key', 'LIKE', 'one_time:%');
+    })
+    ->select('ii.paid_minor', 'inv.status as invoice_status')
+    ->get();
+
+   foreach ($obItems as $ob) {
+    if ((int)$ob->paid_minor > 0 || $ob->invoice_status === 'paid') {
+     $isPaid = true;
+     break;
+    }
+   }
+  }
+
+  if ($isPaid) {
+   return 'Payment has already been received for this fee and period.';
+  }
+
+  return 'An invoice has already been generated for this fee and period.';
  }
  public function receive(Request $r,ReceivePaymentService $svc){
   if($r->filled('ledger_scope')){

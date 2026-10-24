@@ -79,7 +79,7 @@
             </form>
 
             {{-- CREATE FEE PANEL (Enhanced with All 8 Fee Types, Rates & Live Preview) --}}
-            <div id="create-fee-panel" class="create-fee-panel" style="display: none;">
+            <div id="create-fee-panel" class="create-fee-panel" style="{{ ($errors->has('fee_type_ids') || $errors->has('student_ids') || old('family_id')) ? 'display: block;' : 'display: none;' }}">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
                     <div>
                         <h3 style="margin: 0; font-size: 15px; color: #5e5873; font-weight: 600;">Create Fee Obligation</h3>
@@ -99,6 +99,19 @@
                     <form method="post" action="{{ route('challan.create_fee') }}" id="form-create-fee">
                         @csrf
                         <input type="hidden" name="family_id" value="{{ $family->id }}">
+
+                        @if($errors->has('fee_type_ids'))
+                            <div style="background: #fef2f2; border: 1px solid #f87171; border-radius: 4px; padding: 10px 14px; margin-bottom: 14px; color: #b91c1c; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 8px;">
+                                <span>⚠️</span>
+                                <span>{{ $errors->first('fee_type_ids') }}</span>
+                            </div>
+                        @endif
+                        @if($errors->has('student_ids'))
+                            <div style="background: #fef2f2; border: 1px solid #f87171; border-radius: 4px; padding: 10px 14px; margin-bottom: 14px; color: #b91c1c; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 8px;">
+                                <span>⚠️</span>
+                                <span>{{ $errors->first('student_ids') }}</span>
+                            </div>
+                        @endif
 
                         {{-- Student Selector --}}
                         @if(isset($familyStudents) && $familyStudents->count() > 1)
