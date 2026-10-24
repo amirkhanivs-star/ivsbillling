@@ -526,7 +526,7 @@
                                     <a href="{{ $row->consolidated_challan_url }}" target="_blank" rel="noopener" class="btn small" style="background:#7c3aed; color:#fff; font-size:10px; padding:3px 8px; font-weight:700;">
                                         📄 Preview Challan
                                     </a>
-                                    <a href="/invoices/{{ $row->invoice_id }}/pdf" target="_blank" rel="noopener" class="btn small gray" style="font-size:10px; padding:2px 6px;">
+                                    <a href="{{ $row->invoice_pdf_url ?? ('/invoices/' . $row->invoice_id . '/pdf') }}" target="_blank" rel="noopener" class="btn small gray" style="font-size:10px; padding:2px 6px;">
                                         Invoice PDF
                                     </a>
                                 </div>
@@ -723,7 +723,7 @@
                             </td>
                             <td>
                                 <div>
-                                    <a href="/invoices/{{ $row->id }}/pdf" target="_blank" rel="noopener" style="font-weight:700; color:#0f172a; text-decoration:none;">
+                                    <a href="{{ $row->invoice_pdf_url ?? ('/invoices/' . $row->id . '/pdf') }}" target="_blank" rel="noopener" style="font-weight:700; color:#0f172a; text-decoration:none;">
                                         📄 {{ $row->invoice_number }}
                                     </a>
                                 </div>
@@ -818,7 +818,7 @@
                             </td>
                             <td style="text-align:right;">
                                 <div style="display:flex; flex-direction:column; gap:3px; align-items:flex-end;">
-                                    <a href="/invoices/{{ $row->id }}/pdf" target="_blank" rel="noopener" class="btn small" style="background:#7c3aed; color:#fff; font-size:10px; padding:3px 8px; font-weight:700;">
+                                    <a href="{{ $row->invoice_pdf_url ?? ('/invoices/' . $row->id . '/pdf') }}" target="_blank" rel="noopener" class="btn small" style="background:#7c3aed; color:#fff; font-size:10px; padding:3px 8px; font-weight:700;">
                                         📄 Invoice PDF
                                     </a>
                                     @if(!empty($row->receipts) && count($row->receipts) > 0)

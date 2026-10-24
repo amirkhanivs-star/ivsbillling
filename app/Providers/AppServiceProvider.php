@@ -6,6 +6,7 @@ use App\Exceptions\DatabaseSafetyException;
 use App\Services\Staging\DatabaseSafetyGuard;
 use Illuminate\Pagination\Paginator;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -17,6 +18,14 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Paginator::defaultView('vendor.pagination.myskool');
+
+        $appUrl = config('app.url', '');
+        if (str_starts_with($appUrl, 'https://') || app()->environment('production')) {
+            URL::forceScheme('https');
+        }
+        if (!empty($appUrl)) {
+            URL::forceRootUrl($appUrl);
+        }
 
         // Fail-closed database safety boot guard:
         // Startup and mutating operations are rejected if physical MySQL database is not iqra_billing.

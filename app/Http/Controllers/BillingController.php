@@ -1535,54 +1535,71 @@ class BillingController {
   }
   return back()->with('notice',$notice);
  }
-  public function receipt(int $payment,Request $r){
-  $p=DB::table('payments')->where('id',$payment)->first();
-  abort_unless($p,404);
-  $this->assertAccess($r,$p->department_id,$p->campus_id);
-  $family=DB::table('families')->where('id',$p->family_id)->first();
-  $branding=DB::table('department_branding')->where('department_id',$p->department_id)->first();
-  $banner=$this->bannerDataUri($branding);
+  public function receipt(int $payment, Request $r){
+   $p=DB::table('payments')->where('id',$payment)->first();
+   abort_unless($p,404);
+   if ($r->hasValidSignature()) {
+    $pdfService = app(\App\Services\PdfAccessService::class);
+    abort_if(!$pdfService->isAccessValid('receipt', $p->id, $r->query('k')), 403, 'This receipt PDF link is invalid or has been revoked.');
+   } else {
+    abort_unless($r->user(), 401);
+    $this->assertAccess($r,$p->department_id,$p->campus_id);
+   }
+   $family=DB::table('families')->where('id',$p->family_id)->first();
+   $branding=DB::table('department_branding')->where('department_id',$p->department_id)->first();
+   $banner=$this->bannerDataUri($branding);
 
-  $items=DB::table('payment_allocations as a')
-   ->join('invoice_items as i','i.id','=','a.invoice_item_id')
-   ->join('students as s','s.id','=','i.student_id')
-   ->leftJoin('fee_types as ft','ft.id','=','i.fee_type_id')
-   ->where('a.payment_id',$p->id)
-   ->select('a.amount_minor','i.description','i.period_key','i.period_start','i.amount_minor as original_amount_minor','i.discount_minor','i.net_minor','s.name','s.gr_number',\Illuminate\Support\Facades\DB::raw("COALESCE(ft.name, i.description, 'Monthly Fee') as fee_type_name"))
-   ->orderBy('i.period_start')
-   ->orderBy('a.id')
-   ->get();
+   $items=DB::table('payment_allocations as a')
+    ->join('invoice_items as i','i.id','=','a.invoice_item_id')
+    ->join('students as s','s.id','=','i.student_id')
+    ->leftJoin('fee_types as ft','ft.id','=','i.fee_type_id')
+    ->where('a.payment_id',$p->id)
+    ->select('a.amount_minor','i.description','i.period_key','i.period_start','i.amount_minor as original_amount_minor','i.discount_minor','i.net_minor','s.name','s.gr_number',\Illuminate\Support\Facades\DB::raw("COALESCE(ft.name, i.description, 'Monthly Fee') as fee_type_name"))
+    ->orderBy('i.period_start')
+    ->orderBy('a.id')
+    ->get();
 
-  $remainingBalanceMinor=(int)DB::table('invoices as inv')
-   ->where('inv.family_id',$p->family_id)
-   ->where('inv.currency',$p->currency)
-   ->where('inv.department_id',$p->department_id)
-   ->where('inv.campus_id',$p->campus_id)
-   ->whereNotIn('inv.status',['void','voided','paid'])
-   ->selectRaw('COALESCE(SUM(inv.total_minor - inv.paid_minor), 0) as remaining')
-   ->value('remaining');
+   $remainingBalanceMinor=(int)DB::table('invoices as inv')
+    ->where('inv.family_id',$p->family_id)
+    ->where('inv.currency',$p->currency)
+    ->where('inv.department_id',$p->department_id)
+    ->where('inv.campus_id',$p->campus_id)
+    ->whereNotIn('inv.status',['void','voided','paid'])
+    ->selectRaw('COALESCE(SUM(inv.total_minor - inv.paid_minor), 0) as remaining')
+    ->value('remaining');
 
-  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt',compact('p','family','items','branding','banner','remainingBalanceMinor'))
-   ->setPaper('a4')
-   ->stream($p->receipt_number.'.pdf');
- }
-
- public function historicalReceiptPdf(int $id, Request $r){
-  $feeHistoryService = app(\App\Services\FeeHistoryService::class);
-  $receipt = $feeHistoryService->getHistoricalReceiptDetails($id);
-  abort_unless($receipt, 404);
-  if (!in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
-   $this->assertAccess($r, $receipt->department_id, $receipt->campus_id);
+   return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt',compact('p','family','items','branding','banner','remainingBalanceMinor'))
+    ->setPaper('a4')
+    ->stream($p->receipt_number.'.pdf');
   }
-  $branding = DB::table('department_branding')->where('department_id', $receipt->department_id)->first();
-  $banner = $this->bannerDataUri($branding);
-  $family = $receipt->family;
 
-  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.historical-receipt', compact('receipt', 'family', 'branding', 'banner'))
-   ->setPaper('a4')
-   ->stream('historical-slip-' . $receipt->slip_number . '.pdf');
- }
- public function invoicePdf(int $invoice,Request $r){$i=DB::table('invoices')->where('id',$invoice)->first();abort_unless($i,404);if(!$r->hasValidSignature()){$this->assertAccess($r,$i->department_id,$i->campus_id);}return $this->renderInvoice($i);}
+  public function historicalReceiptPdf(int $id, Request $r){
+   $feeHistoryService = app(\App\Services\FeeHistoryService::class);
+   $receipt = $feeHistoryService->getHistoricalReceiptDetails($id);
+   abort_unless($receipt, 404);
+   if (!in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
+    $this->assertAccess($r, $receipt->department_id, $receipt->campus_id);
+   }
+   $branding = DB::table('department_branding')->where('department_id', $receipt->department_id)->first();
+   $banner = $this->bannerDataUri($branding);
+   $family = $receipt->family;
+
+   return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.historical-receipt', compact('receipt', 'family', 'branding', 'banner'))
+    ->setPaper('a4')
+    ->stream('historical-slip-' . $receipt->slip_number . '.pdf');
+  }
+  public function invoicePdf(int $invoice, Request $r){
+   $i=DB::table('invoices')->where('id',$invoice)->first();
+   abort_unless($i,404);
+   if ($r->hasValidSignature()) {
+    $pdfService = app(\App\Services\PdfAccessService::class);
+    abort_if(!$pdfService->isAccessValid('invoice', $i->id, $r->query('k')), 403, 'This invoice PDF link is invalid or has been revoked.');
+   } else {
+    abort_unless($r->user(), 401);
+    $this->assertAccess($r,$i->department_id,$i->campus_id);
+   }
+   return $this->renderInvoice($i);
+  }
  private function renderInvoice(object $i){
   $family=DB::table('families')->where('id',$i->family_id)->first();
   $fatherName = DB::table('students as s')
@@ -1701,7 +1718,10 @@ class BillingController {
   abort_unless($f, 404);
 
   $isSigned = $r->hasValidSignature();
-  if (!$isSigned && !in_array($r->user()?->role, ['super_admin', 'finance_admin'], true)) {
+  if ($isSigned) {
+   $pdfService = app(\App\Services\PdfAccessService::class);
+   abort_if(!$pdfService->isAccessValid('family', $f->id, $r->query('k')), 403, 'This challan PDF link is invalid or has been revoked.');
+  } elseif (!in_array($r->user()?->role, ['super_admin', 'finance_admin'], true)) {
    abort_unless($r->user(), 401);
    $hasAccess = DB::table('enrollments as e')
     ->join('students as s', 's.id', '=', 'e.student_id')

@@ -331,18 +331,10 @@ class InvoiceDeliveryQueueService
             $remainingBalanceMinor = (int)max(0, $row->total_minor - $row->paid_minor);
             $totalPayableMinor = $remainingBalanceMinor + $prevDuesMinor;
 
-            // Generate signed PDF URLs (valid for 7 days)
-            $invoicePdfUrl = URL::temporarySignedRoute(
-                'invoices.signed_pdf',
-                now()->addDays(7),
-                ['invoice' => $row->invoice_id]
-            );
-
-            $consolidatedChallanUrl = $row->family_id ? URL::temporarySignedRoute(
-                'families.signed_challan_pdf',
-                now()->addDays(7),
-                ['family' => $row->family_id]
-            ) : null;
+            // Generate permanent signed PDF URLs
+            $pdfService = app(\App\Services\PdfAccessService::class);
+            $invoicePdfUrl = $pdfService->getInvoicePdfUrl((int)$row->invoice_id);
+            $consolidatedChallanUrl = $row->family_id ? $pdfService->getFamilyChallanPdfUrl((int)$row->family_id) : null;
 
             // Computed Webhook Submission Status
             $webhookStatus = match ($row->notification_status) {
@@ -1062,11 +1054,9 @@ class InvoiceDeliveryQueueService
             $primaryCurrency = $primaryInv->currency;
             $primaryCurrBreakdown = $currenciesMap[$primaryCurrency] ?? ($currencyBreakdowns[0] ?? null);
 
-            $signedChallanUrl = URL::temporarySignedRoute(
-                'families.signed_challan_pdf',
-                now()->addDays(7),
-                ['family' => $famId]
-            );
+            $pdfService = app(\App\Services\PdfAccessService::class);
+            $signedChallanUrl = $pdfService->getFamilyChallanPdfUrl((int)$famId);
+            $invoicePdfUrl = $pdfService->getInvoicePdfUrl((int)$primaryInv->invoice_id);
 
             $rowObj = (object)[
                 'family_id' => $famId,
@@ -1107,6 +1097,7 @@ class InvoiceDeliveryQueueService
                 'dues_by_month' => $duesByMonth,
                 'consolidated_challan_url' => $signedChallanUrl,
                 'signed_challan_url' => $signedChallanUrl,
+                'invoice_pdf_url' => $invoicePdfUrl,
             ];
 
             $familyRows->push($rowObj);
@@ -1288,7 +1279,7 @@ class InvoiceDeliveryQueueService
                     'currency' => $r->currency,
                     'amount_minor' => 0,
                     'formatted_amount' => '',
-                    'receipt_pdf_url' => url("/receipts/{$pId}/pdf"),
+                    'receipt_pdf_url' => app(\App\Services\PdfAccessService::class)->getReceiptPdfUrl((int)$pId),
                 ];
             }
             $receiptsByInvoice[$invId][$pId]['amount_minor'] += (int)$r->amount_minor;
@@ -1326,7 +1317,7 @@ class InvoiceDeliveryQueueService
             $row->delivery_batch_id = $rowNotif?->batch_id;
             $row->delivery_error = $rowNotif?->error;
             $row->delivery_submitted_at = $rowNotif?->submitted_at;
-            $row->invoice_pdf_url = url("/invoices/{$row->id}/pdf");
+            $row->invoice_pdf_url = app(\App\Services\PdfAccessService::class)->getInvoicePdfUrl((int)$row->id);
 
             return $row;
         });

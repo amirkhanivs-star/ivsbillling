@@ -134,17 +134,9 @@ class InvoicePayloadBuilder
         }
 
         // 6. Signed PDF Attachment
-        $expiresAt = now()->addHours(24);
-        $pdfUrl = URL::temporarySignedRoute(
-            'invoices.signed_pdf',
-            $expiresAt,
-            ['invoice' => $invoice->id]
-        );
-        $consolidatedChallanUrl = URL::temporarySignedRoute(
-            'families.signed_challan_pdf',
-            $expiresAt,
-            ['family' => $family->id]
-        );
+        $pdfService = app(\App\Services\PdfAccessService::class);
+        $pdfUrl = $pdfService->getInvoicePdfUrl((int)$invoice->id);
+        $consolidatedChallanUrl = $family ? $pdfService->getFamilyChallanPdfUrl((int)$family->id) : null;
 
         $payload = [
             'event' => $eventType,
@@ -193,7 +185,6 @@ class InvoicePayloadBuilder
                 'pdf_url' => $pdfUrl,
                 'consolidated_challan_url' => $consolidatedChallanUrl,
                 'suggested_filename' => "IQRA_Invoice_{$invoice->invoice_number}.pdf",
-                'expires_at' => $expiresAt->toIso8601String(),
             ],
         ];
 
@@ -217,19 +208,26 @@ class InvoicePayloadBuilder
             $receiptNumbers = $allocations->pluck('receipt_number')->unique()->values()->all();
             $paymentMethods = $allocations->map(fn($a) => $a->note ?: 'direct_receipt')->unique()->values()->all();
 
-            $receiptPdfLinks = $allocations->pluck('receipt_number', 'payment_id')->map(function ($receiptNumber, $paymentId) {
+            $receiptPdfLinks = $allocations->pluck('receipt_number', 'payment_id')->map(function ($receiptNumber, $paymentId) use ($pdfService) {
                 return [
                     'payment_id' => (int)$paymentId,
                     'receipt_number' => $receiptNumber,
-                    'receipt_pdf_url' => url("/receipts/{$paymentId}/pdf"),
+                    'receipt_pdf_url' => $pdfService->getReceiptPdfUrl((int)$paymentId),
                 ];
             })->values()->all();
+
+            $primaryReceiptPdfUrl = !empty($receiptPdfLinks) ? $receiptPdfLinks[0]['receipt_pdf_url'] : null;
+
+            if ($primaryReceiptPdfUrl) {
+                $payload['pdf_attachment']['receipt_pdf_url'] = $primaryReceiptPdfUrl;
+            }
 
             $payload['payment_details'] = [
                 'actual_paid_amount' => Money::format($paidMinor),
                 'payment_dates' => $paymentDates,
                 'verified_receipt_numbers' => $receiptNumbers,
                 'payment_methods' => $paymentMethods,
+                'receipt_pdf_url' => $primaryReceiptPdfUrl,
                 'related_receipt_pdf_links' => $receiptPdfLinks,
                 'actual_remaining_balance' => Money::format($remainingMinor),
             ];
