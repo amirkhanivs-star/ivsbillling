@@ -833,4 +833,92 @@ class WebhookNotificationTest extends TestCase
         $this->assertNotNull($monthlySetting->last_test_at);
         $this->assertNull($paidSetting->last_test_status);
     }
+
+    /**
+     * 17. Regression: Saving Monthly and Paid webhook settings routes with n8n Test and Production URLs never throws HTTP 500.
+     */
+    public function test_webhook_settings_save_routes_with_n8n_test_and_production_urls_never_throws_500(): void
+    {
+        $data = $this->setupBillingData();
+
+        // 1. Save Monthly with /webhook-test/ URL
+        $resMonthlyTest = $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/monthly', [
+                'url' => 'https://n8n.example.com/webhook-test/testing-monthly',
+                'secret' => 'secret-monthly-test',
+                'is_enabled' => '1',
+            ]);
+
+        $resMonthlyTest->assertStatus(302);
+        $resMonthlyTest->assertRedirect('/settings/webhooks');
+        $resMonthlyTest->assertSessionHas('notice');
+        $this->assertSame(
+            'https://n8n.example.com/webhook-test/testing-monthly',
+            DB::table('webhook_settings')->where('webhook_type', 'monthly')->value('url')
+        );
+
+        // 2. Save Monthly with /webhook/ production URL
+        $resMonthlyProd = $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/monthly', [
+                'url' => 'https://n8n.example.com/webhook/testing-monthly',
+                'secret' => '', // keep unchanged
+                'is_enabled' => '1',
+            ]);
+
+        $resMonthlyProd->assertStatus(302);
+        $resMonthlyProd->assertRedirect('/settings/webhooks');
+        $resMonthlyProd->assertSessionHas('notice');
+        $this->assertSame(
+            'https://n8n.example.com/webhook/testing-monthly',
+            DB::table('webhook_settings')->where('webhook_type', 'monthly')->value('url')
+        );
+
+        // 3. Save Paid with /webhook-test/ URL
+        $resPaidTest = $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/paid', [
+                'url' => 'https://n8n.example.com/webhook-test/testing-paid',
+                'secret' => 'secret-paid-test',
+                'is_enabled' => '1',
+            ]);
+
+        $resPaidTest->assertStatus(302);
+        $resPaidTest->assertRedirect('/settings/webhooks');
+        $resPaidTest->assertSessionHas('notice');
+        $this->assertSame(
+            'https://n8n.example.com/webhook-test/testing-paid',
+            DB::table('webhook_settings')->where('webhook_type', 'paid')->value('url')
+        );
+
+        // 4. Save Paid with /webhook/ production URL
+        $resPaidProd = $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/paid', [
+                'url' => 'https://n8n.example.com/webhook/testing-paid',
+                'secret' => '', // keep unchanged
+                'is_enabled' => '0',
+            ]);
+
+        $resPaidProd->assertStatus(302);
+        $resPaidProd->assertRedirect('/settings/webhooks');
+        $resPaidProd->assertSessionHas('notice');
+        $this->assertSame(
+            'https://n8n.example.com/webhook/testing-paid',
+            DB::table('webhook_settings')->where('webhook_type', 'paid')->value('url')
+        );
+
+        // Monthly remains intact from previous step
+        $this->assertSame(
+            'https://n8n.example.com/webhook/testing-monthly',
+            DB::table('webhook_settings')->where('webhook_type', 'monthly')->value('url')
+        );
+
+        // 5. Invalid URL returns validation redirect with errors, NEVER a 500 or preg_match error
+        $resInvalid = $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/monthly', [
+                'url' => 'invalid-scheme.com/webhook-test/testing-monthly',
+            ]);
+
+        $resInvalid->assertStatus(302);
+        $resInvalid->assertRedirect('/settings/webhooks');
+        $resInvalid->assertSessionHasErrors(['url']);
+    }
 }

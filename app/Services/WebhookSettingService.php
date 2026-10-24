@@ -193,19 +193,21 @@ class WebhookSettingService
 
         $url = trim($url);
 
-        if (!preg_match('~^https?://~i', $url)) {
+        $parsed = @parse_url($url);
+        if ($parsed === false || empty($parsed['scheme'])) {
             return "The " . ucfirst($type) . " webhook URL must begin with https:// (or http:// for testing).";
         }
 
-        $parsed = parse_url($url);
-        if ($parsed === false || empty($parsed['host'])) {
+        $scheme = strtolower($parsed['scheme']);
+        if (!in_array($scheme, ['https', 'http'], true)) {
+            return "The " . ucfirst($type) . " webhook URL must begin with https:// (or http:// for testing).";
+        }
+
+        if (empty($parsed['host'])) {
             return "The " . ucfirst($type) . " webhook URL format is invalid. Please provide a full URL with domain and path.";
         }
 
-        $hasValidFormat = Str::isUrl($url, ['http', 'https']) 
-            || (bool) filter_var($url, FILTER_VALIDATE_URL) 
-            || (!empty($parsed['scheme']) && !empty($parsed['host']) && preg_match('~^[a-z0-9\-._~%!$&\'()*+,;=:@/?#]+$~i', $url));
-
+        $hasValidFormat = Str::isUrl($url, ['http', 'https']) || (bool) filter_var($url, FILTER_VALIDATE_URL);
         if (!$hasValidFormat) {
             return "The " . ucfirst($type) . " webhook URL must be a valid URL (including /webhook-test/... or /webhook/... paths).";
         }
