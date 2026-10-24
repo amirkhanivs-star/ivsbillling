@@ -18,6 +18,22 @@
 <div class="adm-field"><label for="guardian_name">Guardian Name</label><input id="guardian_name" name="guardian_name" value="{{ old('guardian_name', $initial['guardian_name'] ?? null) }}" placeholder="Enter guardian name"></div>
 <div class="adm-field"><label for="family_email">Guardian / Family Email *</label><input id="family_email" name="family_email" type="email" value="{{ old('family_email', $initial['family_email'] ?? null) }}" placeholder="Parent/guardian email" required></div>
 <div class="adm-field adm-wide"><label for="family_whatsapp">Guardian WhatsApp *</label><input id="family_whatsapp" name="family_whatsapp" type="tel" inputmode="tel" value="{{ old('family_whatsapp', $initial['family_whatsapp'] ?? null) }}" placeholder="+923001234567" pattern="\+[1-9][0-9]{7,14}" title="International format with +, without spaces" required><small class="adm-help">International format, such as +923001234567 (no spaces).</small></div>
+<div class="adm-field adm-wide" style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:12px; margin-top:6px;">
+  <div style="font-weight:700; font-size:12px; color:#1e293b; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;">Family Contact Verification &amp; Outbound Messaging Eligibility</div>
+  <div style="display:flex; flex-direction:column; gap:8px;">
+    <label style="display:inline-flex; align-items:flex-start; gap:8px; font-size:13px; font-weight:normal; cursor:pointer;">
+      <input type="checkbox" name="contact_verified" value="1" @checked(old('contact_verified', $initial['contact_verified'] ?? false)) style="margin-top:3px;">
+      <span><strong>Contacts Verified</strong> — Staff confirms this phone number and email have been verified directly with the student's authorized guardian.</span>
+    </label>
+    <label style="display:inline-flex; align-items:flex-start; gap:8px; font-size:13px; font-weight:normal; cursor:pointer;">
+      <input type="checkbox" name="messaging_opt_in" value="1" @checked(old('messaging_opt_in', $initial['messaging_opt_in'] ?? false)) style="margin-top:3px;">
+      <span><strong>WhatsApp Consent Recorded</strong> — Guardian explicitly consented to receive invoices, fee demands, and payment receipts via WhatsApp.</span>
+    </label>
+  </div>
+  <small class="adm-help" style="margin-top:8px; display:block; color:#64748b; font-size:11px;">
+    Note: Both verification and WhatsApp consent are required before outbound webhook notifications can be dispatched. When phone or email is changed, reverification is enforced.
+  </small>
+</div>
 <div class="adm-field adm-wide"><label for="last_institute">Last Institute</label><input id="last_institute" name="last_institute" type="text" value="{{ old('last_institute', $initial['last_institute'] ?? null) }}" placeholder=""></div>
 <div class="adm-field adm-wide"><label for="dob_words">Date of birth in words</label><input id="dob_words" name="dob_words" type="text" value="{{ old('dob_words', $initial['dob_words'] ?? null) }}" placeholder=""></div>
 <div class="adm-field adm-wide"><label for="place_of_birth">Place of birth</label><input id="place_of_birth" name="place_of_birth" type="text" value="{{ old('place_of_birth', $initial['place_of_birth'] ?? null) }}" placeholder=""></div>

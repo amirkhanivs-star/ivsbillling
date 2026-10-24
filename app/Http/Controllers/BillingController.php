@@ -196,8 +196,9 @@ class BillingController {
  }
  public function invoices(Request $r){
   $q=DB::table('invoices as i')->join('families as f','f.id','=','i.family_id')->join('departments as d','d.id','=','i.department_id')->join('billing_runs as b','b.id','=','i.billing_run_id')
-   ->select('i.*','f.family_code','f.whatsapp','f.email','d.name as department_name','b.period_start')
+   ->select('i.*','f.family_code','f.whatsapp','f.email','f.contact_verified','f.messaging_opt_in','d.name as department_name','b.period_start')
    ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_status')
+   ->selectSub(DB::table('notifications')->select('error')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_error')
    ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%email%')->orWhere('channels','like','%email%'))->orderByDesc('id')->limit(1),'email_status');
   if($dep=$r->query('department_id'))$q->where('i.department_id',$dep);
   if($period=$r->query('period'))$q->where('b.period_start','like',$period.'%');
@@ -220,7 +221,10 @@ class BillingController {
   if($ids)$grByInvoice=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')
    ->whereIn('item.invoice_id',$ids)->select('item.invoice_id','s.gr_number')->distinct()->get()
    ->groupBy('invoice_id')->map(fn($rows)=>$rows->pluck('gr_number')->filter()->unique()->sort()->values()->all());
+  $studentByInvoice=collect();
+  if($ids)$studentByInvoice=DB::table('invoice_items as item')->whereIn('item.invoice_id',$ids)->select('item.invoice_id','item.student_id')->distinct()->get()->groupBy('invoice_id')->map(fn($rows)=>(int)$rows->first()?->student_id);
   $gradeOptions=DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
+  $queuedJobCount = DB::table('jobs')->where('queue', 'notifications')->count();
 
   $recentNotifications=DB::table('notifications as n')
    ->join('invoices as i','i.id','=','n.invoice_id')
@@ -240,6 +244,8 @@ class BillingController {
    'departments'=>$this->basics($r)['departments'],
    'gradesByInvoice'=>$gradesByInvoice,
    'grByInvoice'=>$grByInvoice,
+   'studentByInvoice'=>$studentByInvoice,
+   'queuedJobCount'=>$queuedJobCount,
    'gradeOptions'=>$gradeOptions,
    'recentNotifications'=>$recentNotifications,
    'monthlyWebhookSetting'=>$monthlyWebhookSetting,
@@ -306,15 +312,9 @@ class BillingController {
 
   foreach($invoices as $invoice){
    $family=DB::table('families')->where('id',$invoice->family_id)->first();
-   $hasValidChannel=false;
-   if(in_array('whatsapp',$channels,true)&&$family?->whatsapp&&$family?->contact_verified&&$family?->messaging_opt_in){
-    $hasValidChannel=true;
-   }
-   if(in_array('email',$channels,true)&&$family?->email&&$family?->contact_verified){
-    $hasValidChannel=true;
-   }
+   $failureReason=WebhookSettingService::evaluateContactEligibility($family,$channels);
 
-   if(!$hasValidChannel){
+   if($failureReason!==null){
     $blocked++;
     DB::table('notifications')->insert([
      'invoice_id'=>$invoice->id,
@@ -326,7 +326,7 @@ class BillingController {
      'idempotency_key'=>"inv-{$invoice->id}-{$webhookType}-blocked-".\Illuminate\Support\Str::random(10),
      'event_id'=>(string)\Illuminate\Support\Str::uuid(),
      'status'=>'blocked',
-     'error'=>'Contact missing/unverified or WhatsApp permission absent',
+     'error'=>$failureReason,
      'approved_by'=>$r->user()->id,
      'created_at'=>now(),
      'updated_at'=>now(),
@@ -1497,11 +1497,80 @@ class BillingController {
  public function branding(Request $r){abort_unless(in_array($r->user()->role,['super_admin','finance_admin'],true),403);return view('branding',['departments'=>DB::table('departments')->get(),'branding'=>DB::table('department_branding')->get()->keyBy('department_id')]);}
  public function saveBranding(Request $r){abort_unless(in_array($r->user()->role,['super_admin','finance_admin'],true),403);$d=$r->validate(['department_id'=>'required|exists:departments,id','display_name'=>'required|string|max:200','payment_instructions'=>'nullable|string|max:7000','footer_email'=>'nullable|email|max:200','footer_phone'=>'nullable|string|max:60','logo'=>'nullable|image|mimes:png,jpg,jpeg|max:2048']);$fields=['display_name'=>$d['display_name'],'payment_instructions'=>$d['payment_instructions']??null,'footer_email'=>$d['footer_email']??null,'footer_phone'=>$d['footer_phone']??null,'updated_at'=>now()];if($r->hasFile('logo'))$fields['logo_path']=$r->file('logo')->store('branding','local');DB::table('department_branding')->updateOrInsert(['department_id'=>$d['department_id']],$fields);return back()->with('notice','Invoice branding updated.');}
  public function updateFamilyContact(Request $r,int $family){
-  abort_unless(in_array($r->user()->role,['super_admin','finance_admin'],true),403);
-  $d=$r->validate(['guardian_name'=>'nullable|string|max:200','email'=>'nullable|email|max:254','whatsapp'=>['nullable','regex:/^\+[1-9][0-9]{6,14}$/'],'contact_verified'=>'nullable|boolean','messaging_opt_in'=>'nullable|boolean']);
-  DB::table('families')->where('id',$family)->update(['guardian_name'=>$d['guardian_name']??null,'email'=>$d['email']??null,'whatsapp'=>$d['whatsapp']??null,'contact_verified'=>!empty($d['contact_verified']),'messaging_opt_in'=>!empty($d['messaging_opt_in']),'updated_at'=>now()]);
-  DB::table('audit_logs')->insert(['actor_id'=>$r->user()->id,'action'=>'family_contact_updated','subject_type'=>'family','subject_id'=>$family,'metadata'=>json_encode(['contact_verified'=>!empty($d['contact_verified']),'messaging_opt_in'=>!empty($d['messaging_opt_in'])]),'created_at'=>now(),'updated_at'=>now()]);
-  return back()->with('notice','Family contact updated.');
+  abort_unless(in_array($r->user()->role,['super_admin','finance_admin','department_manager'],true),403);
+  $targetFamily=DB::table('families')->where('id',$family)->first();
+  abort_unless($targetFamily,404,'Family record not found.');
+
+  if(!in_array($r->user()->role,['super_admin','finance_admin'],true)){
+   $hasAccess=DB::table('students as s')
+    ->join('enrollments as e','e.student_id','=','s.id')
+    ->where('s.family_id',$family)
+    ->where('e.campus_id',$r->user()->campus_id)
+    ->when($r->user()->department_id,fn($q)=>$q->where('e.department_id',$r->user()->department_id))
+    ->exists();
+   abort_unless($hasAccess,403,'Unauthorized family access.');
+  }
+
+  $d=$r->validate([
+   'guardian_name'=>'nullable|string|max:200',
+   'email'=>'nullable|email|max:254',
+   'whatsapp'=>['nullable','regex:/^\+[1-9][0-9]{6,14}$/'],
+   'contact_verified'=>'nullable|boolean',
+   'messaging_opt_in'=>'nullable|boolean',
+  ]);
+
+  $newEmail=$d['email']??$targetFamily->email;
+  $newPhone=$d['whatsapp']??$targetFamily->whatsapp;
+  $emailChanged=($targetFamily->email!==$newEmail);
+  $phoneChanged=($targetFamily->whatsapp!==$newPhone);
+
+  $verified=!empty($d['contact_verified']);
+  $optIn=!empty($d['messaging_opt_in']);
+
+  if(($emailChanged||$phoneChanged)&&!$verified){
+   $verified=false;
+  }
+  if($phoneChanged&&!$optIn){
+   $optIn=false;
+  }
+
+  DB::table('families')->where('id',$family)->update([
+   'guardian_name'=>$d['guardian_name']??$targetFamily->guardian_name,
+   'email'=>$newEmail,
+   'whatsapp'=>$newPhone,
+   'contact_verified'=>$verified,
+   'messaging_opt_in'=>$optIn,
+   'updated_at'=>now(),
+  ]);
+
+  DB::table('audit_logs')->insert([
+   'actor_id'=>$r->user()->id,
+   'action'=>'family_contact_updated',
+   'subject_type'=>'family',
+   'subject_id'=>$family,
+   'metadata'=>json_encode([
+    'contact_verified'=>$verified,
+    'messaging_opt_in'=>$optIn,
+    'email_changed'=>$emailChanged,
+    'phone_changed'=>$phoneChanged,
+    'staff_name'=>$r->user()->name,
+   ]),
+   'created_at'=>now(),
+   'updated_at'=>now(),
+  ]);
+
+  return back()->with('notice','Family contact verification and messaging permissions updated successfully.');
+ }
+ public function processQueue(Request $r){
+  abort_if($r->user()->role==='auditor',403);
+  \Illuminate\Support\Facades\Artisan::call('queue:work',[
+   '--queue'=>'notifications,default',
+   '--stop-when-empty'=>true,
+   '--max-jobs'=>50,
+   '--timeout'=>30,
+  ]);
+  $remaining=DB::table('jobs')->where('queue','notifications')->count();
+  return back()->with('notice',"Processed queued webhook dispatches. {$remaining} job(s) remaining in queue.");
  }
  public function addEnrollment(Request $r,int $student){
   $d=$r->validate(['campus_id'=>'required|exists:campuses,id','department_id'=>'required|exists:departments,id','grade_label'=>'required|string|max:200','subject_name'=>'nullable|string|max:150','currency'=>'required|alpha|size:3','class_days_per_week'=>'nullable|integer|min:1|max:7','monthly_fee'=>['nullable','regex:/^\d{1,13}(?:\.\d{1,2})?$/']]);abort_if($r->user()->role==='auditor',403);$this->assertAccess($r,$d['department_id'],$d['campus_id']);abort_unless(DB::table('students')->where('id',$student)->exists(),404);

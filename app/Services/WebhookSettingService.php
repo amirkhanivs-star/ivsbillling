@@ -266,4 +266,75 @@ class WebhookSettingService
 
         return null;
     }
+
+    /**
+     * Evaluate recipient family contact verification and messaging consent.
+     * Returns null if eligible, or a specific, actionable failure reason string if blocked.
+     */
+    public static function evaluateContactEligibility(?object $family, array $channels): ?string
+    {
+        if (!$family) {
+            return 'Family record not found';
+        }
+
+        $wantsWhatsapp = in_array('whatsapp', $channels, true);
+        $wantsEmail = in_array('email', $channels, true);
+
+        $whatsappValid = $wantsWhatsapp
+            && !empty($family->whatsapp)
+            && !empty($family->contact_verified)
+            && !empty($family->messaging_opt_in);
+
+        $emailValid = $wantsEmail
+            && !empty($family->email)
+            && !empty($family->contact_verified);
+
+        if ($whatsappValid || $emailValid) {
+            return null; // Eligible for delivery
+        }
+
+        // Determine specific failure reasons
+        if ($wantsWhatsapp && !$wantsEmail) {
+            if (empty($family->whatsapp)) {
+                return 'WhatsApp missing';
+            }
+            if (empty($family->contact_verified)) {
+                return 'Unverified contact';
+            }
+            if (empty($family->messaging_opt_in)) {
+                return 'Consent not recorded (WhatsApp permission absent)';
+            }
+        }
+
+        if ($wantsEmail && !$wantsWhatsapp) {
+            if (empty($family->email)) {
+                return 'Email missing';
+            }
+            if (empty($family->contact_verified)) {
+                return 'Unverified contact';
+            }
+        }
+
+        if ($wantsWhatsapp && $wantsEmail) {
+            $parts = [];
+            if (empty($family->whatsapp)) {
+                $parts[] = 'WhatsApp missing';
+            } elseif (empty($family->contact_verified)) {
+                $parts[] = 'WhatsApp unverified';
+            } elseif (empty($family->messaging_opt_in)) {
+                $parts[] = 'WhatsApp consent not recorded';
+            }
+
+            if (empty($family->email)) {
+                $parts[] = 'Email missing';
+            } elseif (empty($family->contact_verified) && !in_array('WhatsApp unverified', $parts, true)) {
+                $parts[] = 'Email unverified';
+            }
+
+            return implode(', ', $parts) ?: 'Unverified contact or consent absent';
+        }
+
+        return 'No delivery channel selected';
+    }
 }
+

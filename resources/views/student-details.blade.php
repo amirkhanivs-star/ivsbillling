@@ -24,6 +24,20 @@
     <div class="iq-fact"><span class="iq-fact-icon">▦</span><span><small>ADMISSION DATE</small><strong>{{ !empty($student->date_of_admission) ? \Carbon\Carbon::parse($student->date_of_admission)->format('d M Y') : 'Not provided' }}</strong></span></div>
     <div class="iq-fact"><span class="iq-fact-icon">▣</span><span><small>ROLE</small><strong>Student</strong></span></div>
     <div class="iq-fact"><span class="iq-fact-icon">♧</span><span><small>GUARDIAN CONTACT</small><strong>{{ $student->whatsapp ?: 'Not provided' }}</strong></span></div>
+    <div class="iq-fact"><span class="iq-fact-icon">✓</span><span><small>MESSAGING ELIGIBILITY</small>
+      <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:3px;">
+        @if($student->contact_verified)
+          <span style="background:#dcfce7; color:#166534; font-size:10px; padding:1px 6px; border-radius:4px; font-weight:600;">Contact Verified</span>
+        @else
+          <span style="background:#fee2e2; color:#991b1b; font-size:10px; padding:1px 6px; border-radius:4px; font-weight:600;">Unverified Contact</span>
+        @endif
+        @if($student->messaging_opt_in)
+          <span style="background:#ede9fe; color:#6d28d9; font-size:10px; padding:1px 6px; border-radius:4px; font-weight:600;">WhatsApp Consent: Yes</span>
+        @else
+          <span style="background:#ffedd5; color:#9a3412; font-size:10px; padding:1px 6px; border-radius:4px; font-weight:600;">Consent: Absent</span>
+        @endif
+      </div>
+    </span></div>
    </div>
    <a class="iq-edit" href="{{ route('student.admission.edit',$student->id) }}">Edit</a>
   </aside>

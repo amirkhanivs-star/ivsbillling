@@ -47,13 +47,15 @@ class StudentAdmissionController
         $details=DB::table('student_registration_details')->where('student_id',$student)->first();
         $family=DB::table('families')->where('id',$s->family_id)->first();
         $initial=array_merge((array)$details,(array)$s,[
-            'registration_number'=>$s->gr_number,'family_code'=>$family->family_code,
-            'family_email'=>$family->email,'family_whatsapp'=>$family->whatsapp,
-            'guardian_name'=>$family->guardian_name,'campus_id'=>$en?->campus_id,
+            'registration_number'=>$s->gr_number,'family_code'=>$family?->family_code,
+            'family_email'=>$family?->email,'family_whatsapp'=>$family?->whatsapp,
+            'guardian_name'=>$family?->guardian_name,'campus_id'=>$en?->campus_id,
             'department_id'=>$en?->department_id,'grade_label'=>$en?->grade_label,
             'subject_name'=>$en?->subject_name,'class_days_per_week'=>$en?->class_days_per_week,
             'currency'=>$en?->currency,
             'monthly_fee'=>$en?->monthly_fee_minor===null?'':number_format($en->monthly_fee_minor/100,2,'.',''),
+            'contact_verified'=>(bool)($family?->contact_verified ?? false),
+            'messaging_opt_in'=>(bool)($family?->messaging_opt_in ?? false),
         ]);
         $view=$this->create($request);
         return $view->with(['editingStudent'=>$student,'initial'=>$initial]);
@@ -69,6 +71,8 @@ class StudentAdmissionController
             'registration_number'=>['required','string','max:80',Rule::unique('students','gr_number')->ignore($student)],
             'family_code'=>'nullable|string|max:80','family_email'=>'required|email|max:255',
             'family_whatsapp'=>['required','regex:/^\+[1-9][0-9]{7,14}$/'],
+            'contact_verified'=>'nullable|boolean',
+            'messaging_opt_in'=>'nullable|boolean',
             'guardian_name'=>'nullable|string|max:255', 'gender'=>'nullable|string|max:30',
             'date_of_admission'=>'nullable|date','dob'=>'nullable|date',
             'surname'=>'nullable|string|max:120','religion'=>'nullable|string|max:100',
@@ -202,15 +206,41 @@ class StudentAdmissionController
                     ]);
                 }
             }else{
+                $emailChanged = ($curFamily->email !== $d['family_email']);
+                $phoneChanged = ($curFamily->whatsapp !== $d['family_whatsapp']);
+                $newVerified = $request->boolean('contact_verified');
+                $newOptIn = $request->boolean('messaging_opt_in');
+
+                $finalVerified = (($emailChanged || $phoneChanged) && !$newVerified) ? false : $newVerified;
+                $finalOptIn = ($phoneChanged && !$newOptIn) ? false : $newOptIn;
+
                 DB::table('families')->where('id',$s->family_id)->update([
                     'family_code'=>$code,
                     'guardian_name'=>$d['guardian_name']??null,
                     'email'=>$d['family_email'],
                     'whatsapp'=>$d['family_whatsapp'],
-                    'contact_verified'=>($curFamily->email===$d['family_email']&&$curFamily->whatsapp===$d['family_whatsapp'])?$curFamily->contact_verified:false,
-                    'messaging_opt_in'=>($curFamily->whatsapp===$d['family_whatsapp'])?$curFamily->messaging_opt_in:false,
+                    'contact_verified'=>$finalVerified,
+                    'messaging_opt_in'=>$finalOptIn,
                     'updated_at'=>now(),
                 ]);
+
+                if ($finalVerified !== (bool)$curFamily->contact_verified || $finalOptIn !== (bool)$curFamily->messaging_opt_in) {
+                    DB::table('audit_logs')->insert([
+                        'actor_id'=>$request->user()->id,
+                        'action'=>'family_contact_verification_updated',
+                        'subject_type'=>'family',
+                        'subject_id'=>$s->family_id,
+                        'metadata'=>json_encode([
+                            'contact_verified'=>$finalVerified,
+                            'messaging_opt_in'=>$finalOptIn,
+                            'email_changed'=>$emailChanged,
+                            'phone_changed'=>$phoneChanged,
+                            'student_id'=>$student,
+                        ]),
+                        'created_at'=>now(),
+                        'updated_at'=>now(),
+                    ]);
+                }
             }
 
             DB::table('students')->where('id',$student)->update(['name'=>$d['name'],'gr_number'=>$d['registration_number'],'gender'=>$d['gender']??null,'date_of_admission'=>$d['date_of_admission']??null,'updated_at'=>now()]);
@@ -251,6 +281,8 @@ class StudentAdmissionController
             'phone_number' => 'nullable|string|max:30',
             'family_email' => 'required|email|max:255',
             'family_whatsapp' => ['required','regex:/^\+[1-9][0-9]{7,14}$/'],
+            'contact_verified' => 'nullable|boolean',
+            'messaging_opt_in' => 'nullable|boolean',
             'guardian_name' => 'nullable|string|max:255',
             'campus_id' => 'required|integer|exists:campuses,id',
             'department_id' => 'required|integer|exists:departments,id',
@@ -293,7 +325,7 @@ class StudentAdmissionController
         if ($deptCode !== 'tuition') $data['subject_name'] = null;
         if ($deptCode !== 'quran') $data['class_days_per_week'] = null;
         $fee = Money::minor((string)($data['monthly_fee'] ?? '0'));
-        $studentId = DB::transaction(function () use ($data, $fee) {
+        $studentId = DB::transaction(function () use ($data, $fee, $request) {
             $now = now();
             $code = trim($data['family_code'] ?? '') ?: null;
             $existingFamily = $code === null ? null : DB::table('families')->where('family_code', $code)->lockForUpdate()->first();
@@ -308,17 +340,40 @@ class StudentAdmissionController
                 if (filled($existingFamily->whatsapp) && $existingFamily->whatsapp !== $data['family_whatsapp']) {
                     throw ValidationException::withMessages(['family_whatsapp' => 'This family number has a different WhatsApp number. Confirm the existing family before proceeding.']);
                 }
+                $verified = $request->boolean('contact_verified');
+                $optIn = $request->boolean('messaging_opt_in');
                 DB::table('families')->where('id', $existingFamily->id)->update([
                     'email' => $existingFamily->email ?: $data['family_email'],
                     'whatsapp' => $existingFamily->whatsapp ?: $data['family_whatsapp'],
+                    'contact_verified' => $existingFamily->contact_verified ?: $verified,
+                    'messaging_opt_in' => $existingFamily->messaging_opt_in ?: $optIn,
                     'updated_at' => $now,
                 ]);
             }
+            $verified = $request->boolean('contact_verified');
+            $optIn = $request->boolean('messaging_opt_in');
             $familyId = $existingFamily?->id ?? DB::table('families')->insertGetId([
                 'family_code' => $code, 'guardian_name' => $data['guardian_name'] ?? ($data['father_name'] ?? null),
                 'email' => $data['family_email'], 'whatsapp' => $data['family_whatsapp'],
+                'contact_verified' => $verified, 'messaging_opt_in' => $optIn,
                 'created_at' => $now, 'updated_at' => $now,
             ]);
+
+            if ($verified || $optIn) {
+                DB::table('audit_logs')->insert([
+                    'actor_id' => $request->user()->id,
+                    'action' => 'family_contact_verified',
+                    'subject_type' => 'family',
+                    'subject_id' => $familyId,
+                    'metadata' => json_encode([
+                        'contact_verified' => $verified,
+                        'messaging_opt_in' => $optIn,
+                        'source' => 'student_admission_store',
+                    ]),
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
             $studentId = DB::table('students')->insertGetId([
                 'name' => trim($data['name']), 'gr_number' => trim($data['registration_number']), 'family_id' => $familyId,
                 'gender' => $data['gender'] ?? null, 'date_of_admission' => $data['date_of_admission'] ?? now()->toDateString(),

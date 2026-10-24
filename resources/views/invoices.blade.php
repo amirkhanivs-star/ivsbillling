@@ -145,7 +145,47 @@
                         <td>{{ $i->currency }} {{ \App\Services\Money::format($i->total_minor) }}</td>
                         <td>{{ \App\Services\Money::format($i->paid_minor) }}</td>
                         <td><span class="badge" style="font-size:11px;">{{ ucfirst($i->status) }}</span></td>
-                        <td>{{ $i->whatsapp_status ?? 'Not sent' }}</td>
+                        <td>
+                            @if(!empty($i->whatsapp))
+                                <div style="font-weight:600; font-size:12px;">{{ $i->whatsapp }}</div>
+                                <div style="display:flex; flex-wrap:wrap; gap:3px; margin-top:2px;">
+                                    @if($i->contact_verified && $i->messaging_opt_in)
+                                        <span style="background:#dcfce7; color:#166534; font-size:10px; padding:1px 5px; border-radius:3px; font-weight:600;">Verified &amp; Opted In</span>
+                                    @elseif(!$i->contact_verified)
+                                        <span style="background:#fee2e2; color:#991b1b; font-size:10px; padding:1px 5px; border-radius:3px; font-weight:600;">Unverified Contact</span>
+                                    @else
+                                        <span style="background:#ffedd5; color:#9a3412; font-size:10px; padding:1px 5px; border-radius:3px; font-weight:600;">Consent Missing</span>
+                                    @endif
+                                </div>
+                            @else
+                                <span class="muted" style="font-size:11px;">No WhatsApp</span>
+                            @endif
+
+                            <div style="margin-top:4px;">
+                                @if($i->whatsapp_status === 'submitted')
+                                    <span class="badge-status badge-submitted" style="font-size:10px; padding:1px 6px;">SUBMITTED TO WEBHOOK</span>
+                                @elseif($i->whatsapp_status === 'delivered')
+                                    <span class="badge-status badge-delivered" style="font-size:10px; padding:1px 6px;">DELIVERED</span>
+                                @elseif($i->whatsapp_status === 'queued')
+                                    <span class="badge-status badge-queued" style="font-size:10px; padding:1px 6px;">QUEUED</span>
+                                @elseif($i->whatsapp_status === 'blocked')
+                                    <span class="badge-status badge-blocked" style="font-size:10px; padding:1px 6px;" title="{{ $i->whatsapp_error }}">BLOCKED: {{ $i->whatsapp_error }}</span>
+                                @elseif($i->whatsapp_status === 'failed')
+                                    <span class="badge-status badge-failed" style="font-size:10px; padding:1px 6px;">FAILED</span>
+                                @else
+                                    <span class="muted" style="font-size:10px;">Not sent</span>
+                                @endif
+                            </div>
+
+                            @if((!$i->contact_verified || !$i->messaging_opt_in) && isset($studentByInvoice))
+                                @php($firstStudentId = $studentByInvoice->get($i->id))
+                                @if($firstStudentId)
+                                    <div style="margin-top:3px;">
+                                        <a href="/manage-student/{{ $firstStudentId }}" style="font-size:10px; color:#7367f0; text-decoration:underline;">Verify Contact</a>
+                                    </div>
+                                @endif
+                            @endif
+                        </td>
                         <td><a href="/invoices/{{ $i->id }}/pdf" target="_blank" rel="noopener" class="btn small">View PDF</a></td>
                     </tr>
                 @empty
@@ -185,8 +225,20 @@
 
     {{-- DELIVERY STATUS & HISTORY SECTION --}}
     <div class="delivery-history-wrap">
-        <h3 style="margin:0 0 6px 0; font-size:15px; color:#1e293b;">Outbound Webhook Delivery History (Recent Events)</h3>
-        <p class="muted" style="margin:0 0 14px 0; font-size:12px;">Audit trail of recently queued, submitted, or failed webhook dispatches. Failed or blocked events can be re-queued.</p>
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
+            <div>
+                <h3 style="margin:0 0 6px 0; font-size:15px; color:#1e293b;">Outbound Webhook Delivery History (Recent Events)</h3>
+                <p class="muted" style="margin:0; font-size:12px;">Audit trail of recently queued, submitted, or failed webhook dispatches. Failed or blocked events can be re-queued.</p>
+            </div>
+            @if(!empty($queuedJobCount))
+                <form method="post" action="{{ route('invoices.notifications.process_queue') }}" style="margin:0;">
+                    @csrf
+                    <button class="btn small" type="submit" style="background:#e0f2fe; color:#0369a1; border:1px solid #7dd3fc; font-weight:700;">
+                        ⚡ Process Pending Queue ({{ $queuedJobCount }})
+                    </button>
+                </form>
+            @endif
+        </div>
 
         <div class="table-wrap">
             <table class="table" style="font-size:12px;">
@@ -226,11 +278,11 @@
                         <td>{{ $n->created_at }}</td>
                         <td>{{ $n->last_attempt_at ?? ($n->submitted_at ?? '—') }}</td>
                         <td>
-                            <span class="badge-status {{ $badgeClass }}">{{ strtoupper($n->status) }}</span>
+                            <span class="badge-status {{ $badgeClass }}">{{ $n->status === 'submitted' ? 'SUBMITTED TO WEBHOOK' : strtoupper($n->status) }}</span>
                         </td>
                         <td style="max-width:240px; word-break:break-all; color:#64748b;">
                             @if($n->error)
-                                <span style="color:#b91c1c;">{{ Str::limit($n->error, 80) }}</span>
+                                <span style="color:#b91c1c; font-weight:600;">{{ Str::limit($n->error, 120) }}</span>
                             @elseif($n->provider_message_id)
                                 <span style="color:#166534;">ID: {{ $n->provider_message_id }}</span>
                             @elseif($n->response_code)

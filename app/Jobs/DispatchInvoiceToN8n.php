@@ -74,18 +74,11 @@ class DispatchInvoiceToN8n implements ShouldQueue
             $channels = explode(',', $notification->channel);
         }
 
-        $hasValidChannel = false;
-        if (in_array('whatsapp', $channels, true) && $family->whatsapp && $family->contact_verified && $family->messaging_opt_in) {
-            $hasValidChannel = true;
-        }
-        if (in_array('email', $channels, true) && $family->email && $family->contact_verified) {
-            $hasValidChannel = true;
-        }
-
-        if (!$hasValidChannel) {
+        $failureReason = WebhookSettingService::evaluateContactEligibility($family, $channels);
+        if ($failureReason !== null) {
             DB::table('notifications')->where('id', $notification->id)->update([
                 'status' => 'blocked',
-                'error' => 'Contact missing/unverified or WhatsApp permission absent',
+                'error' => $failureReason,
                 'updated_at' => now(),
             ]);
             return;

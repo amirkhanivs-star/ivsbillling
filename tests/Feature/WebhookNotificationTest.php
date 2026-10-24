@@ -921,4 +921,169 @@ class WebhookNotificationTest extends TestCase
         $resInvalid->assertRedirect('/settings/webhooks');
         $resInvalid->assertSessionHasErrors(['url']);
     }
+
+    /**
+     * 18. Contact eligibility: distinguishes missing, unverified, and consent absent failure reasons.
+     */
+    public function test_contact_eligibility_scenarios_and_specific_diagnostic_failure_reasons(): void
+    {
+        $data = $this->setupBillingData();
+        $this->configureWebhooks();
+
+        // A. Contact present but NOT verified
+        DB::table('families')->where('id', $data['family'])->update([
+            'whatsapp' => '+966500000001',
+            'contact_verified' => false,
+            'messaging_opt_in' => false,
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        $notif1 = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        $this->assertNotNull($notif1);
+        $this->assertSame('blocked', $notif1->status);
+        $this->assertSame('Unverified contact', $notif1->error);
+        $this->assertStringNotContainsString('WhatsApp missing', $notif1->error);
+
+        // B. Contact verified, but WhatsApp consent ABSENT
+        DB::table('notifications')->truncate();
+        DB::table('families')->where('id', $data['family'])->update([
+            'contact_verified' => true,
+            'messaging_opt_in' => false,
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        $notif2 = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        $this->assertNotNull($notif2);
+        $this->assertSame('blocked', $notif2->status);
+        $this->assertStringContainsString('Consent not recorded', $notif2->error);
+        $this->assertStringContainsString('WhatsApp permission absent', $notif2->error);
+
+        // C. Contact missing altogether
+        DB::table('notifications')->truncate();
+        DB::table('families')->where('id', $data['family'])->update([
+            'whatsapp' => null,
+            'contact_verified' => false,
+            'messaging_opt_in' => false,
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        $notif3 = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        $this->assertNotNull($notif3);
+        $this->assertSame('blocked', $notif3->status);
+        $this->assertSame('WhatsApp missing', $notif3->error);
+
+        // D. Verified contact with genuine consent -> Queued and submitted to webhook
+        DB::table('notifications')->truncate();
+        DB::table('families')->where('id', $data['family'])->update([
+            'whatsapp' => '+966500000001',
+            'contact_verified' => true,
+            'messaging_opt_in' => true,
+        ]);
+
+        Http::fake([
+            'https://n8n.example.com/*' => Http::response(['ok' => true, 'message_id' => 'msg-999'], 200),
+        ]);
+
+        Queue::fake([DispatchInvoiceToN8n::class]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        $notif4 = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        $this->assertNotNull($notif4);
+        $this->assertSame('queued', $notif4->status);
+        Queue::assertPushed(DispatchInvoiceToN8n::class);
+
+        // Execute queued job manually
+        (new DispatchInvoiceToN8n($notif4->id))->handle();
+
+        $notif4Submitted = DB::table('notifications')->where('id', $notif4->id)->first();
+        $this->assertSame('submitted', $notif4Submitted->status);
+        $this->assertNotSame('delivered', $notif4Submitted->status); // Submitted != delivered!
+        $this->assertSame('msg-999', $notif4Submitted->provider_message_id);
+    }
+
+    /**
+     * 19. Staff verification workflow, reverification policy on phone change, and queue worker execution.
+     */
+    public function test_staff_verification_workflow_reverification_policy_and_queue_processing(): void
+    {
+        $data = $this->setupBillingData();
+        $this->configureWebhooks();
+
+        // 1. Staff records contact verification and opt-in via POST /families/{id}/contact
+        $this->actingAs($data['superAdmin'])
+            ->post("/families/{$data['family']}/contact", [
+                'guardian_name' => 'Guardian Verified',
+                'email' => 'verified@example.test',
+                'whatsapp' => '+966500000001',
+                'contact_verified' => '1',
+                'messaging_opt_in' => '1',
+            ])
+            ->assertRedirect()
+            ->assertSessionHas('notice');
+
+        $family = DB::table('families')->where('id', $data['family'])->first();
+        $this->assertTrue((bool)$family->contact_verified);
+        $this->assertTrue((bool)$family->messaging_opt_in);
+
+        // Audit log created with staff id
+        $this->assertTrue(DB::table('audit_logs')
+            ->where('actor_id', $data['superAdmin']->id)
+            ->where('action', 'family_contact_updated')
+            ->where('subject_id', $data['family'])
+            ->exists());
+
+        // 2. Reverification policy: changing phone number resets verification unless explicitly confirmed
+        $this->actingAs($data['superAdmin'])
+            ->post("/families/{$data['family']}/contact", [
+                'guardian_name' => 'Guardian Verified',
+                'email' => 'verified@example.test',
+                'whatsapp' => '+966500000002', // changed phone
+                // contact_verified not sent -> resets!
+            ])
+            ->assertRedirect();
+
+        $familyUpdated = DB::table('families')->where('id', $data['family'])->first();
+        $this->assertSame('+966500000002', $familyUpdated->whatsapp);
+        $this->assertFalse((bool)$familyUpdated->contact_verified);
+        $this->assertFalse((bool)$familyUpdated->messaging_opt_in);
+
+        // 3. Process queue endpoint executes queued jobs safely
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/notifications/process-queue')
+            ->assertRedirect()
+            ->assertSessionHas('notice');
+    }
 }
+
