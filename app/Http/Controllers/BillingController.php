@@ -306,64 +306,187 @@ class BillingController {
    }
   }
 
-  $count=0;$blocked=0;
-  $channels=array_values(array_unique($d['channels']));
-  $channelsStr=implode(',',$channels);
+  $queuedCount = 0;
+  $retriedCount = 0;
+  $blockedCount = 0;
+  $skippedQueued = 0;
+  $skippedSubmitted = 0;
+  $skippedDelivered = 0;
+  $channels = array_values(array_unique($d['channels']));
+  $channelsStr = implode(',', $channels);
 
-  foreach($invoices as $invoice){
-   $family=DB::table('families')->where('id',$invoice->family_id)->first();
-   $failureReason=WebhookSettingService::evaluateContactEligibility($family,$channels);
+  foreach ($invoices as $invoice) {
+   $family = DB::table('families')->where('id', $invoice->family_id)->first();
+   $failureReason = WebhookSettingService::evaluateContactEligibility($family, $channels);
 
-   if($failureReason!==null){
-    $blocked++;
-    DB::table('notifications')->insert([
-     'invoice_id'=>$invoice->id,
-     'channel'=>$channelsStr,
-     'kind'=>$webhookType,
-     'webhook_type'=>$webhookType,
-     'event_type'=>"invoice.{$webhookType}",
-     'channels'=>json_encode($channels),
-     'idempotency_key'=>"inv-{$invoice->id}-{$webhookType}-blocked-".\Illuminate\Support\Str::random(10),
-     'event_id'=>(string)\Illuminate\Support\Str::uuid(),
-     'status'=>'blocked',
-     'error'=>$failureReason,
-     'approved_by'=>$r->user()->id,
-     'created_at'=>now(),
-     'updated_at'=>now(),
-    ]);
-    continue;
+   $notificationIdToDispatch = null;
+
+   try {
+    DB::transaction(function () use (
+     $invoice, $channels, $channelsStr, $webhookType, $failureReason, $r,
+     &$queuedCount, &$retriedCount, &$blockedCount, &$skippedQueued, &$skippedSubmitted, &$skippedDelivered, &$notificationIdToDispatch
+    ) {
+     // Look up existing notification using complete uniqueness identity: invoice_id, channel, kind
+     $existing = DB::table('notifications')
+      ->where('invoice_id', $invoice->id)
+      ->where('channel', $channelsStr)
+      ->where('kind', $webhookType)
+      ->lockForUpdate()
+      ->first();
+
+     if ($existing) {
+      switch ($existing->status) {
+       case 'queued':
+        // QUEUED: Do not queue it a second time.
+        $skippedQueued++;
+        return;
+
+       case 'submitted':
+        // SUBMITTED: Do not resubmit automatically.
+        $skippedSubmitted++;
+        return;
+
+       case 'delivered':
+       case 'read':
+        // DELIVERED or READ: Do not resend.
+        $skippedDelivered++;
+        return;
+
+       case 'blocked':
+        // BLOCKED: Re-evaluate contact eligibility after legitimate verification and consent were recorded, then allow an authorized retry.
+        if ($failureReason !== null) {
+         DB::table('notifications')->where('id', $existing->id)->update([
+          'error' => $failureReason,
+          'approved_by' => $r->user()->id,
+          'updated_at' => now(),
+         ]);
+         $blockedCount++;
+         return;
+        }
+
+        // Contact is now eligible -> allow authorized retry of the existing notification
+        DB::table('notifications')->where('id', $existing->id)->update([
+         'status' => 'queued',
+         'error' => null,
+         'approved_by' => $r->user()->id,
+         'updated_at' => now(),
+        ]);
+        DB::table('invoices')->where('id', $invoice->id)->update(['approved_to_send' => true]);
+        $notificationIdToDispatch = $existing->id;
+        $retriedCount++;
+        return;
+
+       case 'failed':
+        // FAILED: Allow controlled retry of the existing notification.
+        if ($failureReason !== null) {
+         DB::table('notifications')->where('id', $existing->id)->update([
+          'status' => 'blocked',
+          'error' => $failureReason,
+          'approved_by' => $r->user()->id,
+          'updated_at' => now(),
+         ]);
+         $blockedCount++;
+         return;
+        }
+
+        // Contact is eligible -> allow controlled retry of the existing notification
+        DB::table('notifications')->where('id', $existing->id)->update([
+         'status' => 'queued',
+         'error' => null,
+         'approved_by' => $r->user()->id,
+         'updated_at' => now(),
+        ]);
+        DB::table('invoices')->where('id', $invoice->id)->update(['approved_to_send' => true]);
+        $notificationIdToDispatch = $existing->id;
+        $retriedCount++;
+        return;
+
+       default:
+        // Respect current lifecycle
+        $skippedSubmitted++;
+        return;
+      }
+     }
+
+     // No existing notification record exists: create new record
+     if ($failureReason !== null) {
+      $blockedCount++;
+      DB::table('notifications')->insert([
+       'invoice_id' => $invoice->id,
+       'channel' => $channelsStr,
+       'kind' => $webhookType,
+       'webhook_type' => $webhookType,
+       'event_type' => "invoice.{$webhookType}",
+       'channels' => json_encode($channels),
+       'idempotency_key' => "inv-{$invoice->id}-{$webhookType}-blocked-" . \Illuminate\Support\Str::random(10),
+       'event_id' => (string)\Illuminate\Support\Str::uuid(),
+       'status' => 'blocked',
+       'error' => $failureReason,
+       'approved_by' => $r->user()->id,
+       'created_at' => now(),
+       'updated_at' => now(),
+      ]);
+      return;
+     }
+
+     $idempotencyKey = "inv-{$invoice->id}-{$webhookType}-" . hash('sha256', "{$invoice->id}-{$webhookType}-{$channelsStr}-" . now()->toDateString());
+
+     $notificationId = DB::table('notifications')->insertGetId([
+      'invoice_id' => $invoice->id,
+      'channel' => $channelsStr,
+      'kind' => $webhookType,
+      'webhook_type' => $webhookType,
+      'event_type' => "invoice.{$webhookType}",
+      'channels' => json_encode($channels),
+      'idempotency_key' => $idempotencyKey,
+      'event_id' => (string)\Illuminate\Support\Str::uuid(),
+      'status' => 'queued',
+      'approved_by' => $r->user()->id,
+      'created_at' => now(),
+      'updated_at' => now(),
+     ]);
+
+     DB::table('invoices')->where('id', $invoice->id)->update(['approved_to_send' => true]);
+     $notificationIdToDispatch = $notificationId;
+     $queuedCount++;
+    });
+
+    if ($notificationIdToDispatch) {
+     DispatchInvoiceToN8n::dispatch($notificationIdToDispatch)->onQueue('notifications');
+    }
+   } catch (\Illuminate\Database\QueryException $e) {
+    if ($e->getCode() === '23000' || str_contains($e->getMessage(), 'Duplicate entry')) {
+     // Concurrent submission created this record; treat as already queued/processed
+     $skippedQueued++;
+    } else {
+     throw $e;
+    }
    }
-
-   $existing=DB::table('notifications')
-    ->where('invoice_id',$invoice->id)
-    ->where('webhook_type',$webhookType)
-    ->whereIn('status',['queued','submitted','delivered','read'])
-    ->first();
-   if($existing)continue;
-
-   $idempotencyKey="inv-{$invoice->id}-{$webhookType}-".hash('sha256',"{$invoice->id}-{$webhookType}-{$channelsStr}-".now()->toDateString());
-
-   $notificationId=DB::table('notifications')->insertGetId([
-    'invoice_id'=>$invoice->id,
-    'channel'=>$channelsStr,
-    'kind'=>$webhookType,
-    'webhook_type'=>$webhookType,
-    'event_type'=>"invoice.{$webhookType}",
-    'channels'=>json_encode($channels),
-    'idempotency_key'=>$idempotencyKey,
-    'event_id'=>(string)\Illuminate\Support\Str::uuid(),
-    'status'=>'queued',
-    'approved_by'=>$r->user()->id,
-    'created_at'=>now(),
-    'updated_at'=>now(),
-   ]);
-
-   DB::table('invoices')->where('id',$invoice->id)->update(['approved_to_send'=>true]);
-   DispatchInvoiceToN8n::dispatch($notificationId)->onQueue('notifications');
-   $count++;
   }
 
-  return back()->with('notice',"Queued {$count} {$webhookType} invoice event(s) to ".ucfirst($webhookType)." Invoice Webhook; {$blocked} blocked pending verified contact/consent.");
+  // Construct informative summary
+  $summaryParts = [];
+  $totalQueued = $queuedCount + $retriedCount;
+  if ($totalQueued > 0) {
+   $summaryParts[] = "Queued {$totalQueued} " . ucfirst($webhookType) . " invoice event(s) for delivery" . ($retriedCount > 0 ? " ({$retriedCount} retried)" : "");
+  }
+  if ($blockedCount > 0) {
+   $summaryParts[] = "{$blockedCount} blocked pending contact verification/consent";
+  }
+  $alreadyCount = $skippedQueued + $skippedSubmitted + $skippedDelivered;
+  if ($alreadyCount > 0) {
+   $details = [];
+   if ($skippedQueued > 0) $details[] = "{$skippedQueued} already queued";
+   if ($skippedSubmitted > 0) $details[] = "{$skippedSubmitted} already submitted to webhook";
+   if ($skippedDelivered > 0) $details[] = "{$skippedDelivered} already delivered";
+   $summaryParts[] = "{$alreadyCount} skipped (" . implode(', ', $details) . ")";
+  }
+
+  $notice = !empty($summaryParts)
+   ? implode('; ', $summaryParts) . '.'
+   : "No new notifications required processing.";
+
+  return back()->with('notice', $notice);
  }
  public function retryNotification(Request $r, int $notificationId){
   abort_if($r->user()->role==='auditor',403);

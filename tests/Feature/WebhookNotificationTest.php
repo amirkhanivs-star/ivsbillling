@@ -1254,5 +1254,251 @@ class WebhookNotificationTest extends TestCase
         $emailEligibility = WebhookSettingService::evaluateContactEligibility($family, ['email']);
         $this->assertSame('Unverified contact', $emailEligibility, 'Email must not be falsely verified by WhatsApp authorization');
     }
+
+    /**
+     * 22. Bulk send lifecycle handling: prevents duplicate key SQL crashes, handles all statuses, and safely retries.
+     */
+    public function test_bulk_send_lifecycle_handling_prevents_duplicate_key_crashes_and_allows_safe_retries(): void
+    {
+        $data = $this->setupBillingData();
+        $this->configureWebhooks();
+        Queue::fake([DispatchInvoiceToN8n::class]);
+
+        $campus = DB::table('campuses')->value('id');
+        $dept = DB::table('departments')->where('code', 'school')->value('id');
+
+        // Family 1: Verified & consented with failed notification (matching Invoice 8071 condition)
+        $fam1 = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-LIFECYCLE-1',
+            'guardian_name' => 'Guardian 1',
+            'whatsapp' => '+966500000010',
+            'contact_verified' => true,
+            'whatsapp_verified' => true,
+            'messaging_opt_in' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $invFailed = DB::table('invoices')->insertGetId([
+            'billing_run_id' => $data['invoice']->billing_run_id,
+            'family_id' => $fam1,
+            'campus_id' => $campus,
+            'department_id' => $dept,
+            'currency' => 'SAR',
+            'invoice_number' => 'INV-LIFECYCLE-FAILED',
+            'issued_on' => now()->toDateString(),
+            'due_date' => now()->addDays(15)->toDateString(),
+            'total_minor' => 10000,
+            'paid_minor' => 0,
+            'status' => 'issued',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $notifFailedId = DB::table('notifications')->insertGetId([
+            'invoice_id' => $invFailed,
+            'channel' => 'whatsapp',
+            'kind' => 'monthly',
+            'webhook_type' => 'monthly',
+            'event_type' => 'invoice.monthly',
+            'status' => 'failed',
+            'error' => 'Webhook HTTP 404',
+            'attempts' => 1,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Family 2: Previously blocked, but now verified
+        $fam2 = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-LIFECYCLE-2',
+            'guardian_name' => 'Guardian 2',
+            'whatsapp' => '+966500000020',
+            'contact_verified' => true,
+            'whatsapp_verified' => true,
+            'messaging_opt_in' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $invBlockedToRetry = DB::table('invoices')->insertGetId([
+            'billing_run_id' => $data['invoice']->billing_run_id,
+            'family_id' => $fam2,
+            'campus_id' => $campus,
+            'department_id' => $dept,
+            'currency' => 'SAR',
+            'invoice_number' => 'INV-LIFECYCLE-BLOCKED-RETRY',
+            'issued_on' => now()->toDateString(),
+            'due_date' => now()->addDays(15)->toDateString(),
+            'total_minor' => 10000,
+            'paid_minor' => 0,
+            'status' => 'issued',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $notifBlockedId = DB::table('notifications')->insertGetId([
+            'invoice_id' => $invBlockedToRetry,
+            'channel' => 'whatsapp',
+            'kind' => 'monthly',
+            'webhook_type' => 'monthly',
+            'event_type' => 'invoice.monthly',
+            'status' => 'blocked',
+            'error' => 'Unverified contact',
+            'attempts' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Family 3: Already submitted
+        $fam3 = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-LIFECYCLE-3',
+            'guardian_name' => 'Guardian 3',
+            'whatsapp' => '+966500000030',
+            'contact_verified' => true,
+            'whatsapp_verified' => true,
+            'messaging_opt_in' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $invSubmitted = DB::table('invoices')->insertGetId([
+            'billing_run_id' => $data['invoice']->billing_run_id,
+            'family_id' => $fam3,
+            'campus_id' => $campus,
+            'department_id' => $dept,
+            'currency' => 'SAR',
+            'invoice_number' => 'INV-LIFECYCLE-SUBMITTED',
+            'issued_on' => now()->toDateString(),
+            'due_date' => now()->addDays(15)->toDateString(),
+            'total_minor' => 10000,
+            'paid_minor' => 0,
+            'status' => 'issued',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('notifications')->insert([
+            'invoice_id' => $invSubmitted,
+            'channel' => 'whatsapp',
+            'kind' => 'monthly',
+            'webhook_type' => 'monthly',
+            'event_type' => 'invoice.monthly',
+            'status' => 'submitted',
+            'attempts' => 1,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Family 4: Still unverified (blocked)
+        $fam4 = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-LIFECYCLE-4',
+            'guardian_name' => 'Guardian 4',
+            'whatsapp' => '+966500000040',
+            'contact_verified' => false,
+            'whatsapp_verified' => false,
+            'messaging_opt_in' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $invUnverified = DB::table('invoices')->insertGetId([
+            'billing_run_id' => $data['invoice']->billing_run_id,
+            'family_id' => $fam4,
+            'campus_id' => $campus,
+            'department_id' => $dept,
+            'currency' => 'SAR',
+            'invoice_number' => 'INV-LIFECYCLE-UNVERIFIED',
+            'issued_on' => now()->toDateString(),
+            'due_date' => now()->addDays(15)->toDateString(),
+            'total_minor' => 10000,
+            'paid_minor' => 0,
+            'status' => 'issued',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Enroll students so grade validation passes
+        $progId = DB::table('programs')->value('id');
+        $invFamilies = [
+            $invFailed => $fam1,
+            $invBlockedToRetry => $fam2,
+            $invSubmitted => $fam3,
+            $invUnverified => $fam4,
+        ];
+        foreach ([$invFailed, $invBlockedToRetry, $invSubmitted, $invUnverified] as $invId) {
+            $studentId = DB::table('students')->insertGetId([
+                'family_id' => $invFamilies[$invId],
+                'name' => 'Student ' . $invId,
+                'gr_number' => 'GR-' . $invId,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            $enrId = DB::table('enrollments')->insertGetId([
+                'student_id' => $studentId,
+                'campus_id' => $campus,
+                'department_id' => $dept,
+                'program_id' => $progId,
+                'grade_label' => 'Grade 1',
+                'currency' => 'SAR',
+                'status' => 'active',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('invoice_items')->insert([
+                'invoice_id' => $invId,
+                'enrollment_id' => $enrId,
+                'student_id' => $studentId,
+                'amount_minor' => 10000,
+                'discount_minor' => 0,
+                'net_minor' => 10000,
+                'paid_minor' => 0,
+                'currency' => 'SAR',
+                'description' => 'Tuition',
+                'period_key' => 'monthly:2026-10-01..2026-10-31:' . $invId,
+                'period_start' => '2026-10-01',
+                'period_end' => '2026-10-31',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        // Execute bulk send with duplicates in invoice_ids array
+        $response = $this->actingAs($data['superAdmin'])
+            ->from('/invoices')
+            ->post('/invoices/send', [
+                'invoice_ids' => [
+                    $invFailed, $invFailed, // duplicate ID
+                    $invBlockedToRetry,
+                    $invSubmitted,
+                    $invUnverified,
+                ],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        // No HTTP 500!
+        $response->assertRedirect('/invoices');
+        $response->assertSessionHas('notice');
+
+        // Check summary notice
+        $notice = session('notice');
+        $this->assertStringContainsString('Queued 2 Monthly invoice event(s) for delivery (2 retried)', $notice);
+        $this->assertStringContainsString('1 blocked pending contact verification/consent', $notice);
+        $this->assertStringContainsString('1 skipped (1 already submitted to webhook)', $notice);
+
+        // Check that failed notification was retried (status changed to queued, not duplicated)
+        $this->assertSame(1, DB::table('notifications')->where('invoice_id', $invFailed)->count());
+        $retriedNotif = DB::table('notifications')->where('id', $notifFailedId)->first();
+        $this->assertSame('queued', $retriedNotif->status);
+        $this->assertNull($retriedNotif->error);
+
+        // Check that blocked notification was retried
+        $this->assertSame(1, DB::table('notifications')->where('invoice_id', $invBlockedToRetry)->count());
+        $retriedBlocked = DB::table('notifications')->where('id', $notifBlockedId)->first();
+        $this->assertSame('queued', $retriedBlocked->status);
+
+        // Check that submitted notification was untouched
+        $submittedNotif = DB::table('notifications')->where('invoice_id', $invSubmitted)->first();
+        $this->assertSame('submitted', $submittedNotif->status);
+
+        // Check that unverified invoice has a blocked notification
+        $unverifiedNotif = DB::table('notifications')->where('invoice_id', $invUnverified)->first();
+        $this->assertSame('blocked', $unverifiedNotif->status);
+    }
 }
 
