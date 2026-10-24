@@ -226,7 +226,8 @@ class DatabaseSafetyGuard
      */
     public static function isQaDatabase(?string $connection = null): bool
     {
-        return self::isTargetDatabase($connection);
+        $activeDb = strtolower(self::getActiveDatabaseName($connection));
+        return str_contains($activeDb, '_qa') || str_contains($activeDb, 'staging');
     }
 
     public static function isTargetDatabase(?string $connection = null): bool

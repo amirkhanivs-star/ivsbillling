@@ -7,6 +7,7 @@ use App\Services\Money;
 use App\Services\ReceivePaymentService;
 use App\Services\FeeAdjustmentService;
 use App\Services\ReceiptReversalService;
+use App\Services\WebhookSettingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\URL;
@@ -196,13 +197,17 @@ class BillingController {
  public function invoices(Request $r){
   $q=DB::table('invoices as i')->join('families as f','f.id','=','i.family_id')->join('departments as d','d.id','=','i.department_id')->join('billing_runs as b','b.id','=','i.billing_run_id')
    ->select('i.*','f.family_code','f.whatsapp','f.email','d.name as department_name','b.period_start')
-   ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where('channel','whatsapp')->orderByDesc('id')->limit(1),'whatsapp_status')
-   ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where('channel','email')->orderByDesc('id')->limit(1),'email_status');
+   ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%whatsapp%')->orWhere('channels','like','%whatsapp%'))->orderByDesc('id')->limit(1),'whatsapp_status')
+   ->selectSub(DB::table('notifications')->select('status')->whereColumn('invoice_id','i.id')->where(fn($sub)=>$sub->where('channel','like','%email%')->orWhere('channels','like','%email%'))->orderByDesc('id')->limit(1),'email_status');
   if($dep=$r->query('department_id'))$q->where('i.department_id',$dep);
   if($period=$r->query('period'))$q->where('b.period_start','like',$period.'%');
-  if($r->boolean('paid_only'))$q->where('i.status','paid');
-  // Paid invoices stay in the ledger but are not eligible for demand delivery.
-  if(in_array($r->query('send_mode'),['whatsapp','email'],true)){
+  if($r->boolean('paid_only')){
+   $q->where(function($sub){
+    $sub->where('i.status','paid')->orWhere(function($sq){
+     $sq->where('i.total_minor','>',0)->whereColumn('i.paid_minor','>=','i.total_minor');
+    });
+   });
+  } else {
    $q->where('i.status','!=','paid')->whereColumn('i.paid_minor','<','i.total_minor');
   }
   if($grade=$r->query('grade'))$q->whereExists(fn($sub)=>$sub->selectRaw('1')->from('invoice_items as fi')->join('enrollments as fe','fe.id','=','fi.enrollment_id')->whereColumn('fi.invoice_id','i.id')->where('fe.grade_label',$grade));
@@ -216,14 +221,60 @@ class BillingController {
    ->whereIn('item.invoice_id',$ids)->select('item.invoice_id','s.gr_number')->distinct()->get()
    ->groupBy('invoice_id')->map(fn($rows)=>$rows->pluck('gr_number')->filter()->unique()->sort()->values()->all());
   $gradeOptions=DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
-  return view('invoices',['invoices'=>$page,'departments'=>$this->basics($r)['departments'],'gradesByInvoice'=>$gradesByInvoice,'grByInvoice'=>$grByInvoice,'gradeOptions'=>$gradeOptions]);
+
+  $recentNotifications=DB::table('notifications as n')
+   ->join('invoices as i','i.id','=','n.invoice_id')
+   ->leftJoin('users as u','u.id','=','n.approved_by')
+   ->select('n.*','i.invoice_number','u.name as approver_name')
+   ->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id)))
+   ->orderByDesc('n.id')
+   ->limit(20)
+   ->get();
+
+  $webhookService=app(WebhookSettingService::class);
+  $monthlyWebhookSetting=$webhookService->getSettings('monthly');
+  $paidWebhookSetting=$webhookService->getSettings('paid');
+
+  return view('invoices',[
+   'invoices'=>$page,
+   'departments'=>$this->basics($r)['departments'],
+   'gradesByInvoice'=>$gradesByInvoice,
+   'grByInvoice'=>$grByInvoice,
+   'gradeOptions'=>$gradeOptions,
+   'recentNotifications'=>$recentNotifications,
+   'monthlyWebhookSetting'=>$monthlyWebhookSetting,
+   'paidWebhookSetting'=>$paidWebhookSetting,
+  ]);
  }
  public function approveSend(Request $r){
   abort_if($r->user()->role==='auditor',403);
-  $d=$r->validate(['invoice_ids'=>'required|array|min:1|max:50','invoice_ids.*'=>'integer|exists:invoices,id','channels'=>'required|array|min:1','channels.*'=>'in:whatsapp,email','confirmed_grades'=>'required|array|min:1','confirmed_grades.*'=>'string|max:190','review_confirmed'=>'accepted','send_mode'=>'nullable|in:whatsapp,email','selected_grade'=>'nullable|string|max:190']);
+  $d=$r->validate([
+   'invoice_ids'=>'required|array|min:1|max:50',
+   'invoice_ids.*'=>'integer|exists:invoices,id',
+   'channels'=>'required|array|min:1',
+   'channels.*'=>'in:whatsapp,email',
+   'confirmed_grades'=>'required|array|min:1',
+   'confirmed_grades.*'=>'string|max:190',
+   'review_confirmed'=>'accepted',
+   'webhook_type'=>'nullable|in:monthly,paid',
+   'send_mode'=>'nullable|in:whatsapp,email',
+   'selected_grade'=>'nullable|string|max:190',
+  ]);
+
+  $webhookType=$d['webhook_type']??($r->boolean('paid_only')?'paid':'monthly');
+  $webhookService=app(WebhookSettingService::class);
+  $setting=$webhookService->getSettings($webhookType);
+
+  if(!$setting||!$setting->is_enabled||empty($setting->url)){
+   throw \Illuminate\Validation\ValidationException::withMessages([
+    'webhook'=>ucfirst($webhookType)." Invoice Webhook is disabled or not configured. Super Admin must configure it in Settings → Webhooks.",
+   ]);
+  }
+
   $ids=array_values(array_unique(array_map('intval',$d['invoice_ids'])));
   $invoices=DB::table('invoices')->whereIn('id',$ids)->get();
   $allGrades=DB::table('invoice_items as ii')->join('enrollments as e','e.id','=','ii.enrollment_id')->whereIn('ii.invoice_id',$ids)->whereNotNull('e.grade_label')->distinct()->pluck('e.grade_label')->all();
+
   if(in_array($d['send_mode']??null,['whatsapp','email'],true)){
    $requiredChannel=$d['send_mode'];
    if($d['channels']!==[$requiredChannel])throw \Illuminate\Validation\ValidationException::withMessages(['channels'=>'Choose only the channel selected for this delivery workflow.']);
@@ -233,28 +284,121 @@ class BillingController {
     if(array_diff($ids,$matching))throw \Illuminate\Validation\ValidationException::withMessages(['selected_grade'=>'Every selected invoice must contain the chosen grade.']);
    }
   }
+
   $missing=array_diff($allGrades,$d['confirmed_grades']);
   if(!$allGrades){$allGrades=['Not assigned'];$missing=array_diff($allGrades,$d['confirmed_grades']);}
   if($missing)throw \Illuminate\Validation\ValidationException::withMessages(['confirmed_grades'=>'Confirm every grade included in selected family invoices: '.implode(', ',$missing)]);
+
   foreach($invoices as $invoice){
    $this->assertAccess($r,$invoice->department_id,$invoice->campus_id);
-   if($invoice->status==='paid'||((int)$invoice->total_minor>0&&(int)$invoice->paid_minor>=(int)$invoice->total_minor))
+   $isSettled=($invoice->status==='paid'||((int)$invoice->total_minor>0&&(int)$invoice->paid_minor>=(int)$invoice->total_minor));
+   if($webhookType==='monthly'&&$isSettled){
     throw \Illuminate\Validation\ValidationException::withMessages(['invoice_ids'=>'Paid invoices cannot be sent as fee demands. Remove settled invoices from the selection.']);
+   }
+   if($webhookType==='paid'&&!$isSettled){
+    throw \Illuminate\Validation\ValidationException::withMessages(['invoice_ids'=>'Only fully paid invoices can be sent to the Paid Invoice Webhook. Remove unsettled invoices from the selection.']);
+   }
   }
+
   $count=0;$blocked=0;
+  $channels=array_values(array_unique($d['channels']));
+  $channelsStr=implode(',',$channels);
+
   foreach($invoices as $invoice){
    $family=DB::table('families')->where('id',$invoice->family_id)->first();
-   foreach($d['channels'] as $channel){
-    if(!$family?->contact_verified||($channel==='whatsapp'&&(!$family->messaging_opt_in||!$family->whatsapp))||($channel==='email'&&!$family->email)){$blocked++;continue;}
-    $existing=DB::table('notifications')->where(['invoice_id'=>$invoice->id,'channel'=>$channel,'kind'=>'invoice'])->first();
-    if($existing&&in_array($existing->status,['queued','submitted','delivered','read'],true))continue;
-    $notificationId=$existing?->id??DB::table('notifications')->insertGetId(['invoice_id'=>$invoice->id,'channel'=>$channel,'kind'=>'invoice','status'=>'queued','created_at'=>now(),'updated_at'=>now()]);
-    DB::table('notifications')->where('id',$notificationId)->update(['status'=>'queued','error'=>null,'updated_at'=>now()]);
-    DispatchInvoiceToN8n::dispatch($notificationId)->onQueue('notifications');$count++;
+   $hasValidChannel=false;
+   if(in_array('whatsapp',$channels,true)&&$family?->whatsapp&&$family?->contact_verified&&$family?->messaging_opt_in){
+    $hasValidChannel=true;
    }
+   if(in_array('email',$channels,true)&&$family?->email&&$family?->contact_verified){
+    $hasValidChannel=true;
+   }
+
+   if(!$hasValidChannel){
+    $blocked++;
+    DB::table('notifications')->insert([
+     'invoice_id'=>$invoice->id,
+     'channel'=>$channelsStr,
+     'kind'=>$webhookType,
+     'webhook_type'=>$webhookType,
+     'event_type'=>"invoice.{$webhookType}",
+     'channels'=>json_encode($channels),
+     'idempotency_key'=>"inv-{$invoice->id}-{$webhookType}-blocked-".\Illuminate\Support\Str::random(10),
+     'event_id'=>(string)\Illuminate\Support\Str::uuid(),
+     'status'=>'blocked',
+     'error'=>'Contact missing/unverified or WhatsApp permission absent',
+     'approved_by'=>$r->user()->id,
+     'created_at'=>now(),
+     'updated_at'=>now(),
+    ]);
+    continue;
+   }
+
+   $existing=DB::table('notifications')
+    ->where('invoice_id',$invoice->id)
+    ->where('webhook_type',$webhookType)
+    ->whereIn('status',['queued','submitted','delivered','read'])
+    ->first();
+   if($existing)continue;
+
+   $idempotencyKey="inv-{$invoice->id}-{$webhookType}-".hash('sha256',"{$invoice->id}-{$webhookType}-{$channelsStr}-".now()->toDateString());
+
+   $notificationId=DB::table('notifications')->insertGetId([
+    'invoice_id'=>$invoice->id,
+    'channel'=>$channelsStr,
+    'kind'=>$webhookType,
+    'webhook_type'=>$webhookType,
+    'event_type'=>"invoice.{$webhookType}",
+    'channels'=>json_encode($channels),
+    'idempotency_key'=>$idempotencyKey,
+    'event_id'=>(string)\Illuminate\Support\Str::uuid(),
+    'status'=>'queued',
+    'approved_by'=>$r->user()->id,
+    'created_at'=>now(),
+    'updated_at'=>now(),
+   ]);
+
    DB::table('invoices')->where('id',$invoice->id)->update(['approved_to_send'=>true]);
+   DispatchInvoiceToN8n::dispatch($notificationId)->onQueue('notifications');
+   $count++;
   }
-  return back()->with('notice',"Queued {$count} messages; {$blocked} channels blocked pending verified contact/consent.");
+
+  return back()->with('notice',"Queued {$count} {$webhookType} invoice event(s) to ".ucfirst($webhookType)." Invoice Webhook; {$blocked} blocked pending verified contact/consent.");
+ }
+ public function retryNotification(Request $r, int $notificationId){
+  abort_if($r->user()->role==='auditor',403);
+  $notification=DB::table('notifications')->where('id',$notificationId)->first();
+  abort_unless($notification,404,'Notification record not found.');
+  $invoice=DB::table('invoices')->where('id',$notification->invoice_id)->first();
+  abort_unless($invoice,404,'Associated invoice not found.');
+  $this->assertAccess($r,$invoice->department_id,$invoice->campus_id);
+
+  if(!in_array($notification->status,['failed','blocked'],true)){
+   return back()->with('error','Only failed or blocked notifications can be retried.');
+  }
+
+  DB::table('notifications')->where('id',$notification->id)->update([
+   'status'=>'queued',
+   'error'=>null,
+   'updated_at'=>now(),
+  ]);
+
+  DB::table('audit_logs')->insert([
+   'actor_id'=>$r->user()->id,
+   'action'=>'notification.retry',
+   'subject_type'=>'notification',
+   'subject_id'=>$notification->id,
+   'metadata'=>json_encode([
+    'invoice_number'=>$invoice->invoice_number,
+    'webhook_type'=>$notification->webhook_type,
+   ]),
+   'created_at'=>now(),
+   'updated_at'=>now(),
+  ]);
+
+  DispatchInvoiceToN8n::dispatch($notification->id)->onQueue('notifications');
+
+  return back()->with('notice',"Notification for invoice {$invoice->invoice_number} has been re-queued for delivery.");
  }
  public function collection(Request $r){
   $family=null;$invoices=collect();$invoiceItems=collect();$payments=collect();$dueGroups=collect();$registrationStatus=null;

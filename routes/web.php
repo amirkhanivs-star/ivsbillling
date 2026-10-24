@@ -12,6 +12,9 @@ Route::post('/webhook/n8n/callback',[B::class,'callback'])->name('n8n.callback')
 Route::get('/public/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invoices.signed_pdf')->middleware('signed');
 Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/dashboard',[B::class,'dashboard']);Route::get('/settings/branding',[B::class,'branding']);Route::post('/settings/branding',[B::class,'saveBranding']);
+ Route::get('/settings/webhooks',[\App\Http\Controllers\WebhookSettingsController::class,'index'])->name('settings.webhooks');
+ Route::post('/settings/webhooks/{type}',[\App\Http\Controllers\WebhookSettingsController::class,'update'])->name('settings.webhooks.update');
+ Route::post('/settings/webhooks/{type}/test',[\App\Http\Controllers\WebhookSettingsController::class,'test'])->name('settings.webhooks.test');
  Route::get('/manage-branches',[B::class,'campuses']);Route::post('/manage-branches',[B::class,'addCampus']);
  Route::get('/manage-classes',[B::class,'classes']);Route::post('/manage-classes',[B::class,'addClass']);
  Route::get('/manage-student',[B::class,'students']);Route::post('/manage-student/import',[Admission::class,'import'])->name('student.import');Route::post('/manage-student/import-preloaded',[Admission::class,'importPreloaded'])->name('student.import.preloaded');Route::get('/manage-student/admission/new',[Admission::class,'create'])->name('student.admission.create');Route::post('/manage-student/admission/new',[Admission::class,'store'])->name('student.admission.store');Route::get('/manage-student/admission/check-number',[Admission::class,'checkRegistrationNumber'])->name('student.admission.check-number')->middleware('throttle:30,1');Route::get('/manage-student/{student}',[B::class,'showStudent']);Route::get('/manage-student/{student}/edit',[Admission::class,'edit'])->name('student.admission.edit');Route::put('/manage-student/{student}',[Admission::class,'update'])->name('student.admission.update');Route::post('/manage-student/{student}/status',[B::class,'studentStatus'])->name('student.status');Route::delete('/manage-student/{student}',[B::class,'deleteStudent'])->name('student.delete');Route::post('/manage-student/{student}/enrollments',[B::class,'addEnrollment']);Route::post('/families/{family}/contact',[B::class,'updateFamilyContact']);
@@ -19,6 +22,7 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/manage-fee/catalog',[FC::class,'store']);Route::put('/manage-fee/catalog/{rate}',[FC::class,'update']);Route::delete('/manage-fee/catalog/{rate}',[FC::class,'destroy'])->name('fee.catalog.destroy');Route::delete('/manage-fee/types/{type}',[FC::class,'destroyType'])->name('fee.types.destroy');Route::post('/manage-fee/increment',[FC::class,'increment']);
  Route::get('/fee-creator',[B::class,'creator']);Route::post('/fee-creator',[B::class,'generate']);
  Route::get('/invoices',[B::class,'invoices']);Route::post('/invoices/send',[B::class,'approveSend']);
+ Route::post('/invoices/notifications/{notification}/retry',[B::class,'retryNotification'])->name('invoices.notifications.retry');
  Route::get('/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invoices.pdf');
  Route::get('/students/{student}/challan/pdf',[B::class,'studentConsolidatedChallanPdf'])->name('students.challan.pdf');
  Route::get('/families/{family}/challan/pdf',[B::class,'familyConsolidatedChallanPdf'])->name('families.challan.pdf');

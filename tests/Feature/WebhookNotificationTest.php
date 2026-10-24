@@ -1,0 +1,594 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Jobs\DispatchInvoiceToN8n;
+use App\Models\User;
+use App\Models\WebhookSetting;
+use App\Services\InvoiceService;
+use App\Services\WebhookSettingService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
+use Tests\TestCase;
+
+class WebhookNotificationTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function setupBillingData(string $currency = 'SAR'): array
+    {
+        $this->seed();
+
+        $campus = DB::table('campuses')->value('id');
+        $dept = DB::table('departments')->where('code', 'school')->value('id');
+        $feeType = DB::table('fee_types')->where('code', 'monthly')->value('id');
+
+        $superAdmin = User::create([
+            'name' => 'Super Admin',
+            'email' => 'superadmin@example.test',
+            'password' => bcrypt('password123'),
+            'role' => 'super_admin',
+            'is_active' => true,
+        ]);
+
+        $cashier = User::create([
+            'name' => 'Cashier User',
+            'email' => 'cashier@example.test',
+            'password' => bcrypt('password123'),
+            'role' => 'cashier',
+            'campus_id' => $campus,
+            'department_id' => $dept,
+            'is_active' => true,
+        ]);
+
+        $family = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-500',
+            'whatsapp' => '+966500000001',
+            'email' => 'guardian500@example.test',
+            'contact_verified' => true,
+            'messaging_opt_in' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $student1 = DB::table('students')->insertGetId([
+            'family_id' => $family,
+            'gr_number' => 'GR-501',
+            'name' => 'Student One',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $enroll1 = DB::table('enrollments')->insertGetId([
+            'student_id' => $student1,
+            'campus_id' => $campus,
+            'department_id' => $dept,
+            'currency' => $currency,
+            'monthly_fee_minor' => 30000,
+            'grade_label' => 'Grade 1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('fee_plan_items')->insert([
+            'enrollment_id' => $enroll1,
+            'fee_type_id' => $feeType,
+            'description' => 'Monthly Tuition',
+            'frequency' => 'monthly',
+            'currency' => $currency,
+            'amount_minor' => 30000,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $run = DB::table('billing_runs')->insertGetId([
+            'campus_id' => $campus,
+            'department_id' => $dept,
+            'frequency' => 'monthly',
+            'period_key' => 'monthly:2026-10-01..2026-10-31',
+            'period_start' => '2026-10-01',
+            'period_end' => '2026-10-31',
+            'due_date' => '2026-10-25',
+            'created_by' => $superAdmin->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $result = app(InvoiceService::class)->generate($run);
+        $invoice = DB::table('invoices')->where('billing_run_id', $run)->first();
+
+        return compact('superAdmin', 'cashier', 'family', 'student1', 'enroll1', 'invoice', 'campus', 'dept');
+    }
+
+    private function configureWebhooks(): array
+    {
+        $monthlyUrl = 'https://n8n.example.com/webhook/monthly-invoices';
+        $paidUrl = 'https://n8n.example.com/webhook/paid-invoices';
+        $secret = 'super-secret-test-key';
+
+        $svc = app(WebhookSettingService::class);
+        $svc->updateSettings('monthly', ['url' => $monthlyUrl, 'secret' => $secret, 'is_enabled' => true], 1);
+        $svc->updateSettings('paid', ['url' => $paidUrl, 'secret' => $secret, 'is_enabled' => true], 1);
+
+        return compact('monthlyUrl', 'paidUrl', 'secret');
+    }
+
+    /**
+     * 1. Monthly invoice routed ONLY to Monthly Invoice Webhook.
+     */
+    public function test_monthly_invoice_routed_only_to_monthly_webhook(): void
+    {
+        $data = $this->setupBillingData();
+        $urls = $this->configureWebhooks();
+
+        Http::fake([
+            $urls['monthlyUrl'] => Http::response(['ok' => true, 'message_id' => 'msg-monthly-1'], 200),
+            $urls['paidUrl'] => Http::response(['ok' => true, 'message_id' => 'msg-paid-1'], 200),
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ])
+            ->assertRedirect()
+            ->assertSessionHas('notice');
+
+        // Execute queued job
+        $notification = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        $this->assertNotNull($notification);
+        $this->assertSame('monthly', $notification->webhook_type);
+        $this->assertSame('invoice.monthly', $notification->event_type);
+
+        (new DispatchInvoiceToN8n($notification->id))->handle();
+
+        Http::assertSent(function ($request) use ($urls) {
+            return $request->url() === $urls['monthlyUrl']
+                && $request['event'] === 'invoice.monthly'
+                && $request->hasHeader('X-IQRA-Signature');
+        });
+
+        Http::assertNotSent(function ($request) use ($urls) {
+            return $request->url() === $urls['paidUrl'];
+        });
+
+        $this->assertSame('submitted', DB::table('notifications')->where('id', $notification->id)->value('status'));
+    }
+
+    /**
+     * 2. Fully paid invoice routed ONLY to Paid Invoice Webhook.
+     */
+    public function test_fully_paid_invoice_routed_only_to_paid_webhook(): void
+    {
+        $data = $this->setupBillingData();
+        $urls = $this->configureWebhooks();
+
+        // Mark invoice as fully settled
+        DB::table('invoices')->where('id', $data['invoice']->id)->update([
+            'status' => 'paid',
+            'paid_minor' => $data['invoice']->total_minor,
+        ]);
+
+        Http::fake([
+            $urls['monthlyUrl'] => Http::response(['ok' => true], 200),
+            $urls['paidUrl'] => Http::response(['ok' => true, 'message_id' => 'msg-paid-settled'], 200),
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'paid',
+            ])
+            ->assertRedirect()
+            ->assertSessionHas('notice');
+
+        $notification = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        $this->assertNotNull($notification);
+        $this->assertSame('paid', $notification->webhook_type);
+        $this->assertSame('invoice.paid', $notification->event_type);
+
+        (new DispatchInvoiceToN8n($notification->id))->handle();
+
+        Http::assertSent(function ($request) use ($urls) {
+            return $request->url() === $urls['paidUrl']
+                && $request['event'] === 'invoice.paid'
+                && isset($request['payment_details']);
+        });
+
+        Http::assertNotSent(function ($request) use ($urls) {
+            return $request->url() === $urls['monthlyUrl'];
+        });
+    }
+
+    /**
+     * 3. Selection and staff approval requirements.
+     */
+    public function test_selection_and_staff_approval_requirements(): void
+    {
+        $data = $this->setupBillingData();
+        $this->configureWebhooks();
+
+        // Missing invoice_ids
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+            ])
+            ->assertSessionHasErrors('invoice_ids');
+
+        // Missing confirmed_grades
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'review_confirmed' => '1',
+            ])
+            ->assertSessionHasErrors('confirmed_grades');
+
+        // Missing review confirmation checkbox
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+            ])
+            ->assertSessionHasErrors('review_confirmed');
+    }
+
+    /**
+     * 4. Correct PDF URL included in payload and accessible.
+     */
+    public function test_correct_pdf_url_included_in_payload(): void
+    {
+        $data = $this->setupBillingData();
+        $urls = $this->configureWebhooks();
+
+        $capturedPayload = null;
+        Http::fake([
+            $urls['monthlyUrl'] => function ($request) use (&$capturedPayload) {
+                $capturedPayload = $request->data();
+                return Http::response(['ok' => true], 200);
+            },
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        $notification = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        (new DispatchInvoiceToN8n($notification->id))->handle();
+
+        $this->assertNotNull($capturedPayload);
+        $this->assertArrayHasKey('pdf_attachment', $capturedPayload);
+        $this->assertArrayHasKey('pdf_url', $capturedPayload['pdf_attachment']);
+
+        $pdfUrl = $capturedPayload['pdf_attachment']['pdf_url'];
+        $this->assertStringContainsString('/public/invoices/' . $data['invoice']->id . '/pdf', $pdfUrl);
+        $this->assertStringContainsString('signature=', $pdfUrl);
+
+        // Verify the signed URL resolves without login (public signed route)
+        $response = $this->get($pdfUrl);
+        $response->assertStatus(200);
+        $this->assertSame('application/pdf', $response->headers->get('content-type'));
+    }
+
+    /**
+     * 5. Multi-student family invoices containing all correct students.
+     */
+    public function test_multi_student_family_invoices_contain_all_correct_students(): void
+    {
+        $data = $this->setupBillingData();
+        $urls = $this->configureWebhooks();
+
+        // Add second student to same family
+        $student2 = DB::table('students')->insertGetId([
+            'family_id' => $data['family'],
+            'gr_number' => 'GR-502',
+            'name' => 'Student Two',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $enroll2 = DB::table('enrollments')->insertGetId([
+            'student_id' => $student2,
+            'campus_id' => $data['campus'],
+            'department_id' => $data['dept'],
+            'currency' => 'SAR',
+            'monthly_fee_minor' => 20000,
+            'grade_label' => 'Grade 2',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('fee_plan_items')->insert([
+            'enrollment_id' => $enroll2,
+            'fee_type_id' => DB::table('fee_types')->where('code', 'monthly')->value('id'),
+            'description' => 'Monthly Tuition Sibling',
+            'frequency' => 'monthly',
+            'currency' => 'SAR',
+            'amount_minor' => 20000,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Add line item to invoice for student 2
+        DB::table('invoice_items')->insert([
+            'invoice_id' => $data['invoice']->id,
+            'student_id' => $student2,
+            'enrollment_id' => $enroll2,
+            'description' => 'Monthly Tuition Sibling',
+            'period_key' => 'monthly:2026-10-01..2026-10-31:s2',
+            'period_start' => '2026-10-01',
+            'period_end' => '2026-10-31',
+            'currency' => 'SAR',
+            'amount_minor' => 20000,
+            'discount_minor' => 0,
+            'net_minor' => 20000,
+            'paid_minor' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('invoices')->where('id', $data['invoice']->id)->update(['total_minor' => 50000]);
+
+        $capturedPayload = null;
+        Http::fake([
+            $urls['monthlyUrl'] => function ($request) use (&$capturedPayload) {
+                $capturedPayload = $request->data();
+                return Http::response(['ok' => true], 200);
+            },
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1', 'Grade 2'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        $notification = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        (new DispatchInvoiceToN8n($notification->id))->handle();
+
+        $this->assertNotNull($capturedPayload);
+        $this->assertCount(2, $capturedPayload['students']);
+        $grs = collect($capturedPayload['students'])->pluck('gr_number')->all();
+        $this->assertContains('GR-501', $grs);
+        $this->assertContains('GR-502', $grs);
+    }
+
+    /**
+     * 6. Multiple currencies preserved without conversion.
+     */
+    public function test_multiple_currencies_preserved_without_conversion(): void
+    {
+        $dataPkr = $this->setupBillingData('PKR');
+        $urls = $this->configureWebhooks();
+
+        $capturedPayload = null;
+        Http::fake([
+            $urls['monthlyUrl'] => function ($request) use (&$capturedPayload) {
+                $capturedPayload = $request->data();
+                return Http::response(['ok' => true], 200);
+            },
+        ]);
+
+        $this->actingAs($dataPkr['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$dataPkr['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        $notification = DB::table('notifications')->where('invoice_id', $dataPkr['invoice']->id)->first();
+        (new DispatchInvoiceToN8n($notification->id))->handle();
+
+        $this->assertNotNull($capturedPayload);
+        $this->assertSame('PKR', $capturedPayload['invoice']['currency']);
+        $this->assertSame('300.00', $capturedPayload['invoice']['total_amount']);
+    }
+
+    /**
+     * 7. Missing or disabled webhook settings blocks dispatch with clear message.
+     */
+    public function test_missing_or_disabled_webhook_settings_blocks_dispatch(): void
+    {
+        $data = $this->setupBillingData();
+        // Leave webhooks disabled
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ])
+            ->assertSessionHasErrors('webhook');
+
+        $this->assertSame(0, DB::table('notifications')->count());
+    }
+
+    /**
+     * 8. Missing consent or unverified contact blocks notification.
+     */
+    public function test_missing_consent_or_unverified_contact_blocks_notification(): void
+    {
+        $data = $this->setupBillingData();
+        $this->configureWebhooks();
+
+        // Revoke WhatsApp messaging opt-in
+        DB::table('families')->where('id', $data['family'])->update([
+            'messaging_opt_in' => false,
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ])
+            ->assertRedirect();
+
+        $notification = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        $this->assertNotNull($notification);
+        $this->assertSame('blocked', $notification->status);
+        $this->assertStringContainsString('WhatsApp permission absent', $notification->error);
+    }
+
+    /**
+     * 9. Duplicate submission protection.
+     */
+    public function test_duplicate_submission_protection(): void
+    {
+        $data = $this->setupBillingData();
+        $this->configureWebhooks();
+
+        // First send
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+        $this->assertSame(1, DB::table('notifications')->where('invoice_id', $data['invoice']->id)->count());
+
+        // Second duplicate send
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ]);
+
+        // Still only 1 notification event created
+        $this->assertSame(1, DB::table('notifications')->where('invoice_id', $data['invoice']->id)->count());
+    }
+
+    /**
+     * 10. Failed webhook retry without creating new invoice.
+     */
+    public function test_failed_webhook_retry_without_creating_new_invoice(): void
+    {
+        $data = $this->setupBillingData();
+        $urls = $this->configureWebhooks();
+
+        Queue::fake([DispatchInvoiceToN8n::class]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/invoices/send', [
+                'invoice_ids' => [$data['invoice']->id],
+                'channels' => ['whatsapp'],
+                'confirmed_grades' => ['Grade 1'],
+                'review_confirmed' => '1',
+                'webhook_type' => 'monthly',
+            ])
+            ->assertRedirect()
+            ->assertSessionHas('notice');
+
+        Queue::assertPushed(DispatchInvoiceToN8n::class);
+
+        $notification = DB::table('notifications')->where('invoice_id', $data['invoice']->id)->first();
+        $this->assertNotNull($notification);
+
+        // Mark notification as failed to simulate a failed prior dispatch attempt
+        DB::table('notifications')->where('id', $notification->id)->update([
+            'status' => 'failed',
+            'error' => 'Webhook HTTP 500 error from n8n endpoint',
+            'last_attempt_at' => now(),
+        ]);
+
+        $this->assertSame('failed', DB::table('notifications')->where('id', $notification->id)->value('status'));
+
+        $initialInvoiceCount = DB::table('invoices')->count();
+
+        // Staff calls Retry
+        $this->actingAs($data['superAdmin'])
+            ->post("/invoices/notifications/{$notification->id}/retry")
+            ->assertRedirect()
+            ->assertSessionHas('notice');
+
+        // Confirms notification re-queued
+        $this->assertSame('queued', DB::table('notifications')->where('id', $notification->id)->value('status'));
+        $this->assertNull(DB::table('notifications')->where('id', $notification->id)->value('error'));
+
+        Queue::assertPushed(DispatchInvoiceToN8n::class, 2);
+
+        // Zero new invoices created
+        $this->assertSame($initialInvoiceCount, DB::table('invoices')->count());
+    }
+
+    /**
+     * 11. Super Admin-only access to Webhook Settings.
+     */
+    public function test_super_admin_only_access_to_webhook_settings(): void
+    {
+        $data = $this->setupBillingData();
+
+        // Guest redirected to login
+        $this->get('/settings/webhooks')->assertRedirect('/login');
+
+        // Cashier user receives 403 Forbidden
+        $this->actingAs($data['cashier'])
+            ->get('/settings/webhooks')
+            ->assertStatus(403);
+
+        $this->actingAs($data['cashier'])
+            ->post('/settings/webhooks/monthly', ['url' => 'https://example.com'])
+            ->assertStatus(403);
+
+        // Super Admin receives 200 OK
+        $this->actingAs($data['superAdmin'])
+            ->get('/settings/webhooks')
+            ->assertStatus(200)
+            ->assertSee('Monthly Invoice Webhook')
+            ->assertSee('Paid Invoice Webhook');
+    }
+
+    /**
+     * 12. Existing invoice PDF and review functionality remains intact.
+     */
+    public function test_existing_invoice_pdf_and_review_functionality(): void
+    {
+        $data = $this->setupBillingData();
+
+        // Review page renders
+        $this->actingAs($data['superAdmin'])
+            ->get('/invoices')
+            ->assertStatus(200)
+            ->assertSee($data['invoice']->invoice_number);
+
+        // Paid-only review filter renders
+        $this->actingAs($data['superAdmin'])
+            ->get('/invoices?paid_only=1')
+            ->assertStatus(200)
+            ->assertSee('Paid Invoices · Review & Outbound Delivery');
+
+        // Standard PDF download route works
+        $this->actingAs($data['superAdmin'])
+            ->get("/invoices/{$data['invoice']->id}/pdf")
+            ->assertStatus(200)
+            ->assertHeader('content-type', 'application/pdf');
+    }
+}
