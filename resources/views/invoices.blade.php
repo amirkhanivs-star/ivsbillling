@@ -372,6 +372,7 @@
             <input type="hidden" name="grade" value="{{ request('grade') }}">
             <input type="hidden" name="period" value="{{ $selectedPeriod }}">
             <input type="hidden" name="contact_status" value="{{ request('contact_status', 'all') }}">
+            <input type="hidden" name="search" value="{{ request('search') }}">
             <input type="hidden" name="snapshot_id" value="{{ $selectionSnapshot['snapshot_id'] ?? '' }}">
             <div id="confirmed-grades-container">
                 @if(!empty($selectionSnapshot['all_grades']))
@@ -460,7 +461,7 @@
                                 @endif
                             </td>
                             <td>
-                                <strong style="color:#0f172a;">{{ $row->currency }} {{ \App\Services\Money::format($row->total_minor) }}</strong>
+                                <strong style="color:#0f172a;">{{ $row->currency }} {{ \App\Services\Money::format($row->total_minor ?? $row->total_payable_minor ?? 0) }}</strong>
                             </td>
                             <td>
                                 @if(!empty($row->dues_by_month))

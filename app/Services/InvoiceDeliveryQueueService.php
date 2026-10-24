@@ -627,13 +627,14 @@ class InvoiceDeliveryQueueService
     /**
      * Compute clean dashboard KPI statistics for the selected billing month (Section 8).
      */
-    public function getDashboardKpiStats(string $period, object $user): array
+    public function getDashboardKpiStats(string $period, object $user, array $filters = []): array
     {
         $dt = \Carbon\Carbon::createFromFormat('Y-m', $period);
         $monthName = $dt ? $dt->format('F Y') : $period;
 
         $baseInv = DB::table('invoices as i')
             ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->join('families as f', 'f.id', '=', 'i.family_id')
             ->where('b.period_start', 'like', $period . '%')
             ->whereNotIn('i.status', ['void', 'voided']);
 
@@ -644,28 +645,40 @@ class InvoiceDeliveryQueueService
             }
         }
 
-        // Ready / Awaiting Review (unpaid, not superseded by newer run, not already queued/sent)
+        // Ready / Awaiting Review (unpaid, not superseded by newer run, not already queued/sent on ANY family invoice)
         $readyQuery = (clone $baseInv)
             ->where('i.status', '!=', 'paid')
             ->whereRaw('i.total_minor > i.paid_minor')
-            ->whereNotExists(function ($sub) {
-                $sub->select(DB::raw(1))
-                    ->from('invoices as newer')
-                    ->join('billing_runs as nb', 'nb.id', '=', 'newer.billing_run_id')
-                    ->whereColumn('newer.family_id', 'i.family_id')
-                    ->whereColumn('nb.period_start', '>', 'b.period_start')
-                    ->whereNotIn('newer.status', ['void', 'voided']);
-            })
-            ->whereNotExists(function ($sub) {
+            ->whereNotExists(function ($sub) use ($period) {
                 $sub->select(DB::raw(1))
                     ->from('notifications as n')
-                    ->whereColumn('n.invoice_id', 'i.id')
+                    ->join('invoices as ni', 'ni.id', '=', 'n.invoice_id')
+                    ->join('billing_runs as nb', 'nb.id', '=', 'ni.billing_run_id')
+                    ->whereColumn('ni.family_id', 'i.family_id')
+                    ->where('nb.period_start', 'like', $period . '%')
                     ->where('n.kind', 'monthly')
                     ->whereIn('n.status', ['submitted', 'delivered', 'read', 'queued']);
             });
 
-        $awaitingReviewCount = (clone $readyQuery)->count();
-        $readyFamiliesCount = (clone $readyQuery)->distinct()->count('i.family_id');
+        // Actionable eligible ready query (verified contact + opt-in)
+        $actionableReadyQuery = (clone $readyQuery)
+            ->where('f.contact_verified', 1)
+            ->where('f.messaging_opt_in', 1)
+            ->whereNotNull('f.whatsapp')
+            ->where('f.whatsapp', '!=', '');
+
+        // Ineligible query (missing verification / opt-in)
+        $ineligibleQuery = (clone $readyQuery)
+            ->where(function ($sub) {
+                $sub->where('f.contact_verified', 0)
+                    ->orWhere('f.messaging_opt_in', 0)
+                    ->orWhereNull('f.whatsapp')
+                    ->orWhere('f.whatsapp', '');
+            });
+
+        $actionableReadyCount = (clone $actionableReadyQuery)->distinct()->count('i.family_id');
+        $actionableInvoicesCount = (clone $actionableReadyQuery)->count('i.id');
+        $ineligibleCount = (clone $ineligibleQuery)->distinct()->count('i.family_id');
 
         // Processing (currently queued in active batches)
         $procQuery = DB::table('notifications as n')
@@ -699,8 +712,8 @@ class InvoiceDeliveryQueueService
         }
         $submittedCount = $sentQuery->count();
 
-        // Needs Attention (failed or blocked)
-        $attQuery = DB::table('notifications as n')
+        // Needs Attention (failed or blocked + contact ineligible unnotified)
+        $attNotifQuery = DB::table('notifications as n')
             ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
             ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
             ->where('b.period_start', 'like', $period . '%')
@@ -708,27 +721,45 @@ class InvoiceDeliveryQueueService
             ->whereIn('n.status', ['failed', 'blocked']);
 
         if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
-            $attQuery->where('i.campus_id', $user->campus_id);
+            $attNotifQuery->where('i.campus_id', $user->campus_id);
             if (!empty($user->department_id)) {
-                $attQuery->where('i.department_id', $user->department_id);
+                $attNotifQuery->where('i.department_id', $user->department_id);
             }
         }
-        $attentionCount = $attQuery->count();
+        $attentionCount = $attNotifQuery->count() + $ineligibleCount;
+
+        // Check if there is an active search or sub-filter
+        $hasActiveSearch = !empty($filters['search']) || !empty($filters['grade']) || !empty($filters['department_id']) || !empty($filters['campus_id']);
+        $scopedEligible = null;
+        $scopedInvoices = null;
+        if ($hasActiveSearch) {
+            $batchSvc = app(BatchDeliveryService::class);
+            $scopedRes = $batchSvc->resolveFilteredSelection($filters, $user, ['whatsapp']);
+            $scopedEligible = $scopedRes['total_eligible_recipients'] ?? 0;
+            $scopedInvoices = $scopedRes['total_matched_invoices'] ?? 0;
+        }
 
         return [
             'selected_period' => $period,
             'selected_month' => $monthName,
-            'awaiting_review' => $awaitingReviewCount,
-            'ready_families' => $readyFamiliesCount,
+            'awaiting_review' => $actionableReadyCount,
+            'awaiting_review_invoices' => $actionableInvoicesCount,
+            'ready_families' => $actionableReadyCount,
+            'ready_invoices' => $actionableInvoicesCount,
             'processing' => $processingCount,
             'submitted' => $submittedCount,
             'attention' => $attentionCount,
+            'contact_ineligible' => $ineligibleCount,
+            'has_active_search' => $hasActiveSearch,
+            'scoped_eligible' => $scopedEligible,
+            'scoped_invoices' => $scopedInvoices,
         ];
     }
 
     /**
      * Get paginated active Ready to Send monthly family challans for selected billing month.
-     * Excludes old MySkool opening balances, already submitted challans, and superseded challans.
+     * Consolidates multi-invoice families into single monthly family delivery targets,
+     * properly accounting for all siblings, multi-currency balances, and previous unpaid dues.
      */
     public function getReadyToSendChallans(array $filters, object $user, int $perPage = 25): LengthAwarePaginator
     {
@@ -772,10 +803,37 @@ class InvoiceDeliveryQueueService
             });
         }
 
+        // Search filter (handles exact family code prioritization + universal search)
+        if (!empty($filters['search'])) {
+            $term = trim($filters['search']);
+            $isExactFamily = DB::table('families')->where('family_code', $term)->exists();
+            if ($isExactFamily) {
+                $q->where('f.family_code', $term);
+            } else {
+                $q->where(function ($sq) use ($term) {
+                    $sq->where('i.invoice_number', 'like', "%{$term}%")
+                       ->orWhere('f.family_code', 'like', "%{$term}%")
+                       ->orWhere('f.guardian_name', 'like', "%{$term}%")
+                       ->orWhere('f.whatsapp', 'like', "%{$term}%")
+                       ->orWhere('f.email', 'like', "%{$term}%")
+                       ->orWhereExists(function ($stSub) use ($term) {
+                           $stSub->selectRaw('1')
+                               ->from('invoice_items as st_ii')
+                               ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
+                               ->whereColumn('st_ii.invoice_id', 'i.id')
+                               ->where(function ($stQuery) use ($term) {
+                                   $stQuery->where('st_s.name', 'like', "%{$term}%")
+                                           ->orWhere('st_s.gr_number', 'like', "%{$term}%");
+                               });
+                       });
+                });
+            }
+        }
+
         // Contact eligibility filter
         if (!empty($filters['contact_status']) && $filters['contact_status'] !== 'all') {
             if ($filters['contact_status'] === 'eligible_only') {
-                $q->where('f.contact_verified', 1)->where('f.messaging_opt_in', 1)->whereNotNull('f.whatsapp');
+                $q->where('f.contact_verified', 1)->where('f.messaging_opt_in', 1)->whereNotNull('f.whatsapp')->where('f.whatsapp', '!=', '');
             } elseif ($filters['contact_status'] === 'ineligible_only') {
                 $q->where(function ($sub) {
                     $sub->where('f.contact_verified', 0)
@@ -784,107 +842,79 @@ class InvoiceDeliveryQueueService
                         ->orWhere('f.whatsapp', '');
                 });
             }
+        } else {
+            // Default in Ready to Send: only actionable eligible families
+            $q->where('f.contact_verified', 1)->where('f.messaging_opt_in', 1)->whereNotNull('f.whatsapp')->where('f.whatsapp', '!=', '');
         }
 
-        // Search filter
-        if (!empty($filters['search'])) {
-            $s = trim($filters['search']);
-            $q->where(function ($sq) use ($s) {
-                $sq->where('i.invoice_number', 'like', "%{$s}%")
-                    ->orWhere('f.family_code', 'like', "%{$s}%")
-                    ->orWhere('f.guardian_name', 'like', "%{$s}%")
-                    ->orWhere('f.whatsapp', 'like', "%{$s}%")
-                    ->orWhere('f.email', 'like', "%{$s}%")
-                    ->orWhereExists(function ($stSub) use ($s) {
-                        $stSub->select(DB::raw(1))
-                            ->from('invoice_items as st_ii')
-                            ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
-                            ->whereColumn('st_ii.invoice_id', 'i.id')
-                            ->where(function ($stQuery) use ($s) {
-                                $stQuery->where('st_s.name', 'like', "%{$s}%")
-                                    ->orWhere('st_s.gr_number', 'like', "%{$s}%");
-                            });
-                    });
-            });
+        // Exclude if ANY invoice of this family for this cycle already has an active notification
+        $q->whereNotExists(function ($sub) use ($period) {
+            $sub->select(DB::raw(1))
+                ->from('notifications as n')
+                ->join('invoices as ni', 'ni.id', '=', 'n.invoice_id')
+                ->join('billing_runs as nb', 'nb.id', '=', 'ni.billing_run_id')
+                ->whereColumn('ni.family_id', 'i.family_id')
+                ->where('nb.period_start', 'like', $period . '%')
+                ->where('n.kind', 'monthly')
+                ->whereIn('n.status', ['submitted', 'delivered', 'read', 'queued']);
+        });
+
+        // Paginate by distinct families
+        $familyIdsQuery = (clone $q)->select('i.family_id')->distinct();
+        $totalFamilies = (clone $q)->distinct()->count('i.family_id');
+
+        $currentPage = \Illuminate\Pagination\Paginator::resolveCurrentPage() ?: 1;
+        $pagedFamilyIds = (clone $familyIdsQuery)
+            ->orderByDesc('i.family_id')
+            ->forPage($currentPage, $perPage)
+            ->pluck('family_id')
+            ->all();
+
+        if (empty($pagedFamilyIds)) {
+            return new \Illuminate\Pagination\LengthAwarePaginator([], $totalFamilies, $perPage, $currentPage, [
+                'path' => \Illuminate\Pagination\Paginator::resolveCurrentPath(),
+                'query' => request()->query(),
+            ]);
         }
 
-        // Not superseded by a newer billing run for this family
-        $q->whereNotExists(function ($sub) {
-            $sub->select(DB::raw(1))
-                ->from('invoices as newer')
-                ->join('billing_runs as nb', 'nb.id', '=', 'newer.billing_run_id')
-                ->whereColumn('newer.family_id', 'i.family_id')
-                ->whereColumn('nb.period_start', '>', 'b.period_start')
-                ->whereNotIn('newer.status', ['void', 'voided']);
-        });
+        // Fetch all invoices for these paged families in this period
+        $invoices = (clone $q)
+            ->whereIn('i.family_id', $pagedFamilyIds)
+            ->select(
+                'i.id as invoice_id',
+                'i.invoice_number',
+                'i.family_id',
+                'i.campus_id',
+                'i.department_id',
+                'i.currency',
+                'i.total_minor',
+                'i.paid_minor',
+                'i.issued_on',
+                'i.due_date',
+                'i.status as invoice_status',
+                'b.period_start as billing_period',
+                'f.family_code',
+                'f.guardian_name',
+                'f.whatsapp',
+                'f.email',
+                'f.contact_verified',
+                'f.whatsapp_verified',
+                'f.email_verified',
+                'f.messaging_opt_in',
+                'd.name as department_name',
+                'c.name as campus_name'
+            )
+            ->orderByDesc('i.id')
+            ->get();
 
-        // Not already submitted or delivered
-        $q->whereNotExists(function ($sub) {
-            $sub->select(DB::raw(1))
-                ->from('notifications as n')
-                ->whereColumn('n.invoice_id', 'i.id')
-                ->where('n.kind', 'monthly')
-                ->whereIn('n.status', ['submitted', 'delivered', 'read']);
-        });
+        $invoicesByFamily = $invoices->groupBy('family_id');
+        $allInvoiceIds = $invoices->pluck('invoice_id')->all();
 
-        // Not currently in an active queue
-        $q->whereNotExists(function ($sub) {
-            $sub->select(DB::raw(1))
-                ->from('notifications as n')
-                ->whereColumn('n.invoice_id', 'i.id')
-                ->where('n.kind', 'monthly')
-                ->where('n.status', 'queued');
-        });
-
-        // Not superseded within notification lifecycle
-        $q->whereNotExists(function ($sub) {
-            $sub->select(DB::raw(1))
-                ->from('notifications as n')
-                ->whereColumn('n.invoice_id', 'i.id')
-                ->where('n.kind', 'monthly')
-                ->where('n.is_superseded', 1);
-        });
-
-        $q->select(
-            'i.id as invoice_id',
-            'i.invoice_number',
-            'i.family_id',
-            'i.campus_id',
-            'i.department_id',
-            'i.currency',
-            'i.total_minor',
-            'i.paid_minor',
-            'i.issued_on',
-            'i.due_date',
-            'i.status as invoice_status',
-            'b.period_start as billing_period',
-            'f.family_code',
-            'f.guardian_name',
-            'f.whatsapp',
-            'f.email',
-            'f.contact_verified',
-            'f.whatsapp_verified',
-            'f.email_verified',
-            'f.messaging_opt_in',
-            'd.name as department_name',
-            'c.name as campus_name'
-        )->orderByDesc('i.id');
-
-        $paginator = $q->paginate($perPage)->withQueryString();
-        $items = $paginator->getCollection();
-
-        if ($items->isEmpty()) {
-            return $paginator;
-        }
-
-        $invoiceIds = $items->pluck('invoice_id')->all();
-        $familyIds = $items->pluck('family_id')->unique()->all();
-
-        // Load students and grades for these invoices
+        // Students and grades for these invoices
         $studentsByInvoice = DB::table('invoice_items as ii')
             ->join('students as s', 's.id', '=', 'ii.student_id')
             ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
-            ->whereIn('ii.invoice_id', $invoiceIds)
+            ->whereIn('ii.invoice_id', $allInvoiceIds)
             ->select(
                 'ii.invoice_id',
                 's.id as student_id',
@@ -896,10 +926,10 @@ class InvoiceDeliveryQueueService
             ->get()
             ->groupBy('invoice_id');
 
-        // Load all active siblings for these families across other grades
+        // All active siblings for these families across other grades
         $siblingsByFamily = DB::table('students as s')
             ->join('enrollments as e', 'e.student_id', '=', 's.id')
-            ->whereIn('s.family_id', $familyIds)
+            ->whereIn('s.family_id', $pagedFamilyIds)
             ->where('s.status', 'active')
             ->where('e.status', 'active')
             ->select('s.family_id', 's.id as student_id', 's.name', 's.gr_number', 'e.grade_label')
@@ -907,34 +937,51 @@ class InvoiceDeliveryQueueService
             ->get()
             ->groupBy('family_id');
 
-        // Load previous unpaid dues month-by-month for each family
-        $earliestPeriod = $items->min('billing_period') ?: ($period . '-01');
-        $previousDuesRows = DB::table('invoices as old_inv')
+        // Previous unpaid dues across prior months for each family and currency
+        $earliestPeriod = $invoices->min('billing_period') ?: ($period . '-01');
+        $duesRows = DB::table('invoices as old_inv')
             ->join('invoice_items as old_item', 'old_item.invoice_id', '=', 'old_inv.id')
             ->join('billing_runs as ob', 'ob.id', '=', 'old_inv.billing_run_id')
-            ->whereIn('old_inv.family_id', $familyIds)
+            ->whereIn('old_inv.family_id', $pagedFamilyIds)
             ->where('ob.period_start', '<', $earliestPeriod)
             ->whereRaw('old_item.net_minor > old_item.paid_minor')
-            ->whereNotIn('old_item.status', ['voided', 'exempted', 'paid'])
+            ->whereNotIn('old_item.status', ['void', 'voided', 'paid', 'exempted'])
             ->whereNotIn('old_inv.status', ['void', 'voided', 'paid'])
             ->select(
                 'old_inv.family_id',
                 'old_inv.currency',
                 DB::raw("SUBSTRING(ob.period_start, 1, 7) as period_month"),
-                DB::raw("SUM(old_item.net_minor - old_item.paid_minor) as dues_minor")
+                DB::raw('SUM(old_item.net_minor - old_item.paid_minor) as dues_minor')
             )
             ->groupBy('old_inv.family_id', 'old_inv.currency', 'period_month')
             ->orderBy('period_month')
-            ->get()
-            ->groupBy('family_id');
+            ->get();
 
-        $enriched = $items->map(function ($row) use ($studentsByInvoice, $siblingsByFamily, $previousDuesRows) {
-            $invoiceStudents = $studentsByInvoice->get($row->invoice_id, collect());
-            $familySiblings = $siblingsByFamily->get($row->family_id, collect());
-            $familyPrevRows = $previousDuesRows->get($row->family_id, collect());
+        $duesByFamily = $duesRows->groupBy('family_id');
 
-            // Month by month previous dues
-            $duesByMonth = $familyPrevRows->map(function ($pRow) {
+        $familyRows = collect();
+        foreach ($pagedFamilyIds as $famId) {
+            $famInvoices = $invoicesByFamily->get($famId, collect());
+            if ($famInvoices->isEmpty()) continue;
+
+            $primaryInv = $famInvoices->first();
+            $invIds = $famInvoices->pluck('invoice_id')->all();
+            $invNumbers = $famInvoices->pluck('invoice_number')->all();
+
+            // Students
+            $famStudents = collect();
+            foreach ($invIds as $iId) {
+                $stList = $studentsByInvoice->get($iId, collect());
+                foreach ($stList as $st) {
+                    $famStudents->push($st);
+                }
+            }
+            $uniqueStudents = $famStudents->unique('gr_number')->values();
+            $familySiblings = $siblingsByFamily->get($famId, collect());
+
+            // Previous dues for this family
+            $famDuesRows = $duesByFamily->get($famId, collect());
+            $duesByMonth = $famDuesRows->map(function ($pRow) {
                 return [
                     'month' => $pRow->period_month,
                     'currency' => $pRow->currency,
@@ -943,61 +990,114 @@ class InvoiceDeliveryQueueService
                 ];
             })->all();
 
-            $prevDuesSameCurrency = $familyPrevRows->where('currency', $row->currency)->sum('dues_minor');
-            $remainingBalanceMinor = max(0, (int)$row->total_minor - (int)$row->paid_minor);
-            $totalPayableMinor = $remainingBalanceMinor + $prevDuesSameCurrency;
+            $prevDuesByCurr = [];
+            foreach ($famDuesRows as $dr) {
+                $prevDuesByCurr[$dr->currency] = ($prevDuesByCurr[$dr->currency] ?? 0) + (int)$dr->dues_minor;
+            }
 
-            // Multi-currency summaries if family has multiple currencies
+            // Currency breakdown
+            $byCurr = $famInvoices->groupBy('currency');
+            $currencyBreakdowns = [];
+            $totalCurrentMinor = 0;
+            $totalPrevMinor = 0;
             $currenciesMap = [];
-            $currenciesMap[$row->currency] = [
-                'currency' => $row->currency,
-                'current_minor' => $remainingBalanceMinor,
-                'previous_minor' => $prevDuesSameCurrency,
-                'total_minor' => $totalPayableMinor,
-                'formatted' => $row->currency . ' ' . Money::format($totalPayableMinor),
-            ];
 
-            foreach ($familyPrevRows as $pRow) {
-                if ($pRow->currency !== $row->currency) {
-                    if (!isset($currenciesMap[$pRow->currency])) {
-                        $currenciesMap[$pRow->currency] = [
-                            'currency' => $pRow->currency,
-                            'current_minor' => 0,
-                            'previous_minor' => 0,
-                            'total_minor' => 0,
-                            'formatted' => '',
-                        ];
-                    }
-                    $currenciesMap[$pRow->currency]['previous_minor'] += (int)$pRow->dues_minor;
-                    $currenciesMap[$pRow->currency]['total_minor'] += (int)$pRow->dues_minor;
-                    $currenciesMap[$pRow->currency]['formatted'] = $pRow->currency . ' ' . Money::format($currenciesMap[$pRow->currency]['total_minor']);
+            foreach ($byCurr as $curr => $currInvs) {
+                $currFee = $currInvs->sum(fn($ci) => max(0, (int)$ci->total_minor - (int)$ci->paid_minor));
+                $prevDues = (int)($prevDuesByCurr[$curr] ?? 0);
+                $totalPayable = $currFee + $prevDues;
+
+                $breakdownItem = [
+                    'currency' => $curr,
+                    'current_fee_minor' => $currFee,
+                    'formatted_current_fee' => $curr . ' ' . Money::format($currFee),
+                    'previous_dues_minor' => $prevDues,
+                    'formatted_previous_dues' => $curr . ' ' . Money::format($prevDues),
+                    'total_payable_minor' => $totalPayable,
+                    'formatted_total_payable' => $curr . ' ' . Money::format($totalPayable),
+                ];
+
+                $currencyBreakdowns[] = $breakdownItem;
+                $currenciesMap[$curr] = $breakdownItem;
+                $totalCurrentMinor += $currFee;
+                $totalPrevMinor += $prevDues;
+            }
+
+            // Include any currencies that only have previous dues
+            foreach ($prevDuesByCurr as $pCurr => $pAmount) {
+                if (!isset($currenciesMap[$pCurr])) {
+                    $breakdownItem = [
+                        'currency' => $pCurr,
+                        'current_fee_minor' => 0,
+                        'formatted_current_fee' => $pCurr . ' ' . Money::format(0),
+                        'previous_dues_minor' => $pAmount,
+                        'formatted_previous_dues' => $pCurr . ' ' . Money::format($pAmount),
+                        'total_payable_minor' => $pAmount,
+                        'formatted_total_payable' => $pCurr . ' ' . Money::format($pAmount),
+                    ];
+                    $currencyBreakdowns[] = $breakdownItem;
+                    $currenciesMap[$pCurr] = $breakdownItem;
+                    $totalPrevMinor += $pAmount;
                 }
             }
 
-            $consolidatedChallanUrl = URL::temporarySignedRoute(
+            $primaryCurrency = $primaryInv->currency;
+            $primaryCurrBreakdown = $currenciesMap[$primaryCurrency] ?? ($currencyBreakdowns[0] ?? null);
+
+            $signedChallanUrl = URL::temporarySignedRoute(
                 'families.signed_challan_pdf',
                 now()->addDays(7),
-                ['family' => $row->family_id]
+                ['family' => $famId]
             );
 
-            $row->invoice_students = $invoiceStudents;
-            $row->family_siblings = $familySiblings;
-            $row->dues_by_month = $duesByMonth;
-            $row->prev_dues_minor = $prevDuesSameCurrency;
-            $row->formatted_prev_dues = $row->currency . ' ' . Money::format($prevDuesSameCurrency);
-            $row->remaining_balance_minor = $remainingBalanceMinor;
-            $row->formatted_remaining_balance = $row->currency . ' ' . Money::format($remainingBalanceMinor);
-            $row->total_payable_minor = $totalPayableMinor;
-            $row->formatted_total_payable = $row->currency . ' ' . Money::format($totalPayableMinor);
-            $row->currencies_map = $currenciesMap;
-            $row->is_multi_currency = count($currenciesMap) > 1;
-            $row->consolidated_challan_url = $consolidatedChallanUrl;
+            $rowObj = (object)[
+                'family_id' => $famId,
+                'family_code' => $primaryInv->family_code,
+                'guardian_name' => $primaryInv->guardian_name,
+                'whatsapp' => $primaryInv->whatsapp,
+                'email' => $primaryInv->email,
+                'contact_verified' => (bool)$primaryInv->contact_verified,
+                'whatsapp_verified' => (bool)$primaryInv->whatsapp_verified,
+                'email_verified' => (bool)$primaryInv->email_verified,
+                'messaging_opt_in' => (bool)$primaryInv->messaging_opt_in,
+                'primary_invoice_id' => $primaryInv->invoice_id,
+                'invoice_id' => $primaryInv->invoice_id,
+                'invoice_ids' => $invIds,
+                'invoice_numbers' => $invNumbers,
+                'invoice_number' => $primaryInv->invoice_number,
+                'billing_period' => $primaryInv->billing_period,
+                'due_date' => $primaryInv->due_date,
+                'invoice_status' => $primaryInv->invoice_status,
+                'campus_name' => $primaryInv->campus_name,
+                'department_name' => $primaryInv->department_name,
+                'currency' => $primaryCurrency,
+                'total_minor' => (int)$primaryInv->total_minor,
+                'paid_minor' => (int)$primaryInv->paid_minor,
+                'is_multi_currency' => count($currencyBreakdowns) > 1,
+                'currencies' => $currencyBreakdowns,
+                'currencies_map' => $currenciesMap,
+                'current_fee_minor' => $primaryCurrBreakdown['current_fee_minor'] ?? $totalCurrentMinor,
+                'formatted_current_fee' => $primaryCurrBreakdown['formatted_current_fee'] ?? ($primaryCurrency . ' ' . Money::format($totalCurrentMinor)),
+                'prev_dues_minor' => $primaryCurrBreakdown['previous_dues_minor'] ?? $totalPrevMinor,
+                'formatted_prev_dues' => $primaryCurrBreakdown['formatted_previous_dues'] ?? ($primaryCurrency . ' ' . Money::format($totalPrevMinor)),
+                'remaining_balance_minor' => $primaryCurrBreakdown['current_fee_minor'] ?? $totalCurrentMinor,
+                'formatted_remaining_balance' => $primaryCurrBreakdown['formatted_current_fee'] ?? ($primaryCurrency . ' ' . Money::format($totalCurrentMinor)),
+                'total_payable_minor' => $primaryCurrBreakdown['total_payable_minor'] ?? ($totalCurrentMinor + $totalPrevMinor),
+                'formatted_total_payable' => $primaryCurrBreakdown['formatted_total_payable'] ?? ($primaryCurrency . ' ' . Money::format($totalCurrentMinor + $totalPrevMinor)),
+                'invoice_students' => $uniqueStudents,
+                'family_siblings' => $familySiblings,
+                'dues_by_month' => $duesByMonth,
+                'consolidated_challan_url' => $signedChallanUrl,
+                'signed_challan_url' => $signedChallanUrl,
+            ];
 
-            return $row;
-        });
+            $familyRows->push($rowObj);
+        }
 
-        $paginator->setCollection($enriched);
-        return $paginator;
+        return new \Illuminate\Pagination\LengthAwarePaginator($familyRows, $totalFamilies, $perPage, $currentPage, [
+            'path' => \Illuminate\Pagination\Paginator::resolveCurrentPath(),
+            'query' => request()->query(),
+        ]);
     }
 
     /**

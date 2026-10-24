@@ -101,6 +101,33 @@ class BatchDeliveryService
             }
         }
 
+        // Search filter (handles exact family code prioritization + universal search)
+        if (!empty($filters['search'])) {
+            $term = trim($filters['search']);
+            $isExactFamily = DB::table('families')->where('family_code', $term)->exists();
+            if ($isExactFamily) {
+                $q->where('f.family_code', $term);
+            } else {
+                $q->where(function ($sq) use ($term) {
+                    $sq->where('i.invoice_number', 'like', "%{$term}%")
+                       ->orWhere('f.family_code', 'like', "%{$term}%")
+                       ->orWhere('f.guardian_name', 'like', "%{$term}%")
+                       ->orWhere('f.whatsapp', 'like', "%{$term}%")
+                       ->orWhere('f.email', 'like', "%{$term}%")
+                       ->orWhereExists(function ($stSub) use ($term) {
+                           $stSub->selectRaw('1')
+                               ->from('invoice_items as st_ii')
+                               ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
+                               ->whereColumn('st_ii.invoice_id', 'i.id')
+                               ->where(function ($stQuery) use ($term) {
+                                   $stQuery->where('st_s.name', 'like', "%{$term}%")
+                                           ->orWhere('st_s.gr_number', 'like', "%{$term}%");
+                               });
+                       });
+                });
+            }
+        }
+
         return $q;
     }
 
@@ -262,11 +289,13 @@ class BatchDeliveryService
 
             $contactError = WebhookSettingService::evaluateContactEligibility($familyObj, $channels);
 
-            // Check existing notification
+            // Check existing notification across all invoices in this family group
+            $allGroupInvoiceIds = $sorted->pluck('id')->all();
             $existingNotif = DB::table('notifications')
-                ->where('invoice_id', $primaryInvoice->id)
+                ->whereIn('invoice_id', $allGroupInvoiceIds)
                 ->where('channel', $channelsStr)
                 ->where('kind', $webhookType)
+                ->orderByRaw("CASE status WHEN 'read' THEN 1 WHEN 'delivered' THEN 2 WHEN 'submitted' THEN 3 WHEN 'queued' THEN 4 WHEN 'blocked' THEN 5 WHEN 'failed' THEN 6 ELSE 7 END")
                 ->first();
 
             if ($existingNotif) {
@@ -451,6 +480,7 @@ class BatchDeliveryService
             $normalized['webhook_type'] = 'monthly';
         }
         if (!empty($filters['send_mode'])) $normalized['send_mode'] = (string)$filters['send_mode'];
+        if (!empty($filters['search'])) $normalized['search'] = trim((string)$filters['search']);
         ksort($normalized);
         return $normalized;
     }

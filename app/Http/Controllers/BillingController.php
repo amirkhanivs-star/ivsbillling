@@ -218,7 +218,7 @@ class BillingController {
     'search' => $r->query('search'),
    ];
 
-   $dashboardStats = $queueService->getDashboardKpiStats($selectedPeriod, $r->user());
+   $dashboardStats = $queueService->getDashboardKpiStats($selectedPeriod, $r->user(), $filters);
 
    // Tab content resolution
    $readyChallans = null;
