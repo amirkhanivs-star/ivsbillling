@@ -684,12 +684,23 @@ class InvoiceDeliveryQueueService
         $actionableInvoicesCount = (clone $actionableReadyQuery)->count('i.id');
         $ineligibleCount = (clone $ineligibleQuery)->distinct()->count('i.family_id');
 
+        // Paid Invoices (fully settled invoices for the selected period)
+        $paidInvQuery = (clone $baseInv)
+            ->where(function ($sub) {
+                $sub->where('i.status', 'paid')
+                    ->orWhere(function ($sq) {
+                        $sq->where('i.total_minor', '>', 0)
+                           ->whereColumn('i.paid_minor', '>=', 'i.total_minor');
+                    });
+            });
+        $paidInvoicesCount = $paidInvQuery->count('i.id');
+
         // Processing (currently queued in active batches)
         $procQuery = DB::table('notifications as n')
             ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
             ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
             ->where('b.period_start', 'like', $period . '%')
-            ->where('n.kind', 'monthly')
+            ->whereIn('n.kind', ['monthly', 'paid'])
             ->where('n.status', 'queued');
 
         if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
@@ -705,7 +716,7 @@ class InvoiceDeliveryQueueService
             ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
             ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
             ->where('b.period_start', 'like', $period . '%')
-            ->where('n.kind', 'monthly')
+            ->whereIn('n.kind', ['monthly', 'paid'])
             ->whereIn('n.status', ['submitted', 'delivered', 'read']);
 
         if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
@@ -721,7 +732,7 @@ class InvoiceDeliveryQueueService
             ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
             ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
             ->where('b.period_start', 'like', $period . '%')
-            ->where('n.kind', 'monthly')
+            ->whereIn('n.kind', ['monthly', 'paid'])
             ->whereIn('n.status', ['failed', 'blocked']);
 
         if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
@@ -752,6 +763,7 @@ class InvoiceDeliveryQueueService
             'awaiting_review_invoices' => $actionableInvoicesCount,
             'ready_families' => $actionableReadyCount,
             'ready_invoices' => $actionableInvoicesCount,
+            'paid_invoices' => $paidInvoicesCount,
             'processing' => $processingCount,
             'submitted' => $submittedCount,
             'attention' => $attentionCount,
@@ -1107,6 +1119,224 @@ class InvoiceDeliveryQueueService
     }
 
     /**
+     * Get paginated fully paid invoices and their corresponding payment receipts for the selected billing month.
+     * Enriched with student/family details, payment receipts, delivery notifications, and receipt/invoice PDFs.
+     */
+    public function getPaidInvoices(array $filters, object $user, int $perPage = 25): LengthAwarePaginator
+    {
+        $allowedPerPage = [25, 50, 100];
+        if (!in_array($perPage, $allowedPerPage, true)) {
+            $perPage = 25;
+        }
+
+        $period = !empty($filters['period']) ? $filters['period'] : $this->getLatestBillingMonth();
+
+        $q = DB::table('invoices as i')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->join('families as f', 'f.id', '=', 'i.family_id')
+            ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
+            ->leftJoin('campuses as c', 'c.id', '=', 'i.campus_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->where(function ($sub) {
+                $sub->where('i.status', 'paid')
+                    ->orWhere(function ($sq) {
+                        $sq->where('i.total_minor', '>', 0)
+                           ->whereColumn('i.paid_minor', '>=', 'i.total_minor');
+                    });
+            })
+            ->whereNotIn('i.status', ['void', 'voided']);
+
+        // Role-based scoping
+        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $q->where('i.campus_id', $user->campus_id);
+            if (!empty($user->department_id)) {
+                $q->where('i.department_id', $user->department_id);
+            }
+        } elseif (!empty($filters['campus_id'])) {
+            $q->where('i.campus_id', (int)$filters['campus_id']);
+        }
+
+        // Department
+        if (!empty($filters['department_id'])) {
+            $q->where('i.department_id', (int)$filters['department_id']);
+        }
+
+        // Grade
+        if (!empty($filters['grade'])) {
+            $grade = $filters['grade'];
+            $q->whereExists(function ($sub) use ($grade) {
+                $sub->select(DB::raw(1))
+                    ->from('invoice_items as sub_ii')
+                    ->join('enrollments as sub_en', 'sub_en.id', '=', 'sub_ii.enrollment_id')
+                    ->whereColumn('sub_ii.invoice_id', 'i.id')
+                    ->where('sub_en.grade_label', $grade);
+            });
+        }
+
+        // Contact eligibility
+        if (!empty($filters['contact_status']) && $filters['contact_status'] !== 'all') {
+            if ($filters['contact_status'] === 'eligible_only') {
+                $q->where('f.contact_verified', 1)
+                  ->where('f.messaging_opt_in', 1)
+                  ->whereNotNull('f.whatsapp')
+                  ->where('f.whatsapp', '!=', '');
+            } elseif ($filters['contact_status'] === 'ineligible_only') {
+                $q->where(function ($sq) {
+                    $sq->where('f.contact_verified', 0)
+                       ->orWhere('f.messaging_opt_in', 0)
+                       ->orWhereNull('f.whatsapp')
+                       ->orWhere('f.whatsapp', '');
+                });
+            }
+        }
+
+        // Universal Search
+        if (!empty($filters['search'])) {
+            $term = trim($filters['search']);
+            $isExactFamily = DB::table('families')->where('family_code', $term)->exists();
+            if ($isExactFamily) {
+                $q->where('f.family_code', $term);
+            } else {
+                $like = "%{$term}%";
+                $q->where(function ($sq) use ($like) {
+                    $sq->where('i.invoice_number', 'like', $like)
+                       ->orWhere('f.family_code', 'like', $like)
+                       ->orWhere('f.guardian_name', 'like', $like)
+                       ->orWhere('f.whatsapp', 'like', $like)
+                       ->orWhere('f.email', 'like', $like)
+                       ->orWhereExists(function ($stSub) use ($like) {
+                           $stSub->selectRaw('1')
+                               ->from('invoice_items as st_ii')
+                               ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
+                               ->whereColumn('st_ii.invoice_id', 'i.id')
+                               ->where(function ($stQ) use ($like) {
+                                   $stQ->where('st_s.name', 'like', $like)
+                                       ->orWhere('st_s.gr_number', 'like', $like);
+                               });
+                       });
+                });
+            }
+        }
+
+        $paginator = $q->select(
+            'i.id',
+            'i.invoice_number',
+            'i.currency',
+            'i.total_minor',
+            'i.paid_minor',
+            'i.status as invoice_status',
+            'i.issued_on',
+            'i.due_date',
+            'i.created_at as invoice_created_at',
+            'b.period_start as billing_period',
+            'f.id as family_id',
+            'f.family_code',
+            'f.guardian_name',
+            'f.whatsapp',
+            'f.email as family_email',
+            'f.contact_verified',
+            'f.messaging_opt_in',
+            'd.name as department_name',
+            'c.name as campus_name'
+        )
+        ->orderByDesc('i.id')
+        ->paginate($perPage);
+
+        $invoiceIds = $paginator->pluck('id')->all();
+
+        if (empty($invoiceIds)) {
+            return $paginator;
+        }
+
+        // Eager-load students and enrollments
+        $studentsRaw = DB::table('invoice_items as ii')
+            ->join('students as s', 's.id', '=', 'ii.student_id')
+            ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
+            ->whereIn('ii.invoice_id', $invoiceIds)
+            ->select('ii.invoice_id', 's.id as student_id', 's.name', 's.gr_number', 'e.grade_label')
+            ->distinct()
+            ->get()
+            ->groupBy('invoice_id');
+
+        // Eager-load payment receipts
+        $receiptsRaw = DB::table('payment_allocations as pa')
+            ->join('invoice_items as ii', 'ii.id', '=', 'pa.invoice_item_id')
+            ->join('payments as p', 'p.id', '=', 'pa.payment_id')
+            ->whereIn('ii.invoice_id', $invoiceIds)
+            ->select(
+                'ii.invoice_id',
+                'p.id as payment_id',
+                'p.receipt_number',
+                'p.received_on',
+                'p.note',
+                'p.currency',
+                'pa.amount_minor'
+            )
+            ->orderByDesc('p.received_on')
+            ->get();
+
+        $receiptsByInvoice = [];
+        foreach ($receiptsRaw as $r) {
+            $invId = $r->invoice_id;
+            $pId = $r->payment_id;
+            if (!isset($receiptsByInvoice[$invId][$pId])) {
+                $receiptsByInvoice[$invId][$pId] = [
+                    'payment_id' => $pId,
+                    'receipt_number' => $r->receipt_number,
+                    'payment_date' => $r->received_on,
+                    'note' => $r->note,
+                    'currency' => $r->currency,
+                    'amount_minor' => 0,
+                    'formatted_amount' => '',
+                    'receipt_pdf_url' => url("/receipts/{$pId}/pdf"),
+                ];
+            }
+            $receiptsByInvoice[$invId][$pId]['amount_minor'] += (int)$r->amount_minor;
+        }
+
+        foreach ($receiptsByInvoice as $invId => &$pMap) {
+            foreach ($pMap as &$pItem) {
+                $pItem['formatted_amount'] = Money::format($pItem['amount_minor']);
+            }
+        }
+        unset($pMap, $pItem);
+
+        // Eager-load existing paid notifications
+        $notifs = DB::table('notifications')
+            ->whereIn('invoice_id', $invoiceIds)
+            ->where('kind', 'paid')
+            ->orderByDesc('id')
+            ->get()
+            ->groupBy('invoice_id');
+
+        $enriched = $paginator->getCollection()->map(function ($row) use ($studentsRaw, $receiptsByInvoice, $notifs) {
+            $rowStudents = $studentsRaw->get($row->id, collect());
+            $rowReceipts = array_values($receiptsByInvoice[$row->id] ?? []);
+            $rowNotif = $notifs->get($row->id, collect())->first();
+
+            $isContactEligible = (bool)$row->contact_verified && (bool)$row->messaging_opt_in && !empty($row->whatsapp);
+            $isAlreadySentOrQueued = $rowNotif && in_array($rowNotif->status, ['submitted', 'delivered', 'read', 'queued'], true);
+
+            $row->students = $rowStudents;
+            $row->receipts = $rowReceipts;
+            $row->notification = $rowNotif;
+            $row->is_contact_eligible = $isContactEligible;
+            $row->is_already_queued_or_sent = $isAlreadySentOrQueued;
+            $row->delivery_status = $rowNotif?->status ?? 'ready';
+            $row->delivery_batch_id = $rowNotif?->batch_id;
+            $row->delivery_error = $rowNotif?->error;
+            $row->delivery_submitted_at = $rowNotif?->submitted_at;
+            $row->invoice_pdf_url = url("/invoices/{$row->id}/pdf");
+
+            return $row;
+        });
+
+        $paginator->setCollection($enriched);
+
+        return $paginator;
+    }
+
+    /**
      * Get paginated Needs Attention cases for the selected billing month.
      * Includes:
      * 1. Families with missing/invalid WhatsApp contacts.
@@ -1155,7 +1385,7 @@ class InvoiceDeliveryQueueService
             ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
             ->join('families as f', 'f.id', '=', 'i.family_id')
             ->where('b.period_start', 'like', $period . '%')
-            ->where('n.kind', 'monthly')
+            ->whereIn('n.kind', ['monthly', 'paid'])
             ->whereIn('n.status', ['failed', 'blocked']);
 
         // Staff access control
@@ -1254,7 +1484,7 @@ class InvoiceDeliveryQueueService
             ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
             ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
             ->where('b.period_start', 'like', $period . '%')
-            ->where('n.kind', 'monthly')
+            ->whereIn('n.kind', ['monthly', 'paid'])
             ->whereIn('n.status', ['failed', 'blocked'])
             ->whereIn('i.family_id', $pagedFamilyIds)
             ->select('n.*', 'i.family_id')

@@ -205,6 +205,9 @@ class BillingController {
    $currentTab = $r->query('tab', 'ready');
    $perPage = in_array((int)$r->query('per_page'), [25, 50, 100], true) ? (int)$r->query('per_page') : 25;
 
+   $isPaidTab = ($currentTab === 'paid') || $r->boolean('paid_only');
+   $webhookType = $isPaidTab ? 'paid' : 'monthly';
+
    $filters = [
     'campus_id' => $r->query('campus_id'),
     'department_id' => $r->query('department_id'),
@@ -212,8 +215,8 @@ class BillingController {
     'period' => $selectedPeriod,
     'contact_status' => $r->query('contact_status', 'all'),
     'payment_status' => $r->query('payment_status', 'all'),
-    'paid_only' => $r->boolean('paid_only'),
-    'webhook_type' => $r->boolean('paid_only') ? 'paid' : 'monthly',
+    'paid_only' => $isPaidTab,
+    'webhook_type' => $webhookType,
     'send_mode' => $r->query('send_mode'),
     'search' => $r->query('search'),
    ];
@@ -222,6 +225,7 @@ class BillingController {
 
    // Tab content resolution
    $readyChallans = null;
+   $paidInvoicesPage = null;
    $tabQueuePage = null;
    $financialHistoryPage = null;
    $selectionSnapshot = null;
@@ -229,6 +233,9 @@ class BillingController {
    if ($currentTab === 'ready') {
     $readyChallans = $queueService->getReadyToSendChallans($filters, $r->user(), $perPage);
     $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
+   } elseif ($currentTab === 'paid') {
+    $paidInvoicesPage = $queueService->getPaidInvoices($filters, $r->user(), $perPage);
+    $selectionSnapshot = $batchService->resolveFilteredSelection(array_merge($filters, ['paid_only' => true, 'webhook_type' => 'paid']), $r->user(), ['whatsapp']);
    } elseif ($currentTab === 'processing') {
     $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'queued']), $r->user(), $perPage);
    } elseif ($currentTab === 'sent') {
@@ -260,6 +267,7 @@ class BillingController {
     'selectedPeriod' => $selectedPeriod,
     'dashboardStats' => $dashboardStats,
     'readyChallans' => $readyChallans,
+    'paidInvoicesPage' => $paidInvoicesPage,
     'tabQueuePage' => $tabQueuePage,
     'financialHistoryPage' => $financialHistoryPage,
     'selectionSnapshot' => $selectionSnapshot,
@@ -278,6 +286,7 @@ class BillingController {
   public function selectionSnapshot(Request $r){
   abort_if($r->user()->role==='auditor',403);
   $batchService = app(BatchDeliveryService::class);
+  $isPaid = $r->boolean('paid_only') || $r->query('tab') === 'paid' || $r->query('webhook_type') === 'paid';
   $filters = [
    'campus_id' => $r->query('campus_id'),
    'department_id' => $r->query('department_id'),
@@ -285,9 +294,10 @@ class BillingController {
    'period' => $r->query('period'),
    'contact_status' => $r->query('contact_status', 'all'),
    'payment_status' => $r->query('payment_status', 'all'),
-   'paid_only' => $r->boolean('paid_only'),
-   'webhook_type' => $r->query('webhook_type', $r->boolean('paid_only') ? 'paid' : 'monthly'),
+   'paid_only' => $isPaid,
+   'webhook_type' => $isPaid ? 'paid' : 'monthly',
    'send_mode' => $r->query('send_mode'),
+   'search' => $r->query('search'),
   ];
   $channels = (array)$r->query('channels', ['whatsapp']);
   $snapshot = $batchService->resolveFilteredSelection($filters, $r->user(), $channels);
@@ -330,6 +340,7 @@ class BillingController {
    'paid_only'=>($webhookType==='paid'),
    'webhook_type'=>$webhookType,
    'send_mode'=>$d['send_mode']??null,
+   'search'=>$r->input('search'),
   ];
 
   $explicitIds=null;

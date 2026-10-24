@@ -147,7 +147,7 @@
     {{-- TOP TITLE & WEBHOOK STATUS --}}
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
         <div>
-            @if(request('paid_only'))
+            @if($currentTab === 'paid')
                 <h2 style="margin:0 0 4px 0; color:#0f172a;">Paid Invoices · Review &amp; Outbound Delivery</h2>
                 <p class="muted" style="margin:0; font-size:12px;">Review settled parent payments and authorize delivery to the <strong>Paid Invoice Webhook</strong> (<code>invoice.paid.batch</code>).</p>
             @else
@@ -156,7 +156,7 @@
             @endif
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
-            @if(request('paid_only'))
+            @if($currentTab === 'paid')
                 <span class="badge" style="background:{{ $paidWebhookSetting->is_enabled && $paidWebhookSetting->url ? '#dcfce7' : '#fee2e2' }}; color:{{ $paidWebhookSetting->is_enabled && $paidWebhookSetting->url ? '#166534' : '#991b1b' }}; font-size:11px; padding:6px 12px; border-radius:4px; font-weight:700;">
                     Paid Webhook: {{ $paidWebhookSetting->is_enabled && $paidWebhookSetting->url ? 'Active & Configured' : 'Disabled / Unconfigured' }}
                 </span>
@@ -216,6 +216,13 @@
             <div class="kpi-desc">Consolidated recipient families</div>
         </div>
 
+        {{-- Card: Paid Invoices --}}
+        <div class="kpi-card" style="border-left: 4px solid #16a34a;">
+            <div class="kpi-label">💳 Paid Invoices</div>
+            <div class="kpi-val" style="color:#16a34a;">{{ number_format($dashboardStats['paid_invoices'] ?? 0) }}</div>
+            <div class="kpi-desc">Fully settled parent invoices</div>
+        </div>
+
         {{-- Card 4: Processing --}}
         <div class="kpi-card" style="border-left: 4px solid #0284c7;">
             <div class="kpi-label">⏳ Processing</div>
@@ -243,6 +250,12 @@
         <a href="?tab=ready&period={{ $selectedPeriod }}" class="iq-tab-item @if($currentTab === 'ready') active @endif">
             📤 <strong>Ready to Send</strong>
             <span class="iq-tab-badge" style="background:#ede9fe; color:#6d28d9;">{{ number_format($dashboardStats['awaiting_review']) }}</span>
+        </a>
+        <a href="?tab=paid&period={{ $selectedPeriod }}" class="iq-tab-item @if($currentTab === 'paid') active @endif">
+            💳 <strong>Paid Invoices</strong>
+            @if(($dashboardStats['paid_invoices'] ?? 0) > 0)
+                <span class="iq-tab-badge" style="background:#dcfce7; color:#166534;">{{ number_format($dashboardStats['paid_invoices']) }}</span>
+            @endif
         </a>
         <a href="?tab=processing&period={{ $selectedPeriod }}" class="iq-tab-item @if($currentTab === 'processing') active @endif">
             ⏳ <strong>Processing</strong>
@@ -538,6 +551,303 @@
 
         <div style="margin-top:14px;">
             {{ $readyChallans->links() }}
+        </div>
+
+    {{-- TAB: PAID INVOICES --}}
+    @elseif($currentTab === 'paid')
+        {{-- FILTERS BAR --}}
+        <form method="get" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
+            <input type="hidden" name="tab" value="paid">
+            <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+
+            @if(in_array(auth()->user()->role, ['super_admin', 'finance_admin'], true))
+                <select class="input" name="campus_id" style="min-width:140px;" title="Filter by Campus">
+                    <option value="">All Campuses</option>
+                    @foreach($campuses as $c)
+                        <option value="{{ $c->id }}" @selected(request('campus_id') == $c->id)>{{ $c->name }}</option>
+                    @endforeach
+                </select>
+            @endif
+
+            <select class="input" name="department_id" style="min-width:140px;" title="Filter by Department">
+                <option value="">All Departments</option>
+                @foreach($departments as $d)
+                    <option value="{{ $d->id }}" @selected(request('department_id') == $d->id)>{{ $d->name }}</option>
+                @endforeach
+            </select>
+
+            <select class="input" name="grade" style="min-width:130px;" title="Filter by Grade">
+                <option value="">All Grades</option>
+                @foreach($gradeOptions as $grade)
+                    <option value="{{ $grade }}" @selected(request('grade') === $grade)>{{ $grade }}</option>
+                @endforeach
+            </select>
+
+            <select class="input" name="contact_status" style="min-width:140px;" title="Contact Eligibility">
+                <option value="all" @selected(request('contact_status','all') === 'all')>All Contacts</option>
+                <option value="eligible_only" @selected(request('contact_status') === 'eligible_only')>Verified &amp; Consented</option>
+                <option value="ineligible_only" @selected(request('contact_status') === 'ineligible_only')>Consent Missing / Ineligible</option>
+            </select>
+
+            <input type="text" class="input" name="search" value="{{ request('search') }}" placeholder="Search invoice #, family, student, phone..." style="flex:1; min-width:200px;">
+
+            <select class="input" name="per_page" style="width:90px;" title="Items per page" onchange="this.form.submit()">
+                <option value="25" @selected($perPage == 25)>25 / page</option>
+                <option value="50" @selected($perPage == 50)>50 / page</option>
+                <option value="100" @selected($perPage == 100)>100 / page</option>
+            </select>
+
+            <button type="submit" class="btn small" style="background:#16a34a; color:#fff; font-weight:600; padding:6px 14px;">Filter</button>
+            <a href="?tab=paid&period={{ $selectedPeriod }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
+        </form>
+
+        {{-- SELECTION RECONCILIATION & SNAPSHOT BANNER --}}
+        @if($selectionSnapshot)
+            <div class="batch-snapshot-card" style="border-left-color:#16a34a;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <div>
+                        <strong style="color:#166534; font-size:14px;">💳 Paid Invoices Selection Snapshot &amp; Delivery Reconciliation</strong>
+                        <div style="font-size:11px; color:#6b7280; font-family:monospace;">Snapshot ID: {{ $selectionSnapshot['snapshot_id'] }}</div>
+                    </div>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                        @foreach($selectionSnapshot['currencies_summary'] as $cCurr => $cStat)
+                            <span class="badge" style="background:#ffffff; color:#166534; border:1px solid #bbf7d0; font-size:11px; font-weight:700; padding:4px 8px;">
+                                {{ $cCurr }}: {{ \App\Services\Money::format($cStat['total_minor']) }} ({{ $cStat['count'] }} paid)
+                            </span>
+                        @endforeach
+                    </div>
+                </div>
+
+                <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:10px 14px; margin-top:12px; font-size:12px; color:#334155; line-height:1.5;">
+                    <div>
+                        • <strong>Matched Records:</strong> <strong>{{ number_format($selectionSnapshot['total_matched_invoices']) }}</strong> fully settled invoice(s) match current filters.
+                    </div>
+                    <div>
+                        • <strong>Delivery Targets:</strong>
+                        @if(!empty($selectionSnapshot['already_submitted_recipients_count']))
+                            <strong>{{ $selectionSnapshot['already_submitted_recipients_count'] }}</strong> was already submitted to webhook.
+                        @endif
+                        @if(!empty($selectionSnapshot['contact_ineligible_count']))
+                            <strong>{{ $selectionSnapshot['contact_ineligible_count'] }}</strong> is excluded pending contact verification/consent.
+                        @endif
+                        This leaves exactly <strong>{{ number_format($selectionSnapshot['total_eligible_recipients']) }} eligible paid invoices to dispatch</strong> to the <strong>Paid Invoice Webhook</strong> (<code>invoice.paid.batch</code>).
+                    </div>
+                </div>
+            </div>
+        @endif
+
+        {{-- BATCH ACTION & SEND CONTROLS --}}
+        <form method="post" action="/invoices/send-batch" id="iq-send-form">
+            @csrf
+            <input type="hidden" name="webhook_type" value="paid">
+            <input type="hidden" name="paid_only" value="1">
+            <input type="hidden" name="selection_mode" id="selection-mode" value="page">
+            <input type="hidden" name="campus_id" value="{{ request('campus_id') }}">
+            <input type="hidden" name="department_id" value="{{ request('department_id') }}">
+            <input type="hidden" name="grade" value="{{ request('grade') }}">
+            <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+            <input type="hidden" name="contact_status" value="{{ request('contact_status', 'all') }}">
+            <input type="hidden" name="search" value="{{ request('search') }}">
+            <input type="hidden" name="snapshot_id" value="{{ $selectionSnapshot['snapshot_id'] ?? '' }}">
+            <div id="confirmed-grades-container">
+                @if(!empty($selectionSnapshot['all_grades']))
+                    @foreach($selectionSnapshot['all_grades'] as $g)
+                        <input type="hidden" name="confirmed_grades[]" value="{{ $g }}">
+                    @endforeach
+                @endif
+            </div>
+
+            <div class="selection-toggle-bar">
+                <span style="font-size:12px; font-weight:700; color:#475569;">Selection Scope:</span>
+                <button type="button" class="btn-toggle-select active" id="btn-scope-page">
+                    Select Current Page ({{ $paidInvoicesPage ? $paidInvoicesPage->count() : 0 }})
+                </button>
+                <button type="button" class="btn-toggle-select" id="btn-scope-all">
+                    Select All Matching Filters ({{ number_format($selectionSnapshot['total_eligible_recipients'] ?? 0) }} Eligible Invoices)
+                </button>
+                <button type="button" class="btn-toggle-select" id="btn-scope-clear" style="margin-left:auto; color:#ef4444; border-color:#fca5a5;">
+                    Clear Selection
+                </button>
+            </div>
+
+            <div class="iq-send-controls" style="display:flex; justify-content:space-between; align-items:center; margin:15px 0; background:#f8fafc; padding:12px 16px; border-radius:6px; border:1px solid #e2e8f0; flex-wrap:wrap; gap:12px;">
+                <div style="display:flex; align-items:center; gap:15px;">
+                    <label style="font-weight:600;"><input type="checkbox" name="channels[]" value="whatsapp" checked> WhatsApp via Paid Webhook</label>
+                    <label style="font-weight:600;"><input type="checkbox" name="channels[]" value="email"> Email via Paid Webhook</label>
+                    <span class="muted" style="font-size:11px;">Sends to Paid n8n Webhook only (<code>invoice.paid.batch</code>).</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <label style="font-size:12px; font-weight:700; color:#1e293b; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                        <input type="checkbox" name="review_confirmed" value="1" id="review-confirmed-input" required>
+                        I have reviewed the selected paid invoices &amp; payment receipts, and approve this delivery batch
+                    </label>
+                    <button class="btn green" type="submit" id="btn-submit-send" style="background:#16a34a; color:#fff; font-size:13px; font-weight:700; padding:8px 18px; border:none; border-radius:4px; cursor:pointer;">
+                        Queue Approved Paid Batch to Webhook
+                    </button>
+                </div>
+            </div>
+
+            {{-- PAID INVOICES TABLE --}}
+            <div class="table-wrap">
+                <table class="table iq-invoice-review">
+                    <thead>
+                        <tr>
+                            <th style="width:40px;"><input id="invoice-select-all" type="checkbox" aria-label="Select all on this page"></th>
+                            <th>Invoice / Period</th>
+                            <th>Family &amp; Guardian</th>
+                            <th>Student(s) &amp; Grade</th>
+                            <th>Payment Receipt(s)</th>
+                            <th>Amount Paid</th>
+                            <th>WhatsApp Destination</th>
+                            <th>Delivery Status</th>
+                            <th style="text-align:right;">PDF Documents</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @forelse($paidInvoicesPage ?? [] as $row)
+                        <tr @if($row->is_already_queued_or_sent) style="background:#fcfdfd; opacity:0.85;" @endif>
+                            <td>
+                                @if($row->is_already_queued_or_sent)
+                                    <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->id }}"
+                                           data-invoice="{{ $row->invoice_number }}"
+                                           data-family="{{ $row->family_code }}"
+                                           data-status="{{ $row->delivery_status }}"
+                                           title="Already queued or sent in batch {{ $row->delivery_batch_id }}"
+                                           disabled>
+                                @else
+                                    <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->id }}"
+                                           data-invoice="{{ $row->invoice_number }}"
+                                           data-family="{{ $row->family_code }}"
+                                           data-status="{{ $row->invoice_status }}">
+                                @endif
+                            </td>
+                            <td>
+                                <div>
+                                    <a href="/invoices/{{ $row->id }}/pdf" target="_blank" rel="noopener" style="font-weight:700; color:#0f172a; text-decoration:none;">
+                                        📄 {{ $row->invoice_number }}
+                                    </a>
+                                </div>
+                                <div class="muted" style="font-size:11px;">
+                                    {{ \Carbon\Carbon::parse($row->billing_period)->format('M Y') }} &bull; Issued: {{ $row->issued_on }}
+                                </div>
+                                @if($row->department_name)
+                                    <span class="badge" style="background:#f1f5f9; color:#475569; font-size:10px; padding:1px 5px;">{{ $row->department_name }}</span>
+                                @endif
+                            </td>
+                            <td>
+                                <div><strong>{{ $row->family_code ?: ('Family #' . $row->family_id) }}</strong></div>
+                                <div style="font-size:11px; color:#475569;">{{ $row->guardian_name ?: 'Guardian' }}</div>
+                            </td>
+                            <td>
+                                @if(!empty($row->students) && count($row->students) > 0)
+                                    @foreach($row->students as $st)
+                                        <div style="font-size:11.5px; font-weight:600; color:#1e293b;">
+                                            &bull; {{ $st->name }} <span class="muted">(GR: {{ $st->gr_number }})</span>
+                                            <span class="badge" style="background:#e0e7ff; color:#3730a3; font-size:10px; padding:1px 5px;">{{ $st->grade_label ?: 'Unassigned' }}</span>
+                                        </div>
+                                    @endforeach
+                                @else
+                                    <span class="muted" style="font-size:11px;">Family Challan</span>
+                                @endif
+                            </td>
+                            <td>
+                                @if(!empty($row->receipts) && count($row->receipts) > 0)
+                                    @foreach($row->receipts as $rc)
+                                        <div style="margin-bottom:4px; padding:3px 6px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:4px; font-size:11.5px;">
+                                            <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                                                <a href="{{ $rc['receipt_pdf_url'] }}" target="_blank" rel="noopener" style="font-weight:700; color:#166534; text-decoration:none;">
+                                                    🧾 {{ $rc['receipt_number'] }}
+                                                </a>
+                                                <span style="font-weight:700; color:#166534;">{{ $rc['currency'] }} {{ $rc['formatted_amount'] }}</span>
+                                            </div>
+                                            <div class="muted" style="font-size:10.5px;">Paid on: {{ $rc['payment_date'] }}</div>
+                                        </div>
+                                    @endforeach
+                                @else
+                                    <span class="muted" style="font-size:11px;">Direct Settlement</span>
+                                @endif
+                            </td>
+                            <td>
+                                <strong style="color:#16a34a; font-size:13px;">{{ $row->currency }} {{ \App\Services\Money::format($row->paid_minor) }}</strong>
+                                <div style="margin-top:2px;">
+                                    <span class="badge" style="background:#dcfce7; color:#166534; font-size:10px; padding:2px 6px; font-weight:700;">Fully Paid</span>
+                                </div>
+                            </td>
+                            <td>
+                                @if(!empty($row->whatsapp))
+                                    <div style="font-weight:700; font-size:12px;">{{ $row->whatsapp }}</div>
+                                    <div style="margin-top:2px;">
+                                        @if($row->contact_verified && $row->messaging_opt_in)
+                                            <span style="background:#dcfce7; color:#166534; font-size:9.5px; padding:1px 5px; border-radius:3px; font-weight:700;">Verified &amp; Opted In</span>
+                                        @elseif(!$row->contact_verified)
+                                            <span style="background:#fee2e2; color:#991b1b; font-size:9.5px; padding:1px 5px; border-radius:3px; font-weight:700;">Unverified</span>
+                                        @else
+                                            <span style="background:#ffedd5; color:#9a3412; font-size:9.5px; padding:1px 5px; border-radius:3px; font-weight:700;">Consent Missing</span>
+                                        @endif
+                                    </div>
+                                @else
+                                    <span class="muted" style="font-size:11px;">No WhatsApp</span>
+                                @endif
+                            </td>
+                            <td>
+                                @if($row->is_already_queued_or_sent)
+                                    @if(in_array($row->delivery_status, ['submitted', 'delivered', 'read'], true))
+                                        <span class="badge" style="background:#dcfce7; color:#166534; font-size:10px; padding:2px 6px; font-weight:700;">
+                                            Sent ({{ strtoupper($row->delivery_status) }})
+                                        </span>
+                                    @elseif($row->delivery_status === 'queued')
+                                        <span class="badge" style="background:#e0f2fe; color:#0369a1; font-size:10px; padding:2px 6px; font-weight:700;">
+                                            Queued
+                                        </span>
+                                    @endif
+                                    @if($row->delivery_batch_id)
+                                        <div class="muted" style="font-size:10px; font-family:monospace; margin-top:2px;">{{ $row->delivery_batch_id }}</div>
+                                    @endif
+                                @elseif($row->delivery_status === 'failed')
+                                    <span class="badge" style="background:#fee2e2; color:#991b1b; font-size:10px; padding:2px 6px; font-weight:700;">
+                                        Failed
+                                    </span>
+                                    @if($row->delivery_error)
+                                        <div class="muted" style="font-size:10px; color:#dc2626; margin-top:2px;" title="{{ $row->delivery_error }}">{{ \Illuminate\Support\Str::limit($row->delivery_error, 25) }}</div>
+                                    @endif
+                                @else
+                                    <span class="badge" style="background:#f1f5f9; color:#475569; font-size:10px; padding:2px 6px;">
+                                        Ready to Send
+                                    </span>
+                                @endif
+                            </td>
+                            <td style="text-align:right;">
+                                <div style="display:flex; flex-direction:column; gap:3px; align-items:flex-end;">
+                                    <a href="/invoices/{{ $row->id }}/pdf" target="_blank" rel="noopener" class="btn small" style="background:#7c3aed; color:#fff; font-size:10px; padding:3px 8px; font-weight:700;">
+                                        📄 Invoice PDF
+                                    </a>
+                                    @if(!empty($row->receipts) && count($row->receipts) > 0)
+                                        <a href="{{ $row->receipts[0]['receipt_pdf_url'] }}" target="_blank" rel="noopener" class="btn small" style="background:#16a34a; color:#fff; font-size:10px; padding:2px 6px; font-weight:700;">
+                                            🧾 Receipt PDF
+                                        </a>
+                                    @endif
+                                </div>
+                            </td>
+                        </tr>
+                    @empty
+                        <tr>
+                            <td colspan="9" style="text-align:center; padding:30px; color:#64748b;">
+                                <strong>No paid invoices found matching the current filters for {{ $dashboardStats['selected_month'] }}.</strong><br>
+                                <span class="muted" style="font-size:12px;">Invoices become visible here once full parent payment is verified and recorded.</span>
+                            </td>
+                        </tr>
+                    @endforelse
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="iq-confirm" id="send-preview" role="status" aria-live="polite" style="margin-top:14px; padding:12px 16px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; font-weight:600; color:#334155;">
+                0 invoice(s) selected on this page. Select invoices or choose "Select All Matching Filters" to approve batch delivery.
+            </div>
+        </form>
+
+        <div style="margin-top:14px;">
+            {{ $paidInvoicesPage ? $paidInvoicesPage->appends(request()->query())->links() : '' }}
         </div>
 
     {{-- TAB 2: PROCESSING --}}
@@ -1100,6 +1410,7 @@
     const btnScopeAll = document.getElementById('btn-scope-all');
     const btnScopeClear = document.getElementById('btn-scope-clear');
 
+    const isPaidTab = {{ $currentTab === 'paid' ? 'true' : 'false' }};
     const serverTotalEligible = {{ (int)($selectionSnapshot['total_eligible_recipients'] ?? 0) }};
     const targetGrade = @json($selectionSnapshot['target_grade'] ?? null);
     const siblingCount = {{ (int)($selectionSnapshot['sibling_students_count'] ?? 0) }};
@@ -1112,9 +1423,13 @@
             modeInput.value = 'all_matching';
             btnScopeAll?.classList.add('active');
             btnScopePage?.classList.remove('active');
-            let gradeLabel = targetGrade ? `Target Grade: ${targetGrade}` : 'All Grades';
-            if (siblingCount > 0) gradeLabel += ` (+ ${siblingCount} siblings across other grades)`;
-            summary.textContent = `All Matching Filters selected: ${serverTotalEligible} eligible families ready for batch delivery (${gradeLabel}).`;
+            if (isPaidTab) {
+                summary.textContent = `All Matching Filters selected: ${serverTotalEligible} eligible paid invoice(s) ready for batch delivery to Paid Webhook.`;
+            } else {
+                let gradeLabel = targetGrade ? `Target Grade: ${targetGrade}` : 'All Grades';
+                if (siblingCount > 0) gradeLabel += ` (+ ${siblingCount} siblings across other grades)`;
+                summary.textContent = `All Matching Filters selected: ${serverTotalEligible} eligible families ready for batch delivery (${gradeLabel}).`;
+            }
             return;
         }
 
@@ -1124,7 +1439,9 @@
 
         const chosen = boxes.filter(b => b.checked);
         if (chosen.length) {
-            summary.textContent = `${chosen.length} family challan(s) selected on this page.`;
+            summary.textContent = isPaidTab
+                ? `${chosen.length} paid invoice(s) selected on this page.`
+                : `${chosen.length} family challan(s) selected on this page.`;
         } else {
             summary.textContent = '0 invoice(s) selected on this page. Select invoices or choose "Select All Matching Filters" to approve batch delivery.';
         }
@@ -1132,14 +1449,14 @@
 
     btnScopePage?.addEventListener('click', () => {
         selectionMode = 'page';
-        boxes.forEach(b => b.checked = true);
+        boxes.forEach(b => { if (!b.disabled) b.checked = true; });
         if (all) all.checked = true;
         update();
     });
 
     btnScopeAll?.addEventListener('click', () => {
         selectionMode = 'all_matching';
-        boxes.forEach(b => b.checked = true);
+        boxes.forEach(b => { if (!b.disabled) b.checked = true; });
         if (all) all.checked = true;
         update();
     });
@@ -1158,7 +1475,7 @@
 
     all?.addEventListener('change', () => {
         selectionMode = 'page';
-        boxes.forEach(b => b.checked = all.checked);
+        boxes.forEach(b => { if (!b.disabled) b.checked = all.checked; });
         update();
     });
 
@@ -1172,7 +1489,10 @@
 
         if (!reviewCheckbox || !reviewCheckbox.checked) {
             e.preventDefault();
-            alert('Please acknowledge: "I have reviewed the selected families & approve this delivery batch."');
+            alert(isPaidTab
+                ? 'Please acknowledge: "I have reviewed the selected paid invoices & payment receipts, and approve this delivery batch."'
+                : 'Please acknowledge: "I have reviewed the selected families & approve this delivery batch."'
+            );
             reviewCheckbox?.focus();
             return;
         }
@@ -1183,7 +1503,10 @@
                 alert('No eligible recipients match the applied filters.');
                 return;
             }
-            if (!confirm(`Queue approved Monthly Batch for ${serverTotalEligible} eligible families across ALL matching pages to the Monthly Webhook?\n\nChannels: ${channels.join(' and ')}\n\nOne latest consolidated challan per family.`)) {
+            const confirmMsg = isPaidTab
+                ? `Queue approved Paid Batch for ${serverTotalEligible} eligible paid invoices across ALL matching pages to the Paid Webhook?\n\nChannels: ${channels.join(' and ')}\n\nEvent: invoice.paid.batch`
+                : `Queue approved Monthly Batch for ${serverTotalEligible} eligible families across ALL matching pages to the Monthly Webhook?\n\nChannels: ${channels.join(' and ')}\n\nOne latest consolidated challan per family.`;
+            if (!confirm(confirmMsg)) {
                 e.preventDefault();
             }
             return;
@@ -1192,11 +1515,17 @@
         const chosen = boxes.filter(b => b.checked);
         if (!chosen.length) {
             e.preventDefault();
-            alert('Please select at least one family challan on the current page, or choose "Select All Matching Filters".');
+            alert(isPaidTab
+                ? 'Please select at least one paid invoice on the current page, or choose "Select All Matching Filters".'
+                : 'Please select at least one family challan on the current page, or choose "Select All Matching Filters".'
+            );
             return;
         }
 
-        if (!confirm(`Queue ${chosen.length} selected family challans on this page to the Monthly Webhook?\n\nChannels: ${channels.join(' and ')}`)) {
+        const confirmMsg = isPaidTab
+            ? `Queue ${chosen.length} selected paid invoices on this page to the Paid Webhook?\n\nChannels: ${channels.join(' and ')}\n\nEvent: invoice.paid.batch`
+            : `Queue ${chosen.length} selected family challans on this page to the Monthly Webhook?\n\nChannels: ${channels.join(' and ')}`;
+        if (!confirm(confirmMsg)) {
             e.preventDefault();
         }
     });
