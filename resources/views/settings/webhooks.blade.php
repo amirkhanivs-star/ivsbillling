@@ -82,7 +82,12 @@
 
     <div class="webhook-grid">
         {{-- PANEL 1: MONTHLY INVOICE WEBHOOK --}}
-        <div class="webhook-card">
+        <?php
+            $isOldMonthly = old('webhook_type') === 'monthly' || session('webhook_target_error') === 'monthly';
+            $monthlyUrl = $isOldMonthly ? old('url', $monthlySetting->url) : $monthlySetting->url;
+            $monthlyEnabled = $isOldMonthly ? old('is_enabled', $monthlySetting->is_enabled) : $monthlySetting->is_enabled;
+        ?>
+        <div class="webhook-card" id="card-monthly-webhook">
             <div class="webhook-card-header">
                 <div>
                     <h3 class="webhook-title">1. Monthly Invoice Webhook</h3>
@@ -93,14 +98,26 @@
                 </span>
             </div>
 
-            <form method="POST" action="{{ route('settings.webhooks.update', 'monthly') }}">
+            @if(session('saved_webhook_type') === 'monthly' && session('notice'))
+                <div style="background:#dcfce7; color:#166534; padding:8px 12px; border-radius:6px; font-size:12px; font-weight:600; margin-bottom:12px; border:1px solid #bbf7d0;">
+                    ✓ {{ session('notice') }}
+                </div>
+            @endif
+
+            <form method="POST" action="{{ route('settings.webhooks.update', 'monthly') }}" id="form-monthly-webhook">
                 @csrf
+                <input type="hidden" name="webhook_type" value="monthly">
                 <div class="form-group">
                     <label for="monthly_url">Webhook Destination URL</label>
-                    <input type="url" id="monthly_url" name="url" class="input" style="width:100%; box-sizing:border-box;"
+                    <input type="text" inputmode="url" id="monthly_url" name="url" class="input" style="width:100%; box-sizing:border-box; {{ $isOldMonthly && $errors->has('url') ? 'border-color:#dc2626; background:#fff5f5;' : '' }}"
                            placeholder="https://n8n.your-domain.com/webhook/iqra-monthly-invoices"
-                           value="{{ old('url', $monthlySetting->url) }}">
-                    <div class="muted" style="font-size:11px; margin-top:4px;">Must use HTTPS in production. Excludes internal loopback destinations.</div>
+                           value="{{ $monthlyUrl }}">
+                    @if($isOldMonthly && $errors->has('url'))
+                        <div class="field-error" style="color:#dc2626; font-size:12px; margin-top:5px; font-weight:600;">
+                            ⚠️ {{ $errors->first('url') }}
+                        </div>
+                    @endif
+                    <div class="muted" style="font-size:11px; margin-top:4px;">Must use HTTPS in production. Accepts <code>/webhook/...</code> and <code>/webhook-test/...</code> paths. Excludes internal loopback destinations.</div>
                 </div>
 
                 <div class="form-group">
@@ -113,7 +130,7 @@
 
                 <div class="form-group" style="margin-top:10px;">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-                        <input type="checkbox" name="is_enabled" value="1" @checked(old('is_enabled', $monthlySetting->is_enabled))>
+                        <input type="checkbox" name="is_enabled" value="1" @checked($monthlyEnabled)>
                         <span>Enable Monthly Invoice Webhook Delivery</span>
                     </label>
                 </div>
@@ -149,7 +166,12 @@
         </div>
 
         {{-- PANEL 2: PAID INVOICE WEBHOOK --}}
-        <div class="webhook-card">
+        <?php
+            $isOldPaid = old('webhook_type') === 'paid' || session('webhook_target_error') === 'paid';
+            $paidUrl = $isOldPaid ? old('url', $paidSetting->url) : $paidSetting->url;
+            $paidEnabled = $isOldPaid ? old('is_enabled', $paidSetting->is_enabled) : $paidSetting->is_enabled;
+        ?>
+        <div class="webhook-card" id="card-paid-webhook">
             <div class="webhook-card-header">
                 <div>
                     <h3 class="webhook-title">2. Paid Invoice Webhook</h3>
@@ -160,14 +182,26 @@
                 </span>
             </div>
 
-            <form method="POST" action="{{ route('settings.webhooks.update', 'paid') }}">
+            @if(session('saved_webhook_type') === 'paid' && session('notice'))
+                <div style="background:#dcfce7; color:#166534; padding:8px 12px; border-radius:6px; font-size:12px; font-weight:600; margin-bottom:12px; border:1px solid #bbf7d0;">
+                    ✓ {{ session('notice') }}
+                </div>
+            @endif
+
+            <form method="POST" action="{{ route('settings.webhooks.update', 'paid') }}" id="form-paid-webhook">
                 @csrf
+                <input type="hidden" name="webhook_type" value="paid">
                 <div class="form-group">
                     <label for="paid_url">Webhook Destination URL</label>
-                    <input type="url" id="paid_url" name="url" class="input" style="width:100%; box-sizing:border-box;"
+                    <input type="text" inputmode="url" id="paid_url" name="url" class="input" style="width:100%; box-sizing:border-box; {{ $isOldPaid && $errors->has('url') ? 'border-color:#dc2626; background:#fff5f5;' : '' }}"
                            placeholder="https://n8n.your-domain.com/webhook/iqra-paid-invoices"
-                           value="{{ old('url', $paidSetting->url) }}">
-                    <div class="muted" style="font-size:11px; margin-top:4px;">Dedicated endpoint for fully settled fee receipt notices.</div>
+                           value="{{ $paidUrl }}">
+                    @if($isOldPaid && $errors->has('url'))
+                        <div class="field-error" style="color:#dc2626; font-size:12px; margin-top:5px; font-weight:600;">
+                            ⚠️ {{ $errors->first('url') }}
+                        </div>
+                    @endif
+                    <div class="muted" style="font-size:11px; margin-top:4px;">Dedicated endpoint for fully settled fee receipt notices. Accepts <code>/webhook/...</code> and <code>/webhook-test/...</code> paths.</div>
                 </div>
 
                 <div class="form-group">
@@ -180,7 +214,7 @@
 
                 <div class="form-group" style="margin-top:10px;">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-                        <input type="checkbox" name="is_enabled" value="1" @checked(old('is_enabled', $paidSetting->is_enabled))>
+                        <input type="checkbox" name="is_enabled" value="1" @checked($paidEnabled)>
                         <span>Enable Paid Invoice Webhook Delivery</span>
                     </label>
                 </div>

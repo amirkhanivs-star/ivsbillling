@@ -35,11 +35,13 @@ class WebhookSettingService
         $setting = $this->getSettings($type);
 
         $url = !empty($data['url']) ? trim((string)$data['url']) : null;
-        if ($url !== null) {
-            $urlError = self::validateUrlSecurity($url);
+        if ($url !== null && $url !== '') {
+            $urlError = self::validateWebhookUrl($url, $type);
             if ($urlError) {
                 throw new RuntimeException($urlError);
             }
+        } else {
+            $url = null;
         }
 
         $setting->url = $url;
@@ -90,7 +92,7 @@ class WebhookSettingService
             return $result;
         }
 
-        $urlError = self::validateUrlSecurity($setting->url);
+        $urlError = self::validateWebhookUrl($setting->url, $type);
         if ($urlError) {
             $result = [
                 'success' => false,
@@ -177,6 +179,43 @@ class WebhookSettingService
         $setting->last_test_message = $result['message'];
         $setting->last_test_response_code = $result['code'] ?? null;
         $setting->save();
+    }
+
+    /**
+     * Validate webhook URL format, scheme, and SSRF security.
+     * Returns null if valid (or empty), or a descriptive error message if invalid.
+     */
+    public static function validateWebhookUrl(?string $url, string $type = 'webhook'): ?string
+    {
+        if ($url === null || trim($url) === '') {
+            return null;
+        }
+
+        $url = trim($url);
+
+        if (!preg_match('~^https?://~i', $url)) {
+            return "The " . ucfirst($type) . " webhook URL must begin with https:// (or http:// for testing).";
+        }
+
+        $parsed = parse_url($url);
+        if ($parsed === false || empty($parsed['host'])) {
+            return "The " . ucfirst($type) . " webhook URL format is invalid. Please provide a full URL with domain and path.";
+        }
+
+        $hasValidFormat = Str::isUrl($url, ['http', 'https']) 
+            || (bool) filter_var($url, FILTER_VALIDATE_URL) 
+            || (!empty($parsed['scheme']) && !empty($parsed['host']) && preg_match('~^[a-z0-9\-._~%!$&\'()*+,;=:@/?#]+$~i', $url));
+
+        if (!$hasValidFormat) {
+            return "The " . ucfirst($type) . " webhook URL must be a valid URL (including /webhook-test/... or /webhook/... paths).";
+        }
+
+        $securityError = self::validateUrlSecurity($url);
+        if ($securityError) {
+            return "The " . ucfirst($type) . " webhook URL: " . $securityError;
+        }
+
+        return null;
     }
 
     /**

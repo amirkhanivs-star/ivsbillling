@@ -591,4 +591,246 @@ class WebhookNotificationTest extends TestCase
             ->assertStatus(200)
             ->assertHeader('content-type', 'application/pdf');
     }
+
+    /**
+     * 13. Monthly and Paid webhook settings save completely independently.
+     */
+    public function test_independent_webhook_settings_save_and_state(): void
+    {
+        $data = $this->setupBillingData();
+
+        // 1. Save Monthly webhook
+        $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/monthly', [
+                'url' => 'https://n8n.iqra.org/webhook/monthly-endpoint',
+                'secret' => 'monthly-secret-123',
+                'is_enabled' => '1',
+            ])
+            ->assertRedirect('/settings/webhooks')
+            ->assertSessionHas('notice')
+            ->assertSessionHas('saved_webhook_type', 'monthly');
+
+        $monthlySetting = DB::table('webhook_settings')->where('webhook_type', 'monthly')->first();
+        $paidSetting = DB::table('webhook_settings')->where('webhook_type', 'paid')->first();
+
+        $this->assertSame('https://n8n.iqra.org/webhook/monthly-endpoint', $monthlySetting->url);
+        $this->assertEquals(1, $monthlySetting->is_enabled);
+        $this->assertNull($paidSetting->url);
+        $this->assertEquals(0, $paidSetting->is_enabled);
+
+        // 2. Save Paid webhook independently
+        $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/paid', [
+                'url' => 'https://n8n.iqra.org/webhook-test/paid-receipts',
+                'secret' => 'paid-secret-456',
+                'is_enabled' => '0',
+            ])
+            ->assertRedirect('/settings/webhooks')
+            ->assertSessionHas('notice')
+            ->assertSessionHas('saved_webhook_type', 'paid');
+
+        $monthlySettingAfter = DB::table('webhook_settings')->where('webhook_type', 'monthly')->first();
+        $paidSettingAfter = DB::table('webhook_settings')->where('webhook_type', 'paid')->first();
+
+        // Monthly is 100% untouched
+        $this->assertSame('https://n8n.iqra.org/webhook/monthly-endpoint', $monthlySettingAfter->url);
+        $this->assertEquals(1, $monthlySettingAfter->is_enabled);
+
+        // Paid is updated
+        $this->assertSame('https://n8n.iqra.org/webhook-test/paid-receipts', $paidSettingAfter->url);
+        $this->assertEquals(0, $paidSettingAfter->is_enabled);
+
+        // 3. Disable Monthly without affecting Paid URL
+        $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/monthly', [
+                'url' => 'https://n8n.iqra.org/webhook/monthly-endpoint',
+                'secret' => '', // blank to keep unchanged
+                'is_enabled' => '0',
+            ])
+            ->assertRedirect('/settings/webhooks');
+
+        $this->assertEquals(0, DB::table('webhook_settings')->where('webhook_type', 'monthly')->value('is_enabled'));
+        $this->assertSame('https://n8n.iqra.org/webhook-test/paid-receipts', DB::table('webhook_settings')->where('webhook_type', 'paid')->value('url'));
+    }
+
+    /**
+     * 14. URL validation accepts public HTTPS n8n URLs (/webhook/ & /webhook-test/) and rejects invalid / SSRF.
+     */
+    public function test_webhook_url_validation_accepts_valid_n8n_urls_and_rejects_invalid_with_endpoint_specific_errors(): void
+    {
+        $data = $this->setupBillingData();
+
+        // 1. Accepts valid /webhook-test/ path and trims whitespace
+        $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/monthly', [
+                'url' => '  https://flow.iqravirtualschool.com:5678/webhook-test/34827438-4384-3843-3848-384838483848?auth=token  ',
+                'is_enabled' => '1',
+            ])
+            ->assertRedirect('/settings/webhooks')
+            ->assertSessionHasNoErrors();
+
+        $this->assertSame(
+            'https://flow.iqravirtualschool.com:5678/webhook-test/34827438-4384-3843-3848-384838483848?auth=token',
+            DB::table('webhook_settings')->where('webhook_type', 'monthly')->value('url')
+        );
+
+        // 2. Accepts valid /webhook/ path for Paid
+        $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/paid', [
+                'url' => 'https://iqra.app.n8n.cloud/webhook/paid-invoices',
+                'is_enabled' => '1',
+            ])
+            ->assertRedirect('/settings/webhooks')
+            ->assertSessionHasNoErrors();
+
+        $this->assertSame(
+            'https://iqra.app.n8n.cloud/webhook/paid-invoices',
+            DB::table('webhook_settings')->where('webhook_type', 'paid')->value('url')
+        );
+
+        // 3. Rejects missing scheme with specific Monthly message
+        $responseMonthly = $this->actingAs($data['superAdmin'])
+            ->from('/settings/webhooks')
+            ->post('/settings/webhooks/monthly', [
+                'url' => 'n8n.example.com/webhook/test',
+            ]);
+
+        $responseMonthly->assertRedirect('/settings/webhooks')
+            ->assertSessionHasErrors(['url']);
+
+        $errorsMonthly = session('errors')->get('url');
+        $this->assertStringContainsString('The Monthly webhook URL must begin with https://', $errorsMonthly[0]);
+
+        // 4. Rejects loopback / SSRF with specific Monthly message
+        $responseSSRF = $this->actingAs($data['superAdmin'])
+            ->from('/settings/webhooks')
+            ->post('/settings/webhooks/monthly', [
+                'url' => 'https://localhost:5678/webhook/test',
+            ]);
+
+        $responseSSRF->assertRedirect('/settings/webhooks')
+            ->assertSessionHasErrors(['url']);
+
+        $errorsSSRF = session('errors')->get('url');
+        $this->assertStringContainsString('The Monthly webhook URL: Webhook URL cannot point to localhost or internal loopback.', $errorsSSRF[0]);
+
+        // 5. Rejects private IP with specific Paid message
+        $responsePrivateIP = $this->actingAs($data['superAdmin'])
+            ->from('/settings/webhooks')
+            ->post('/settings/webhooks/paid', [
+                'url' => 'https://192.168.1.50:5678/webhook/paid',
+            ]);
+
+        $responsePrivateIP->assertRedirect('/settings/webhooks')
+            ->assertSessionHasErrors(['url']);
+
+        $errorsPrivateIP = session('errors')->get('url');
+        $this->assertStringContainsString('The Paid webhook URL: Webhook URL cannot point to a private or reserved IP address.', $errorsPrivateIP[0]);
+    }
+
+    /**
+     * 15. Validation failure preserves other card values without cross-population.
+     */
+    public function test_validation_failure_preserves_other_card_values_without_cross_population(): void
+    {
+        $data = $this->setupBillingData();
+
+        // Pre-configure distinct database values
+        DB::table('webhook_settings')->where('webhook_type', 'monthly')->update([
+            'url' => 'https://n8n.iqra.org/webhook/monthly-saved',
+            'is_enabled' => 1,
+        ]);
+        DB::table('webhook_settings')->where('webhook_type', 'paid')->update([
+            'url' => 'https://n8n.iqra.org/webhook/paid-saved',
+            'is_enabled' => 0,
+        ]);
+
+        // Submit invalid Monthly URL
+        $response = $this->actingAs($data['superAdmin'])
+            ->from('/settings/webhooks')
+            ->post('/settings/webhooks/monthly', [
+                'url' => 'invalid-monthly-url',
+                'is_enabled' => '1',
+            ]);
+
+        $response->assertRedirect('/settings/webhooks')
+            ->assertSessionHasErrors(['url']);
+
+        // Follow redirect to GET /settings/webhooks
+        $pageResponse = $this->actingAs($data['superAdmin'])
+            ->get('/settings/webhooks');
+
+        $pageResponse->assertStatus(200);
+
+        // Monthly card shows the validation error under its field
+        $pageResponse->assertSee('The Monthly webhook URL must begin with https://');
+
+        // Paid card still displays its own saved database URL and is NOT cross-populated by invalid-monthly-url
+        $pageResponse->assertSee('https://n8n.iqra.org/webhook/paid-saved');
+        $pageResponse->assertDontSee('invalid-monthly-url" name="url" class="input" style="width:100%; box-sizing:border-box;', false);
+
+        // Submit invalid Paid URL
+        $responsePaid = $this->actingAs($data['superAdmin'])
+            ->from('/settings/webhooks')
+            ->post('/settings/webhooks/paid', [
+                'url' => 'invalid-paid-url',
+                'is_enabled' => '0',
+            ]);
+
+        $responsePaid->assertRedirect('/settings/webhooks')
+            ->assertSessionHasErrors(['url']);
+
+        $pageResponseAfterPaid = $this->actingAs($data['superAdmin'])
+            ->get('/settings/webhooks');
+
+        // Paid card shows error under its field
+        $pageResponseAfterPaid->assertSee('The Paid webhook URL must begin with https://');
+
+        // Monthly card still displays its own saved database URL
+        $pageResponseAfterPaid->assertSee('https://n8n.iqra.org/webhook/monthly-saved');
+    }
+
+    /**
+     * 16. Test Connection verifies external test endpoint without transmitting PII or financial data.
+     */
+    public function test_safe_test_connection_without_financial_or_student_pii(): void
+    {
+        $data = $this->setupBillingData();
+        $testUrl = 'https://n8n.controlled-test.org/webhook-test/ping';
+
+        DB::table('webhook_settings')->where('webhook_type', 'monthly')->update([
+            'url' => $testUrl,
+            'is_enabled' => 1,
+        ]);
+
+        Http::fake([
+            $testUrl => Http::response(['status' => 'ok', 'message' => 'Ping received'], 200),
+        ]);
+
+        $this->actingAs($data['superAdmin'])
+            ->post('/settings/webhooks/monthly/test')
+            ->assertRedirect('/settings/webhooks')
+            ->assertSessionHas('notice');
+
+        // Verify request payload contained zero student or financial records
+        Http::assertSent(function ($request) use ($testUrl) {
+            $data = $request->data();
+            return $request->url() === $testUrl
+                && $data['event'] === 'test.connection'
+                && $data['source_system'] === 'IQRA Virtual School'
+                && !isset($data['invoice'])
+                && !isset($data['students'])
+                && !isset($data['family'])
+                && !isset($data['total_amount'])
+                && !isset($data['amount_due']);
+        });
+
+        // Verify Monthly test results updated while Paid test results remain null/untouched
+        $monthlySetting = DB::table('webhook_settings')->where('webhook_type', 'monthly')->first();
+        $paidSetting = DB::table('webhook_settings')->where('webhook_type', 'paid')->first();
+
+        $this->assertSame('success', $monthlySetting->last_test_status);
+        $this->assertNotNull($monthlySetting->last_test_at);
+        $this->assertNull($paidSetting->last_test_status);
+    }
 }
