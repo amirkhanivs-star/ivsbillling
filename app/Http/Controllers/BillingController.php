@@ -247,12 +247,8 @@ class BillingController {
    $gradeOptions = \Illuminate\Support\Facades\DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
    $campuses = \Illuminate\Support\Facades\DB::table('campuses')->orderBy('name')->get();
 
-   $recentBatches = \Illuminate\Support\Facades\DB::table('notification_batches as b')
-    ->leftJoin('users as u', 'u.id', '=', 'b.approved_by')
-    ->select('b.*', 'u.name as approver_name')
-    ->orderByDesc('b.id')
-    ->limit(10)
-    ->get();
+   $recentBatches = $queueService->getEnrichedBatches($selectedPeriod, 10);
+   $workerStatus = $queueService->getQueueWorkerStatus();
 
    $webhookService = app(\App\Services\WebhookSettingService::class);
    $monthlyWebhookSetting = $webhookService->getSettings('monthly');
@@ -273,6 +269,7 @@ class BillingController {
     'campuses' => $campuses,
     'gradeOptions' => $gradeOptions,
     'recentBatches' => $recentBatches,
+    'workerStatus' => $workerStatus,
     'monthlyWebhookSetting' => $monthlyWebhookSetting,
     'paidWebhookSetting' => $paidWebhookSetting,
    ]);
@@ -1911,14 +1908,17 @@ class BillingController {
  }
  public function processQueue(Request $r){
   abort_if($r->user()->role==='auditor',403);
+  @set_time_limit(360);
+  $jobsBefore = DB::table('jobs')->where('queue','notifications')->count();
   \Illuminate\Support\Facades\Artisan::call('queue:work',[
    '--queue'=>'notifications,default',
    '--stop-when-empty'=>true,
    '--max-jobs'=>50,
-   '--timeout'=>30,
+   '--timeout'=>300,
   ]);
   $remaining=DB::table('jobs')->where('queue','notifications')->count();
-  return back()->with('notice',"Processed queued webhook dispatches. {$remaining} job(s) remaining in queue.");
+  $processed = max(0, $jobsBefore - $remaining);
+  return back()->with('notice',"Processed {$processed} batch job(s) from notifications queue. {$remaining} job(s) remaining.");
  }
  public function addEnrollment(Request $r,int $student){
   $d=$r->validate(['campus_id'=>'required|exists:campuses,id','department_id'=>'required|exists:departments,id','grade_label'=>'required|string|max:200','subject_name'=>'nullable|string|max:150','currency'=>'required|alpha|size:3','class_days_per_week'=>'nullable|integer|min:1|max:7','monthly_fee'=>['nullable','regex:/^\d{1,13}(?:\.\d{1,2})?$/']]);abort_if($r->user()->role==='auditor',403);$this->assertAccess($r,$d['department_id'],$d['campus_id']);abort_unless(DB::table('students')->where('id',$student)->exists(),404);

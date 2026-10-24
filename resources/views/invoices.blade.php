@@ -542,10 +542,168 @@
 
     {{-- TAB 2: PROCESSING --}}
     @elseif($currentTab === 'processing')
+        {{-- DISPATCHER / WORKER HEALTH BANNER --}}
+        @if(!empty($workerStatus))
+            @if(!$workerStatus['is_running'] && $workerStatus['pending_jobs'] > 0)
+                <div style="background:#fffbeb; border:1px solid #fde68a; border-left:4px solid #f59e0b; border-radius:6px; padding:14px 18px; margin-bottom:18px;">
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
+                        <div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span style="font-size:16px;">⚠️</span>
+                                <strong style="color:#92400e; font-size:14px;">Queue Worker is Offline — {{ $workerStatus['pending_jobs'] }} Batch Dispatch Job(s) Buffered</strong>
+                            </div>
+                            <p style="margin:4px 0 0 24px; color:#78350f; font-size:12.5px; line-height:1.4;">
+                                Approved monthly challan batches are waiting in the local queue table because no background worker is running. Notifications will not reach n8n until a worker process is running or the queue is processed.
+                            </p>
+                            <div style="margin:8px 0 0 24px; font-size:11.5px; color:#b45309;">
+                                <strong>Persistent Worker Command:</strong> <code style="background:#fef3c7; padding:2px 6px; border-radius:4px; font-weight:700;">php artisan queue:work --queue=notifications,default --tries=3</code>
+                            </div>
+                        </div>
+                        <form method="post" action="{{ route('invoices.notifications.process_queue') }}" style="margin:0;">
+                            @csrf
+                            <button type="submit" class="btn" style="background:#d97706; color:#fff; font-weight:700; font-size:12px; padding:8px 14px; border:none; border-radius:5px; cursor:pointer; display:flex; align-items:center; gap:6px; box-shadow:0 1px 2px rgba(0,0,0,0.1);">
+                                <span>⚡</span> Process Pending Queue Now
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            @elseif($workerStatus['is_running'])
+                <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-left:4px solid #16a34a; border-radius:6px; padding:10px 16px; margin-bottom:18px; display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="display:inline-block; width:10px; height:10px; background:#16a34a; border-radius:50%; box-shadow:0 0 0 3px rgba(22,163,74,0.2);"></span>
+                        <strong style="color:#166534; font-size:13px;">Background Queue Worker Active</strong>
+                        <span style="color:#15803d; font-size:12px;">— Dispatches are being processed automatically in chunks.</span>
+                    </div>
+                    <span class="muted" style="font-size:11px;">{{ $workerStatus['pending_jobs'] }} job(s) in queue</span>
+                </div>
+            @else
+                <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:10px 16px; margin-bottom:18px; display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="display:inline-block; width:10px; height:10px; background:#94a3b8; border-radius:50%;"></span>
+                        <strong style="color:#334155; font-size:13px;">Queue Idle</strong>
+                        <span class="muted" style="font-size:12px;">— All approved delivery batches have been dispatched.</span>
+                    </div>
+                </div>
+            @endif
+        @endif
+
+        {{-- BATCH PIPELINE PROGRESS TABLE --}}
+        @if(!empty($recentBatches) && $recentBatches->isNotEmpty())
+            <div style="margin-bottom:22px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <h4 style="margin:0; font-size:13px; text-transform:uppercase; letter-spacing:0.05em; color:#475569;">
+                        Approved Batch Delivery Pipeline
+                    </h4>
+                    <span class="muted" style="font-size:11.5px;">Batches for cycle: <strong>{{ $dashboardStats['selected_month'] }}</strong></span>
+                </div>
+
+                <div class="table-wrap">
+                    <table class="table" style="font-size:12.5px;">
+                        <thead>
+                            <tr style="background:#f8fafc;">
+                                <th>Batch ID</th>
+                                <th>Period</th>
+                                <th>Recipients</th>
+                                <th>Total Chunks</th>
+                                <th>Submitted</th>
+                                <th>Pending</th>
+                                <th>Failed</th>
+                                <th>Status</th>
+                                <th>Last Attempt</th>
+                                <th style="text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        @foreach($recentBatches as $b)
+                            <tr>
+                                <td>
+                                    <a href="{{ route('invoices.batch_details', $b->batch_id) }}" style="color:#7c3aed; font-weight:700; text-decoration:none;">
+                                        <code>{{ $b->batch_id }}</code>
+                                    </a>
+                                    @if(!empty($b->approver_name))
+                                        <div class="muted" style="font-size:10.5px;">By: {{ $b->approver_name }}</div>
+                                    @endif
+                                </td>
+                                <td><strong>{{ $b->billing_period ?: '—' }}</strong></td>
+                                <td>
+                                    <strong>{{ number_format($b->total_recipients) }}</strong>
+                                    <div class="muted" style="font-size:10.5px;">{{ $b->queued_recipients }} queued</div>
+                                </td>
+                                <td><span style="font-weight:700;">{{ $b->chunks_total }}</span></td>
+                                <td>
+                                    <span style="color:#16a34a; font-weight:700;">{{ $b->chunks_sent }}</span>
+                                </td>
+                                <td>
+                                    <span style="color:{{ $b->chunks_pending > 0 ? '#d97706' : '#64748b' }}; font-weight:700;">
+                                        {{ $b->chunks_pending }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span style="color:{{ $b->chunks_failed > 0 ? '#dc2626' : '#64748b' }}; font-weight:700;">
+                                        {{ $b->chunks_failed }}
+                                    </span>
+                                </td>
+                                <td>
+                                    @if($b->status === 'submitted')
+                                        <span class="badge-status badge-paid" style="font-size:10px;">SUBMITTED</span>
+                                    @elseif($b->status === 'processing')
+                                        <span style="background:#dbeafe; color:#1e40af; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">PROCESSING</span>
+                                    @elseif($b->status === 'partially_submitted')
+                                        <span style="background:#fef3c7; color:#92400e; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">PARTIAL</span>
+                                    @elseif($b->status === 'failed')
+                                        <span style="background:#fee2e2; color:#991b1b; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">FAILED</span>
+                                    @elseif($b->status === 'blocked')
+                                        <span style="background:#f1f5f9; color:#475569; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">BLOCKED</span>
+                                    @else
+                                        <span class="badge-status badge-queued" style="font-size:10px;">QUEUED</span>
+                                    @endif
+                                </td>
+                                <td>
+                                    @if(!empty($b->last_attempt))
+                                        <span style="font-size:11.5px;">{{ substr($b->last_attempt, 0, 16) }}</span>
+                                        @if(!empty($b->response_code))
+                                            <span class="muted" style="font-size:10.5px;">(HTTP {{ $b->response_code }})</span>
+                                        @endif
+                                    @else
+                                        <span class="muted" style="font-size:11.5px;">Not yet attempted</span>
+                                    @endif
+
+                                    @if(!empty($b->display_error))
+                                        <div style="color:#dc2626; font-size:10.5px; max-width:200px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{{ $b->display_error }}">
+                                            ⚠️ {{ $b->display_error }}
+                                        </div>
+                                    @endif
+                                </td>
+                                <td style="text-align:right;">
+                                    <div style="display:flex; justify-content:flex-end; gap:4px;">
+                                        @if(in_array($b->status, ['failed', 'partially_submitted'], true) || $b->chunks_failed > 0)
+                                            <form method="post" action="{{ route('invoices.batches.retry_failed', $b->batch_id) }}" style="margin:0;">
+                                                @csrf
+                                                <button type="submit" class="btn small" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-size:10.5px; padding:3px 7px;">
+                                                    ↻ Retry Failed
+                                                </button>
+                                            </form>
+                                        @endif
+                                        <a href="{{ route('invoices.batch_details', $b->batch_id) }}" class="btn small gray" style="font-size:10.5px; padding:3px 7px;">
+                                            Details ↗
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                        @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        @endif
+
+        {{-- ITEMIZED NOTIFICATIONS QUEUE --}}
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
             <div>
-                <h3 style="margin:0; color:#0f172a;">Active In-Flight Batches &amp; Queued Jobs</h3>
-                <p class="muted" style="margin:2px 0 0 0; font-size:12px;">These batches have been approved by staff and are currently being dispatched to n8n in chunks.</p>
+                <h3 style="margin:0; color:#0f172a;">Itemized Notification Queue</h3>
+                <p class="muted" style="margin:2px 0 0 0; font-size:12px;">
+                    {{ number_format($tabQueuePage->total()) }} individual recipient notification(s) assigned to chunks.
+                </p>
             </div>
         </div>
 

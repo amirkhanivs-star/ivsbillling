@@ -20,7 +20,7 @@ class DispatchBatchToN8n implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 3;
-    public int $timeout = 60;
+    public int $timeout = 300;
     public array $backoff = [60, 300, 900];
 
     public function __construct(public string $batchId) {}
@@ -32,9 +32,39 @@ class DispatchBatchToN8n implements ShouldQueue
             return;
         }
 
-        // Idempotency: if already submitted, do not re-dispatch
+        // Idempotency: if already submitted or completed, do not re-dispatch
         if (in_array($batch->status, ['submitted', 'completed'], true)) {
             return;
+        }
+
+        // Concurrency lock: atomically transition status to 'processing'
+        // This ensures two workers or retries cannot send the same batch concurrently
+        $claimed = DB::table('notification_batches')
+            ->where('batch_id', $this->batchId)
+            ->whereIn('status', ['queued', 'failed', 'partially_submitted'])
+            ->update([
+                'status' => 'processing',
+                'updated_at' => now(),
+            ]);
+
+        if ($claimed === 0) {
+            $current = DB::table('notification_batches')->where('batch_id', $this->batchId)->first();
+            if (!$current || in_array($current->status, ['submitted', 'completed', 'qa_suppressed', 'blocked'], true)) {
+                return;
+            }
+            // Allow recovery if previous processing attempt was stalled (updated > 10 minutes ago)
+            if ($current->status === 'processing') {
+                $recovered = DB::table('notification_batches')
+                    ->where('batch_id', $this->batchId)
+                    ->where('status', 'processing')
+                    ->where('updated_at', '<', now()->subMinutes(10))
+                    ->update(['updated_at' => now()]);
+
+                if (!$recovered) {
+                    // Actively processing under another worker
+                    return;
+                }
+            }
         }
 
         // Safety guard: QA suppression
@@ -78,6 +108,19 @@ class DispatchBatchToN8n implements ShouldQueue
             ->get();
 
         if ($notifications->isEmpty()) {
+            // Check if all notifications in batch are already submitted
+            $unsubmittedCount = DB::table('notifications')
+                ->where('batch_id', $batch->batch_id)
+                ->whereIn('status', ['queued', 'failed', 'blocked'])
+                ->count();
+
+            if ($unsubmittedCount === 0) {
+                DB::table('notification_batches')->where('id', $batch->id)->update([
+                    'status' => 'submitted',
+                    'submitted_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
             return;
         }
 
@@ -93,7 +136,13 @@ class DispatchBatchToN8n implements ShouldQueue
             }
 
             $invoice = DB::table('invoices')->where('id', $notification->invoice_id)->first();
-            if (!$invoice) {
+            if (!$invoice || in_array($invoice->status, ['void', 'voided'], true)) {
+                DB::table('notifications')->where('id', $notification->id)->update([
+                    'status' => 'superseded',
+                    'is_superseded' => true,
+                    'error' => 'Invoice was voided or superseded before dispatch.',
+                    'updated_at' => now(),
+                ]);
                 continue;
             }
 
@@ -109,6 +158,18 @@ class DispatchBatchToN8n implements ShouldQueue
         }
 
         if (empty($recipientPayloads)) {
+            $unsubmittedCount = DB::table('notifications')
+                ->where('batch_id', $batch->batch_id)
+                ->whereIn('status', ['queued', 'failed'])
+                ->count();
+
+            if ($unsubmittedCount === 0) {
+                DB::table('notification_batches')->where('id', $batch->id)->update([
+                    'status' => 'submitted',
+                    'submitted_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
             return;
         }
 

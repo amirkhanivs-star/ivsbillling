@@ -1452,4 +1452,99 @@ class InvoiceDeliveryQueueService
 
         return $q->paginate($perPage)->withQueryString();
     }
+
+    /**
+     * Reliably detect background queue worker status.
+     * Returns whether a worker is running and number of pending/reserved jobs.
+     */
+    public function getQueueWorkerStatus(): array
+    {
+        $pendingJobs = DB::table('jobs')->where('queue', 'notifications')->count();
+        $reservedJobs = DB::table('jobs')->where('queue', 'notifications')->whereNotNull('reserved_at')->count();
+
+        $isRunning = false;
+
+        // 1. If a job is currently reserved in the jobs table, an active worker is executing it
+        if ($reservedJobs > 0) {
+            $isRunning = true;
+        } else {
+            // 2. Check OS process list for queue:work
+            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                $output = @shell_exec('wmic process where "name=\'php.exe\'" get commandline 2>nul');
+                if ($output && stripos($output, 'queue:work') !== false) {
+                    $isRunning = true;
+                }
+            } else {
+                $output = @shell_exec('pgrep -f "artisan queue:work" 2>/dev/null');
+                if (!empty(trim((string)$output))) {
+                    $isRunning = true;
+                }
+            }
+        }
+
+        return [
+            'is_running' => $isRunning,
+            'pending_jobs' => $pendingJobs,
+            'reserved_jobs' => $reservedJobs,
+            'status' => $isRunning ? 'running' : ($pendingJobs > 0 ? 'stopped' : 'idle'),
+            'message' => $isRunning
+                ? 'Queue worker is active and processing notifications in background.'
+                : ($pendingJobs > 0
+                    ? "Queue worker is offline. {$pendingJobs} batch dispatch job(s) are buffered in queue."
+                    : 'Queue worker is idle. No pending jobs in queue.'),
+        ];
+    }
+
+    /**
+     * Retrieve enriched notification batches with live chunk progress and error details.
+     */
+    public function getEnrichedBatches(?string $period = null, int $limit = 10): \Illuminate\Support\Collection
+    {
+        $query = DB::table('notification_batches as b')
+            ->leftJoin('users as u', 'u.id', '=', 'b.approved_by')
+            ->select('b.*', 'u.name as approver_name');
+
+        if (!empty($period)) {
+            $query->where('b.billing_period', 'like', "{$period}%");
+        }
+
+        $batches = $query->orderByDesc('b.id')->limit($limit)->get();
+
+        if ($batches->isEmpty() && !empty($period)) {
+            // Fallback to recent batches if none exist for period
+            $batches = DB::table('notification_batches as b')
+                ->leftJoin('users as u', 'u.id', '=', 'b.approved_by')
+                ->select('b.*', 'u.name as approver_name')
+                ->orderByDesc('b.id')
+                ->limit($limit)
+                ->get();
+        }
+
+        foreach ($batches as $b) {
+            $counts = DB::table('notifications')
+                ->where('batch_id', $b->batch_id)
+                ->select(
+                    DB::raw("COUNT(CASE WHEN status = 'queued' THEN 1 END) as queued_count"),
+                    DB::raw("COUNT(CASE WHEN status IN ('submitted', 'delivered', 'read') THEN 1 END) as submitted_count"),
+                    DB::raw("COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_count"),
+                    DB::raw("COUNT(DISTINCT CASE WHEN status = 'failed' THEN chunk_index END) as failed_chunks_count"),
+                    DB::raw("MAX(last_attempt_at) as last_attempt_at"),
+                    DB::raw("MAX(error) as sample_error")
+                )
+                ->first();
+
+            $b->queued_recipients = (int)($counts->queued_count ?? 0);
+            $b->submitted_recipients = (int)($counts->submitted_count ?? 0);
+            $b->failed_recipients = (int)($counts->failed_count ?? 0);
+            $b->chunks_failed = (int)($counts->failed_chunks_count ?? 0);
+            $b->chunks_sent = (int)$b->chunks_sent;
+            $b->chunks_total = (int)$b->chunks_total;
+            $b->chunks_pending = max(0, $b->chunks_total - $b->chunks_sent - $b->chunks_failed);
+            $b->last_attempt = $counts->last_attempt_at ?: $b->submitted_at;
+            $b->display_error = $b->error ?: $counts->sample_error;
+        }
+
+        return $batches;
+    }
 }
+
