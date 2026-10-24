@@ -190,7 +190,9 @@ class InvoiceDeliveryQueueService
             'n.submitted_at',
             'n.delivered_at',
             'n.created_at as notification_created_at',
+            'n.created_at',
             'n.updated_at as notification_updated_at',
+            'n.updated_at',
             'i.invoice_number',
             'b.period_start as billing_period',
             'i.issued_on as issue_date',
@@ -374,6 +376,8 @@ class InvoiceDeliveryQueueService
             $row->consolidated_challan_url = $consolidatedChallanUrl;
             $row->webhook_submission_status = $webhookStatus;
             $row->whatsapp_delivery_status = $deliveryStatus;
+            $row->created_at = $row->notification_created_at ?? ($row->created_at ?? null);
+            $row->updated_at = $row->notification_updated_at ?? ($row->updated_at ?? null);
 
             return $row;
         });
@@ -726,7 +730,9 @@ class InvoiceDeliveryQueueService
                 $attNotifQuery->where('i.department_id', $user->department_id);
             }
         }
-        $attentionCount = $attNotifQuery->count() + $ineligibleCount;
+        $notifFamilyIds = (clone $attNotifQuery)->distinct()->pluck('i.family_id')->all();
+        $ineligibleFamilyIds = (clone $ineligibleQuery)->distinct()->pluck('i.family_id')->all();
+        $attentionCount = count(array_unique(array_merge($notifFamilyIds, $ineligibleFamilyIds)));
 
         // Check if there is an active search or sub-filter
         $hasActiveSearch = !empty($filters['search']) || !empty($filters['grade']) || !empty($filters['department_id']) || !empty($filters['campus_id']);
@@ -1097,6 +1103,281 @@ class InvoiceDeliveryQueueService
         return new \Illuminate\Pagination\LengthAwarePaginator($familyRows, $totalFamilies, $perPage, $currentPage, [
             'path' => \Illuminate\Pagination\Paginator::resolveCurrentPath(),
             'query' => request()->query(),
+        ]);
+    }
+
+    /**
+     * Get paginated Needs Attention cases for the selected billing month.
+     * Includes:
+     * 1. Families with missing/invalid WhatsApp contacts.
+     * 2. Families without required verification or messaging permission.
+     * 3. Actual failed or blocked webhook notifications.
+     *
+     * Deduplicated by family so the KPI and table share the exact same counting unit.
+     */
+    public function getNeedsAttentionCases(array $filters, object $user, int $perPage = 25): LengthAwarePaginator
+    {
+        $allowedPerPage = [25, 50, 100];
+        if (!in_array($perPage, $allowedPerPage, true)) {
+            $perPage = 25;
+        }
+
+        $period = !empty($filters['period']) ? $filters['period'] : $this->getLatestBillingMonth();
+
+        // 1. Ineligible families query (unpaid invoices in period with contact/permission issues)
+        $ineligibleBase = DB::table('invoices as i')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->join('families as f', 'f.id', '=', 'i.family_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->whereNotIn('i.status', ['void', 'voided'])
+            ->where('i.status', '!=', 'paid')
+            ->whereRaw('i.total_minor > i.paid_minor')
+            ->whereNotExists(function ($sub) use ($period) {
+                $sub->select(DB::raw(1))
+                    ->from('notifications as n')
+                    ->join('invoices as ni', 'ni.id', '=', 'n.invoice_id')
+                    ->join('billing_runs as nb', 'nb.id', '=', 'ni.billing_run_id')
+                    ->whereColumn('ni.family_id', 'i.family_id')
+                    ->where('nb.period_start', 'like', $period . '%')
+                    ->where('n.kind', 'monthly')
+                    ->whereIn('n.status', ['submitted', 'delivered', 'read', 'queued']);
+            })
+            ->where(function ($sub) {
+                $sub->where('f.contact_verified', 0)
+                    ->orWhere('f.messaging_opt_in', 0)
+                    ->orWhereNull('f.whatsapp')
+                    ->orWhere('f.whatsapp', '');
+            });
+
+        // 2. Failed / blocked notifications query
+        $notifBase = DB::table('notifications as n')
+            ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->join('families as f', 'f.id', '=', 'i.family_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->where('n.kind', 'monthly')
+            ->whereIn('n.status', ['failed', 'blocked']);
+
+        // Staff access control
+        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $ineligibleBase->where('i.campus_id', $user->campus_id);
+            $notifBase->where('i.campus_id', $user->campus_id);
+            if (!empty($user->department_id)) {
+                $ineligibleBase->where('i.department_id', $user->department_id);
+                $notifBase->where('i.department_id', $user->department_id);
+            }
+        }
+
+        // Campus filter
+        if (!empty($filters['campus_id'])) {
+            $ineligibleBase->where('i.campus_id', (int)$filters['campus_id']);
+            $notifBase->where('i.campus_id', (int)$filters['campus_id']);
+        }
+
+        // Department filter
+        if (!empty($filters['department_id'])) {
+            $ineligibleBase->where('i.department_id', (int)$filters['department_id']);
+            $notifBase->where('i.department_id', (int)$filters['department_id']);
+        }
+
+        // Grade filter
+        if (!empty($filters['grade'])) {
+            $grade = $filters['grade'];
+            $gradeFilter = function ($sub) use ($grade) {
+                $sub->select(DB::raw(1))
+                    ->from('invoice_items as sub_ii')
+                    ->join('enrollments as sub_e', 'sub_e.id', '=', 'sub_ii.enrollment_id')
+                    ->whereColumn('sub_ii.invoice_id', 'i.id')
+                    ->where('sub_e.grade_label', $grade);
+            };
+            $ineligibleBase->whereExists($gradeFilter);
+            $notifBase->whereExists($gradeFilter);
+        }
+
+        // Search filter
+        if (!empty($filters['search'])) {
+            $term = trim($filters['search']);
+            $isExactFamily = DB::table('families')->where('family_code', $term)->exists();
+            if ($isExactFamily) {
+                $ineligibleBase->where('f.family_code', $term);
+                $notifBase->where('f.family_code', $term);
+            } else {
+                $searchFilter = function ($sq) use ($term) {
+                    $sq->where('i.invoice_number', 'like', "%{$term}%")
+                       ->orWhere('f.family_code', 'like', "%{$term}%")
+                       ->orWhere('f.guardian_name', 'like', "%{$term}%")
+                       ->orWhere('f.whatsapp', 'like', "%{$term}%")
+                       ->orWhere('f.email', 'like', "%{$term}%")
+                       ->orWhereExists(function ($stSub) use ($term) {
+                           $stSub->selectRaw('1')
+                               ->from('invoice_items as st_ii')
+                               ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
+                               ->whereColumn('st_ii.invoice_id', 'i.id')
+                               ->where(function ($stQuery) use ($term) {
+                                   $stQuery->where('st_s.name', 'like', "%{$term}%")
+                                           ->orWhere('st_s.gr_number', 'like', "%{$term}%");
+                               });
+                       });
+                };
+                $ineligibleBase->where($searchFilter);
+                $notifBase->where($searchFilter);
+            }
+        }
+
+        // Deduplicate family IDs
+        $ineligibleFamilyIds = (clone $ineligibleBase)->distinct()->pluck('i.family_id')->all();
+        $notifFamilyIds = (clone $notifBase)->distinct()->pluck('i.family_id')->all();
+        $allFamilyIds = array_values(array_unique(array_merge($notifFamilyIds, $ineligibleFamilyIds)));
+        rsort($allFamilyIds);
+
+        $totalFamilies = count($allFamilyIds);
+        $currentPage = \Illuminate\Pagination\Paginator::resolveCurrentPage() ?: 1;
+        $pagedFamilyIds = array_slice($allFamilyIds, ($currentPage - 1) * $perPage, $perPage);
+
+        if (empty($pagedFamilyIds)) {
+            return new \Illuminate\Pagination\LengthAwarePaginator([], $totalFamilies, $perPage, $currentPage, [
+                'path' => \Illuminate\Pagination\Paginator::resolveCurrentPath(),
+                'query' => app()->bound('request') ? request()->query() : [],
+            ]);
+        }
+
+        $families = DB::table('families')->whereIn('id', $pagedFamilyIds)->get()->keyBy('id');
+        $invoices = DB::table('invoices as i')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->whereIn('i.family_id', $pagedFamilyIds)
+            ->select('i.*', 'b.period_start as billing_period')
+            ->get()
+            ->groupBy('family_id');
+
+        $notifs = DB::table('notifications as n')
+            ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
+            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+            ->where('b.period_start', 'like', $period . '%')
+            ->where('n.kind', 'monthly')
+            ->whereIn('n.status', ['failed', 'blocked'])
+            ->whereIn('i.family_id', $pagedFamilyIds)
+            ->select('n.*', 'i.family_id')
+            ->get()
+            ->groupBy('family_id');
+
+        $allInvoiceIds = $invoices->flatten(1)->pluck('id')->all();
+        $studentsByInvoice = DB::table('invoice_items as ii')
+            ->join('students as s', 's.id', '=', 'ii.student_id')
+            ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
+            ->whereIn('ii.invoice_id', $allInvoiceIds)
+            ->select('ii.invoice_id', 's.id as student_id', 's.name', 's.gr_number', 'e.grade_label')
+            ->distinct()
+            ->get()
+            ->groupBy('invoice_id');
+
+        // Registration details for clean father name lookup
+        $regDetails = DB::table('students as s')
+            ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
+            ->whereIn('s.family_id', $pagedFamilyIds)
+            ->whereNotNull('sd.father_name')
+            ->select('s.family_id', 'sd.father_name')
+            ->get()
+            ->keyBy('family_id');
+
+        $cases = collect();
+        foreach ($pagedFamilyIds as $famId) {
+            $fam = $families->get($famId);
+            if (!$fam) continue;
+
+            $famInvoices = $invoices->get($famId, collect());
+            $primaryInv = $famInvoices->first();
+            $famNotifs = $notifs->get($famId, collect());
+            $latestNotif = $famNotifs->sortByDesc('id')->first();
+
+            $stList = collect();
+            foreach ($famInvoices as $inv) {
+                foreach ($studentsByInvoice->get($inv->id, collect()) as $st) {
+                    $stList->push($st);
+                }
+            }
+            $uniqueStudents = $stList->unique('student_id')->values();
+            $primaryStudent = $uniqueStudents->first();
+
+            $fatherName = $regDetails->get($famId)?->father_name;
+            $isFormula = !empty($fam->guardian_name) && str_starts_with(trim($fam->guardian_name), '=');
+            $cleanGuardianName = $isFormula ? ($fatherName ?: 'Not provided') : ($fam->guardian_name ?: ($fatherName ?: 'Not provided'));
+
+            $problemTags = [];
+            $problemDescriptions = [];
+
+            if ($latestNotif) {
+                if ($latestNotif->status === 'failed') {
+                    $problemTags[] = 'Delivery Failed';
+                    $problemDescriptions[] = 'Webhook Delivery Failed: ' . ($latestNotif->error ?: 'Unknown error');
+                } elseif ($latestNotif->status === 'blocked') {
+                    $problemTags[] = 'Delivery Blocked';
+                    $problemDescriptions[] = 'Webhook Blocked: ' . ($latestNotif->error ?: 'Unverified contact or missing consent');
+                }
+            }
+
+            $hasPhone = !empty($fam->whatsapp) && trim($fam->whatsapp) !== '';
+            $isPhoneValidFormat = $hasPhone && preg_match('/^\+[1-9][0-9]{6,14}$/', trim($fam->whatsapp));
+
+            if (!$hasPhone) {
+                $problemTags[] = 'No Phone';
+                $problemDescriptions[] = 'Missing WhatsApp contact number';
+            } elseif (!$isPhoneValidFormat) {
+                $problemTags[] = 'Invalid Phone';
+                $problemDescriptions[] = 'WhatsApp number not in E.164 format (e.g. +923001234567)';
+            }
+
+            if (!$fam->contact_verified) {
+                $problemTags[] = 'Unverified';
+                $problemDescriptions[] = 'Contact number has not been verified';
+            }
+
+            if (!$fam->messaging_opt_in) {
+                $problemTags[] = 'No Consent';
+                $problemDescriptions[] = 'Parent has not provided messaging permission (Opt-in required)';
+            }
+
+            $caseObj = (object)[
+                'family_id' => $famId,
+                'family_code' => $fam->family_code ?: ('Family #' . $famId),
+                'guardian_name' => $cleanGuardianName,
+                'raw_guardian_name' => $fam->guardian_name,
+                'father_name' => $fatherName,
+                'whatsapp' => $fam->whatsapp,
+                'email' => $fam->email,
+                'contact_verified' => (bool)$fam->contact_verified,
+                'whatsapp_verified' => (bool)$fam->whatsapp_verified,
+                'email_verified' => (bool)$fam->email_verified,
+                'messaging_opt_in' => (bool)$fam->messaging_opt_in,
+                'billing_period' => $period,
+                'billing_month_formatted' => \Carbon\Carbon::parse($period . '-01')->format('F Y'),
+                'invoice_id' => $primaryInv?->id,
+                'invoice_number' => $primaryInv?->invoice_number,
+                'invoice_numbers' => $famInvoices->pluck('invoice_number')->all(),
+                'students' => $uniqueStudents,
+                'primary_student_id' => $primaryStudent?->student_id,
+                'notification_id' => $latestNotif?->id,
+                'notification_status' => $latestNotif?->status,
+                'notification_error' => $latestNotif?->error,
+                'problem_tags' => $problemTags,
+                'problem_descriptions' => $problemDescriptions,
+                'exact_problem' => implode(' · ', $problemDescriptions),
+                'contact_modal_data' => [
+                    'family_id' => $fam->id,
+                    'family_code' => $fam->family_code ?: ('Family #' . $fam->id),
+                    'guardian_name' => ($isFormula ? ($fatherName ?: '') : ($fam->guardian_name ?: '')),
+                    'whatsapp' => $fam->whatsapp ?: '',
+                    'contact_verified' => (bool)$fam->contact_verified,
+                    'messaging_opt_in' => (bool)$fam->messaging_opt_in,
+                ],
+            ];
+
+            $cases->push($caseObj);
+        }
+
+        return new \Illuminate\Pagination\LengthAwarePaginator($cases, $totalFamilies, $perPage, $currentPage, [
+            'path' => \Illuminate\Pagination\Paginator::resolveCurrentPath(),
+            'query' => app()->bound('request') ? request()->query() : [],
         ]);
     }
 

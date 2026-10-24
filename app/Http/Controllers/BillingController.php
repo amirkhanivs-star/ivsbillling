@@ -234,7 +234,7 @@ class BillingController {
    } elseif ($currentTab === 'sent') {
     $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'submitted']), $r->user(), $perPage);
    } elseif ($currentTab === 'attention') {
-    $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'failed']), $r->user(), $perPage);
+    $tabQueuePage = $queueService->getNeedsAttentionCases($filters, $r->user(), $perPage);
    } elseif ($currentTab === 'history') {
     $financialHistoryPage = $queueService->getFinancialHistory($filters, $r->user(), $perPage);
    } else {

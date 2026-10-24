@@ -581,7 +581,7 @@
                         <td>{{ $qRow->family_code ?: 'Family #' . $qRow->family_id }}</td>
                         <td>{{ $qRow->whatsapp ?: 'N/A' }}</td>
                         <td><span class="badge-status badge-queued">QUEUED</span></td>
-                        <td>{{ $qRow->created_at ? substr($qRow->created_at, 0, 16) : '—' }}</td>
+                        <td>{{ (!empty($qRow->created_at) || !empty($qRow->notification_created_at)) ? substr($qRow->created_at ?? $qRow->notification_created_at, 0, 16) : '—' }}</td>
                     </tr>
                 @empty
                     <tr>
@@ -648,7 +648,7 @@
                             @endif
                         </td>
                         <td><code>{{ $sRow->provider_message_id ?: '—' }}</code></td>
-                        <td>{{ $sRow->submitted_at ? substr($sRow->submitted_at, 0, 16) : '—' }}</td>
+                        <td>{{ !empty($sRow->submitted_at) ? substr($sRow->submitted_at, 0, 16) : '—' }}</td>
                         <td>
                             <a href="{{ $sRow->consolidated_challan_url }}" target="_blank" rel="noopener" class="btn small gray" style="font-size:10px; padding:2px 6px;">Challan PDF</a>
                         </td>
@@ -669,57 +669,169 @@
 
     {{-- TAB 4: NEEDS ATTENTION --}}
     @elseif($currentTab === 'attention')
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
             <div>
                 <h3 style="margin:0; color:#b91c1c;">Needs Attention · Delivery Failures &amp; Contact Issues</h3>
-                <p class="muted" style="margin:2px 0 0 0; font-size:12px;">Inspect diagnostic error reasons and safely retry failed notifications without resending successful ones.</p>
+                <p class="muted" style="margin:2px 0 0 0; font-size:12px;">Contact-ineligible families (missing WhatsApp, unverified, or no consent) and webhook delivery failures for <strong>{{ $dashboardStats['selected_month'] }}</strong>.</p>
             </div>
+            @if(session('notice'))
+                <div style="background:#dcfce7; color:#166534; font-size:12px; padding:6px 12px; border-radius:4px; font-weight:700;">
+                    ✓ {{ session('notice') }}
+                </div>
+            @endif
         </div>
+
+        {{-- ATTENTION FILTERS --}}
+        <form method="get" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
+            <input type="hidden" name="tab" value="attention">
+            <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+
+            @if(in_array(auth()->user()->role, ['super_admin', 'finance_admin'], true))
+                <select class="input" name="campus_id" style="min-width:140px;">
+                    <option value="">All Campuses</option>
+                    @foreach($campuses as $c)
+                        <option value="{{ $c->id }}" @selected(request('campus_id') == $c->id)>{{ $c->name }}</option>
+                    @endforeach
+                </select>
+            @endif
+
+            <select class="input" name="department_id" style="min-width:140px;">
+                <option value="">All Departments</option>
+                @foreach($departments as $d)
+                    <option value="{{ $d->id }}" @selected(request('department_id') == $d->id)>{{ $d->name }}</option>
+                @endforeach
+            </select>
+
+            <select class="input" name="grade" style="min-width:130px;">
+                <option value="">All Grades</option>
+                @foreach($gradeOptions as $grade)
+                    <option value="{{ $grade }}" @selected(request('grade') === $grade)>{{ $grade }}</option>
+                @endforeach
+            </select>
+
+            <input type="text" name="search" class="input" value="{{ request('search') }}" placeholder="Search family, student, phone..." style="min-width:200px;">
+
+            <select class="input" name="per_page" style="width:90px;" title="Rows per page">
+                <option value="25" @selected($perPage == 25)>25 / page</option>
+                <option value="50" @selected($perPage == 50)>50 / page</option>
+                <option value="100" @selected($perPage == 100)>100 / page</option>
+            </select>
+
+            <button type="submit" class="btn small" style="background:#7c3aed; color:#fff; font-weight:600; padding:6px 14px;">Filter</button>
+            <a href="?tab=attention&period={{ $selectedPeriod }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
+        </form>
 
         <div class="table-wrap">
             <table class="table">
                 <thead>
                     <tr>
-                        <th>Invoice #</th>
-                        <th>Family</th>
-                        <th>WhatsApp</th>
-                        <th>Status</th>
-                        <th>Diagnostic Details</th>
-                        <th>Action</th>
+                        <th style="width:110px;">Family Code</th>
+                        <th style="width:200px;">Guardian / Student</th>
+                        <th style="width:170px;">WhatsApp Contact</th>
+                        <th style="width:120px;">Billing Month</th>
+                        <th>Exact Problem</th>
+                        <th style="width:140px; text-align:right;">Action</th>
                     </tr>
                 </thead>
                 <tbody>
                 @forelse($tabQueuePage as $aRow)
                     <tr>
-                        <td><strong>{{ $aRow->invoice_number }}</strong></td>
-                        <td>{{ $aRow->family_code ?: 'Family #' . $aRow->family_id }}</td>
                         <td>
-                            <div>{{ $aRow->whatsapp ?: 'No phone' }}</div>
-                            <div class="muted" style="font-size:10px;">{{ $aRow->whatsapp_verified ? 'Verified' : 'Unverified' }} &bull; {{ $aRow->messaging_opt_in ? 'Opted In' : 'No Consent' }}</div>
-                        </td>
-                        <td>
-                            @if($aRow->notification_status === 'failed')
-                                <span class="badge-status badge-failed">FAILED</span>
-                            @else
-                                <span class="badge-status badge-blocked">BLOCKED</span>
+                            <strong>{{ $aRow->family_code }}</strong>
+                            @if(!empty($aRow->invoice_number))
+                                <div class="muted" style="font-size:10px; margin-top:2px;" title="{{ implode(', ', $aRow->invoice_numbers ?? []) }}">
+                                    {{ $aRow->invoice_number }}
+                                    @if(count($aRow->invoice_numbers ?? []) > 1)
+                                        <span class="badge" style="font-size:9px; padding:0 4px;">+{{ count($aRow->invoice_numbers) - 1 }} more</span>
+                                    @endif
+                                </div>
                             @endif
                         </td>
-                        <td style="max-width:320px; color:#b91c1c; font-size:11.5px; word-break:break-all;">
-                            <strong>{{ $aRow->notification_error ?: 'No diagnostic error returned' }}</strong>
+                        <td>
+                            <div style="font-weight:600; color:#1e293b;">
+                                {{ $aRow->guardian_name }}
+                            </div>
+                            <div style="margin-top:3px;">
+                                @forelse($aRow->students as $st)
+                                    <span style="display:inline-block; background:#f1f5f9; color:#334155; font-size:10px; padding:1px 6px; border-radius:3px; margin-right:3px; margin-bottom:2px;" title="GR: {{ $st->gr_number }}">
+                                        <strong>{{ $st->name }}</strong> ({{ $st->grade_label ?: 'No Grade' }})
+                                    </span>
+                                @empty
+                                    <span class="muted" style="font-size:11px;">No active students</span>
+                                @endforelse
+                            </div>
                         </td>
                         <td>
-                            <form method="post" action="{{ route('invoices.notifications.retry', $aRow->notification_id) }}" style="margin:0;">
-                                @csrf
-                                <button class="btn small" type="submit" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:700;">
-                                    Retry Failed Only
+                            <div style="font-family:monospace; font-weight:600; color:{{ $aRow->whatsapp ? '#0f172a' : '#94a3b8' }};">
+                                {{ $aRow->whatsapp ?: 'Not provided' }}
+                            </div>
+                            <div style="display:flex; flex-wrap:wrap; gap:3px; margin-top:3px;">
+                                @if($aRow->contact_verified)
+                                    <span style="background:#dcfce7; color:#166534; font-size:9.5px; padding:1px 5px; border-radius:3px; font-weight:700;">Verified</span>
+                                @else
+                                    <span style="background:#fee2e2; color:#991b1b; font-size:9.5px; padding:1px 5px; border-radius:3px; font-weight:700;">Unverified</span>
+                                @endif
+
+                                @if($aRow->messaging_opt_in)
+                                    <span style="background:#ede9fe; color:#6d28d9; font-size:9.5px; padding:1px 5px; border-radius:3px; font-weight:700;">Opted In</span>
+                                @else
+                                    <span style="background:#ffedd5; color:#9a3412; font-size:9.5px; padding:1px 5px; border-radius:3px; font-weight:700;">No Consent</span>
+                                @endif
+                            </div>
+                        </td>
+                        <td>
+                            <span style="font-size:12px; font-weight:600; color:#334155;">
+                                {{ $aRow->billing_month_formatted }}
+                            </span>
+                        </td>
+                        <td>
+                            @if(!empty($aRow->notification_status))
+                                <div style="margin-bottom:3px;">
+                                    <span class="badge-status {{ $aRow->notification_status === 'failed' ? 'badge-failed' : 'badge-blocked' }}">
+                                        {{ strtoupper($aRow->notification_status) }}
+                                    </span>
+                                    @if($aRow->notification_error)
+                                        <span style="font-size:11px; color:#991b1b; font-weight:600; margin-left:4px;">{{ $aRow->notification_error }}</span>
+                                    @endif
+                                </div>
+                            @endif
+
+                            <div style="display:flex; flex-direction:column; gap:2px;">
+                                @foreach($aRow->problem_descriptions as $pDesc)
+                                    <div style="color:#b91c1c; font-size:11.5px; line-height:1.3;">
+                                        &bull; {{ $pDesc }}
+                                    </div>
+                                @endforeach
+                            </div>
+                        </td>
+                        <td style="text-align:right;">
+                            <div style="display:flex; flex-direction:column; gap:4px; align-items:flex-end;">
+                                <button type="button" class="btn small" style="background:#7c3aed; color:#fff; font-weight:700; font-size:11px; padding:4px 8px; border:none; border-radius:4px; cursor:pointer;" onclick='openFixContactModal(@json($aRow->contact_modal_data))'>
+                                    ✏️ Fix Contact
                                 </button>
-                            </form>
+
+                                @if(!empty($aRow->notification_id) && $aRow->notification_status === 'failed')
+                                    <form method="post" action="{{ route('invoices.notifications.retry', $aRow->notification_id) }}" style="margin:0;">
+                                        @csrf
+                                        <button class="btn small" type="submit" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:700; font-size:10px; padding:2px 6px;">
+                                            ↻ Retry Send
+                                        </button>
+                                    </form>
+                                @endif
+
+                                @if(!empty($aRow->primary_student_id))
+                                    <a href="/manage-student/{{ $aRow->primary_student_id }}" target="_blank" rel="noopener" class="btn small gray" style="font-size:10px; padding:2px 6px;">
+                                        View Student ↗
+                                    </a>
+                                @endif
+                            </div>
                         </td>
                     </tr>
                 @empty
                     <tr>
                         <td colspan="6" style="text-align:center; padding:30px; color:#166534;">
-                            <strong>🎉 Zero delivery failures or blocked contacts for this period!</strong>
+                            <strong>🎉 Zero delivery failures or contact issues for {{ $dashboardStats['selected_month'] }}!</strong><br>
+                            <span class="muted" style="font-size:12px;">All families for this billing cycle have verified WhatsApp contacts and valid messaging consent.</span>
                         </td>
                     </tr>
                 @endforelse
@@ -933,5 +1045,88 @@
 
     update();
 })();
+</script>
+
+{{-- FIX CONTACT MODAL DIALOG --}}
+<div id="fix-contact-backdrop" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,0.6); z-index:9999; align-items:center; justify-content:center;">
+    <div style="background:#ffffff; border-radius:8px; width:95%; max-width:480px; box-shadow:0 20px 25px -5px rgba(0,0,0,0.2); overflow:hidden; border:1px solid #cbd5e1; margin:20px;">
+        <div style="padding:16px 20px; background:#f8fafc; border-bottom:1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <h3 style="margin:0; font-size:16px; color:#0f172a;">Update Guardian Contact</h3>
+                <div class="muted" style="font-size:12px; margin-top:2px;" id="modal-subtitle">Family Code</div>
+            </div>
+            <button type="button" onclick="closeFixContactModal()" style="background:none; border:none; font-size:24px; line-height:1; color:#64748b; cursor:pointer; padding:0 4px;">&times;</button>
+        </div>
+
+        <form method="post" id="fix-contact-form" action="" style="padding:20px; margin:0;">
+            @csrf
+            <div style="margin-bottom:14px;">
+                <label style="display:block; font-size:12px; font-weight:700; color:#334155; margin-bottom:4px;">Guardian Name</label>
+                <input type="text" name="guardian_name" id="modal-guardian-name" class="input" style="width:100%; box-sizing:border-box;" placeholder="e.g. Muhammad Usman">
+            </div>
+
+            <div style="margin-bottom:14px;">
+                <label style="display:block; font-size:12px; font-weight:700; color:#334155; margin-bottom:4px;">
+                    WhatsApp Number <span style="color:#dc2626;">*</span>
+                </label>
+                <input type="text" name="whatsapp" id="modal-whatsapp" class="input" style="width:100%; font-family:monospace; box-sizing:border-box;" placeholder="+923001234567" required>
+                <div class="muted" style="font-size:11px; margin-top:3px;">Must include country code in international format (e.g. <code>+92...</code>, <code>+966...</code>, <code>+971...</code>).</div>
+            </div>
+
+            <div style="background:#f1f5f9; padding:12px 14px; border-radius:6px; margin-bottom:16px; border:1px solid #e2e8f0;">
+                <div style="font-size:12px; font-weight:700; color:#0f172a; margin-bottom:8px;">Compliance &amp; Verification Checks</div>
+
+                <label style="display:flex; align-items:flex-start; gap:8px; font-size:12px; color:#334155; cursor:pointer; margin-bottom:8px;">
+                    <input type="checkbox" name="contact_verified" id="modal-contact-verified" value="1" style="margin-top:2px;">
+                    <div>
+                        <strong>Verified Contact</strong>
+                        <div class="muted" style="font-size:11px;">Phone number has been actively confirmed by school staff.</div>
+                    </div>
+                </label>
+
+                <label style="display:flex; align-items:flex-start; gap:8px; font-size:12px; color:#334155; cursor:pointer;">
+                    <input type="checkbox" name="messaging_opt_in" id="modal-messaging-opt-in" value="1" style="margin-top:2px;">
+                    <div>
+                        <strong>Messaging Permission (Opt-In)</strong>
+                        <div class="muted" style="font-size:11px;">Parent has consented to receive invoices and school alerts via WhatsApp.</div>
+                    </div>
+                </label>
+            </div>
+
+            <div style="display:flex; justify-content:flex-end; gap:8px;">
+                <button type="button" class="btn gray" onclick="closeFixContactModal()" style="font-size:12px; cursor:pointer;">Cancel</button>
+                <button type="submit" class="btn" style="background:#7c3aed; color:#fff; font-weight:700; font-size:12px; padding:6px 16px; border:none; border-radius:4px; cursor:pointer;">Save &amp; Verify Contact</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function openFixContactModal(data) {
+    const backdrop = document.getElementById('fix-contact-backdrop');
+    const form = document.getElementById('fix-contact-form');
+    if (!backdrop || !form) return;
+
+    form.action = '/families/' + data.family_id + '/contact';
+    document.getElementById('modal-subtitle').textContent = 'Family Code: ' + data.family_code + ' (ID #' + data.family_id + ')';
+    document.getElementById('modal-guardian-name').value = data.guardian_name || '';
+    document.getElementById('modal-whatsapp').value = data.whatsapp || '';
+    document.getElementById('modal-contact-verified').checked = !!data.contact_verified;
+    document.getElementById('modal-messaging-opt-in').checked = !!data.messaging_opt_in;
+
+    backdrop.style.display = 'flex';
+}
+
+function closeFixContactModal() {
+    const backdrop = document.getElementById('fix-contact-backdrop');
+    if (backdrop) backdrop.style.display = 'none';
+}
+
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeFixContactModal();
+});
+document.getElementById('fix-contact-backdrop')?.addEventListener('click', e => {
+    if (e.target.id === 'fix-contact-backdrop') closeFixContactModal();
+});
 </script>
 @endsection
