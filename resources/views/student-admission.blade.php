@@ -15,7 +15,17 @@
 <div class="adm-field"><label for="dob">Date of Birth</label><input id="dob" name="dob" type="date" value="{{ old('dob', $initial['dob'] ?? null) }}" placeholder=""></div>
 <div class="adm-field"><label for="surname">Surname</label><input id="surname" name="surname" type="text" value="{{ old('surname', $initial['surname'] ?? null) }}" placeholder=""></div>
 <div class="adm-field"><label for="religion">Religion</label><select id="religion" name="religion"><option value="">Select religion</option><option value="Islam" @selected(old('religion', $initial['religion'] ?? null)==='Islam')>Islam</option><option value="Christianity" @selected(old('religion', $initial['religion'] ?? null)==='Christianity')>Christianity</option><option value="Hinduism" @selected(old('religion', $initial['religion'] ?? null)==='Hinduism')>Hinduism</option><option value="Other" @selected(old('religion', $initial['religion'] ?? null)==='Other')>Other</option></select></div>
-<div class="adm-field"><label for="guardian_name">Guardian Name</label><input id="guardian_name" name="guardian_name" value="{{ old('guardian_name', $initial['guardian_name'] ?? null) }}" placeholder="Enter guardian name"></div>
+<div class="adm-field">
+  <label for="guardian_name">
+    Guardian Name
+    @if(!empty($initial['is_guardian_override']))
+      <span style="font-size:11px;color:#6366f1;font-weight:600;">(Individual Override)</span>
+    @elseif(!empty($initial['family_guardian_name']))
+      <span style="font-size:11px;color:#64748b;font-weight:normal;">(Shared Family: {{ $initial['family_guardian_name'] }})</span>
+    @endif
+  </label>
+  <input id="guardian_name" name="guardian_name" value="{{ old('guardian_name', $initial['guardian_name'] ?? null) }}" placeholder="Enter guardian name">
+</div>
 <div class="adm-field"><label for="family_email">Guardian / Family Email *</label><input id="family_email" name="family_email" type="email" value="{{ old('family_email', $initial['family_email'] ?? null) }}" placeholder="Parent/guardian email" required></div>
 <div class="adm-field adm-wide"><label for="family_whatsapp">Guardian WhatsApp *</label><input id="family_whatsapp" name="family_whatsapp" type="tel" inputmode="tel" value="{{ old('family_whatsapp', $initial['family_whatsapp'] ?? null) }}" placeholder="+923001234567" pattern="\+[1-9][0-9]{7,14}" title="International format with +, without spaces" required><small class="adm-help">International format, such as +923001234567 (no spaces).</small></div>
 <div class="adm-field adm-wide" style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:12px; margin-top:6px;">

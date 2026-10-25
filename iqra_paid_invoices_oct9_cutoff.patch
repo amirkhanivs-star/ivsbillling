@@ -1,0 +1,134 @@
+--- a/app/Services/InvoiceDeliveryQueueService.php
++++ b/app/Services/InvoiceDeliveryQueueService.php
+@@ -733,6 +733,16 @@
+                         });
+                 });
+         }
++        // Paid delivery begins with actual receipts dated October 9, 2026 or later.
++        // Use payment allocations, not invoice issue/billing dates, to avoid sending older paid records.
++        $paidInvQuery->whereExists(function ($receiptQ) {
++            $receiptQ->selectRaw('1')
++                ->from('invoice_items as receipt_ii')
++                ->join('payment_allocations as receipt_pa', 'receipt_pa.invoice_item_id', '=', 'receipt_ii.id')
++                ->join('payments as receipt_p', 'receipt_p.id', '=', 'receipt_pa.payment_id')
++                ->whereColumn('receipt_ii.invoice_id', 'i.id')
++                ->where('receipt_p.received_on', '>=', '2026-10-09');
++        });
+         $paidInvoicesCount = $paidInvQuery->count('i.id');
+ 
+         // Processing (currently queued in active batches)
+@@ -1215,6 +1225,17 @@
+         })
+         ->whereNotIn('i.status', ['void', 'voided']);
+ 
++        // Paid delivery begins with actual receipts dated October 9, 2026 or later.
++        // Use payment allocations, not invoice issue/billing dates, to avoid sending older paid records.
++        $q->whereExists(function ($receiptQ) {
++            $receiptQ->selectRaw('1')
++                ->from('invoice_items as receipt_ii')
++                ->join('payment_allocations as receipt_pa', 'receipt_pa.invoice_item_id', '=', 'receipt_ii.id')
++                ->join('payments as receipt_p', 'receipt_p.id', '=', 'receipt_pa.payment_id')
++                ->whereColumn('receipt_ii.invoice_id', 'i.id')
++                ->where('receipt_p.received_on', '>=', '2026-10-09');
++        });
++
+         // Workflow stage filter: unqueued (default), queued, submitted, all
+         $paidStatus = $filters['paid_status'] ?? 'unqueued';
+         if ($paidStatus === 'unqueued') {
+@@ -1452,6 +1473,17 @@
+                     });
+             })
+             ->whereNotIn('i.status', ['void', 'voided']);
++
++        // Paid delivery begins with actual receipts dated October 9, 2026 or later.
++        // Use payment allocations, not invoice issue/billing dates, to avoid sending older paid records.
++        $base->whereExists(function ($receiptQ) {
++            $receiptQ->selectRaw('1')
++                ->from('invoice_items as receipt_ii')
++                ->join('payment_allocations as receipt_pa', 'receipt_pa.invoice_item_id', '=', 'receipt_ii.id')
++                ->join('payments as receipt_p', 'receipt_p.id', '=', 'receipt_pa.payment_id')
++                ->whereColumn('receipt_ii.invoice_id', 'i.id')
++                ->where('receipt_p.received_on', '>=', '2026-10-09');
++        });
+ 
+         if ($period === '2026-10') {
+             $base->where(function ($periodQ) {
+--- a/app/Services/BatchDeliveryService.php
++++ b/app/Services/BatchDeliveryService.php
+@@ -76,6 +76,17 @@
+                         $sq->where('i.total_minor', '>', 0)
+                            ->whereColumn('i.paid_minor', '>=', 'i.total_minor');
+                     });
++            });
++
++            // Paid delivery begins with actual receipts dated October 9, 2026 or later.
++            // Use payment allocations, not invoice issue/billing dates, to avoid sending older paid records.
++            $q->whereExists(function ($receiptQ) {
++                $receiptQ->selectRaw('1')
++                    ->from('invoice_items as receipt_ii')
++                    ->join('payment_allocations as receipt_pa', 'receipt_pa.invoice_item_id', '=', 'receipt_ii.id')
++                    ->join('payments as receipt_p', 'receipt_p.id', '=', 'receipt_pa.payment_id')
++                    ->whereColumn('receipt_ii.invoice_id', 'i.id')
++                    ->where('receipt_p.received_on', '>=', '2026-10-09');
+             });
+ 
+             if (!empty($filters['paid_status']) && $filters['paid_status'] !== 'all') {
+--- a/tests/Feature/PaidInvoicesTabTest.php
++++ b/tests/Feature/PaidInvoicesTabTest.php
+@@ -61,7 +61,8 @@
+         int $index,
+         string $grade = 'Grade 1',
+         int $amountMinor = 25000,
+-        string $receiptNumber = 'RCP-TEST-001'
++        string $receiptNumber = 'RCP-TEST-001',
++        string $receivedOn = '2026-10-24'
+     ): array {
+         $famId = DB::table('families')->insertGetId([
+             'family_code' => "FAM-PAID-{$index}",
+@@ -131,7 +132,7 @@
+             'campus_id' => $data['campus'],
+             'department_id' => $data['dept'],
+             'receipt_number' => $receiptNumber,
+-            'received_on' => '2026-10-24',
++            'received_on' => $receivedOn,
+             'amount_minor' => $amountMinor,
+             'unallocated_minor' => 0,
+             'currency' => 'SAR',
+@@ -381,4 +382,37 @@
+         $this->assertEquals(0, $snapshot['total_eligible_recipients']);
+         $this->assertEquals(1, $snapshot['already_submitted_recipients_count']);
+     }
++
++    /**
++     * Ready-to-send paid invoices must have an actual payment receipt after October 8, 2026.
++     * Historical receipts still exist in the ledger, but are not eligible for this delivery flow.
++     */
++    public function test_paid_ready_to_send_uses_actual_receipt_cutoff_for_list_counts_and_batch_selection(): void
++    {
++        $data = $this->setupTestData();
++        $old = $this->createPaidFamilyWithReceipt($data, 201, 'Grade 1', 25000, 'RCP-CUTOFF-OLD', '2026-10-08');
++        $new = $this->createPaidFamilyWithReceipt($data, 202, 'Grade 1', 25000, 'RCP-CUTOFF-NEW', '2026-10-09');
++
++        $filters = [
++            'period' => '2026-10',
++            'paid_only' => true,
++            'webhook_type' => 'paid',
++            'paid_status' => 'unqueued',
++        ];
++
++        $queueService = app(\App\Services\InvoiceDeliveryQueueService::class);
++        $paidPage = $queueService->getPaidInvoices($filters, $data['superAdmin']);
++        $this->assertSame([$new['invId']], $paidPage->pluck('id')->all());
++
++        $stats = $queueService->getPaidWorkflowStats('2026-10', $data['superAdmin']);
++        $this->assertSame(1, $stats['unqueued']);
++        $this->assertSame(1, $stats['total']);
++
++        $batchService = app(BatchDeliveryService::class);
++        $batchInvoiceIds = $batchService->buildFilterQuery($filters, $data['superAdmin'])->pluck('i.id')->all();
++        $this->assertSame([$new['invId']], $batchInvoiceIds);
++        $this->assertDatabaseHas('payments', ['id' => $old['paymentId'], 'received_on' => '2026-10-08']);
++        $this->assertDatabaseHas('payments', ['id' => $new['paymentId'], 'received_on' => '2026-10-09']);
++    }
++
+ }

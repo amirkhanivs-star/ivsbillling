@@ -1,0 +1,275 @@
+--- a/resources/views/invoices.blade.php
++++ b/resources/views/invoices.blade.php
+@@ -595,15 +595,15 @@
+                     </h3>
+                     <div style="font-size:12.5px; color:#14532d; line-height:1.4;">
+                         There are <strong>{{ number_format($paidWorkflowStats['queued'] ?? 0) }}</strong> paid invoice(s) currently staged in the queue.<br>
+-                        Click <strong>Send Queued Paid Invoices</strong> to manually dispatch them to the <strong>Paid Invoice Webhook</strong> (<code>invoice.paid.batch</code>).
++                        Select the invoices to dispatch, then click <strong>Send Selected Queued Invoices</strong>. Unselected invoices remain in the queue.
+                     </div>
+                 </div>
+                 @if(($paidWorkflowStats['queued'] ?? 0) > 0)
+-                    <form method="post" action="{{ route('invoices.paid.send_queue') }}" onsubmit="return confirm('Confirm sending all {{ $paidWorkflowStats['queued'] }} queued paid invoice(s) to the Paid n8n Webhook (invoice.paid.batch)?');">
++                    <form id="paid-queued-send-form" method="post" action="{{ route('invoices.paid.send_queue') }}">
+                         @csrf
+                         <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+                         <button type="submit" class="btn green" id="btn-send-queued-paid" style="background:#16a34a; color:#fff; font-size:14px; font-weight:800; padding:10px 24px; border:none; border-radius:6px; cursor:pointer; box-shadow:0 2px 6px rgba(22,163,74,0.3); display:inline-flex; align-items:center; gap:8px;">
+-                            🚀 Send Queued Paid Invoices ({{ number_format($paidWorkflowStats['queued']) }})
++                            🚀 Send Selected Queued Invoices
+                         </button>
+                     </form>
+                 @else
+@@ -783,7 +783,13 @@
+                     @forelse($paidInvoicesPage ?? [] as $row)
+                         <tr @if($row->is_already_queued_or_sent) style="background:#fcfdfd; opacity:0.85;" @endif>
+                             <td>
+-                                @if($row->is_already_queued_or_sent || in_array($currentPaidStatus ?? 'unqueued', ['queued', 'submitted'], true))
++                                @if(($currentPaidStatus ?? 'unqueued') === 'queued' && $row->delivery_status === 'queued')
++                                    <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->id }}"
++                                           form="paid-queued-send-form"
++                                           data-invoice="{{ $row->invoice_number }}"
++                                           data-family="{{ $row->family_code }}"
++                                           title="Select this queued invoice for dispatch">
++                                @elseif($row->is_already_queued_or_sent || in_array($currentPaidStatus ?? 'unqueued', ['queued', 'submitted'], true))
+                                     <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->id }}"
+                                            data-invoice="{{ $row->invoice_number }}"
+                                            data-family="{{ $row->family_code }}"
+@@ -1486,6 +1492,18 @@
+ (()=>{
+     const boxes = [...document.querySelectorAll('.invoice-check')];
+     const all = document.getElementById('invoice-select-all');
++    const queueSendForm = document.getElementById('paid-queued-send-form');
++    queueSendForm?.addEventListener('submit', event => {
++        const selected = boxes.filter(box => box.checked && !box.disabled && box.form === queueSendForm);
++        if (!selected.length) {
++            event.preventDefault();
++            alert('Select at least one queued paid invoice first.');
++            return;
++        }
++        if (!confirm(`Send only ${selected.length} selected queued paid invoice(s) to the Paid Webhook? The other queued invoices will remain unsent.`)) {
++            event.preventDefault();
++        }
++    });
+     const summary = document.getElementById('send-preview');
+     const form = document.getElementById('iq-send-form');
+     if (!form) return;
+--- a/app/Http/Controllers/BillingController.php
++++ b/app/Http/Controllers/BillingController.php
+@@ -405,10 +405,15 @@
+ 
+  public function sendQueuedPaid(Request $r){
+   abort_if($r->user()->role==='auditor',403);
+-  $period = $r->input('period', '2026-10');
++  $data = $r->validate([
++   'period' => 'required|date_format:Y-m',
++   'invoice_ids' => 'required|array|min:1',
++   'invoice_ids.*' => 'required|integer|distinct|min:1',
++  ]);
++  $period = $data['period'];
+   $batchService = app(BatchDeliveryService::class);
+   try {
+-   $result = $batchService->sendQueuedPaidInvoices($r->user(), $period);
++   $result = $batchService->sendQueuedPaidInvoices($r->user(), $period, $data['invoice_ids']);
+   } catch (\RuntimeException $e) {
+    return redirect("/invoices?tab=paid&period={$period}&paid_status=queued")->withErrors(['queue' => $e->getMessage()]);
+   }
+--- a/app/Services/BatchDeliveryService.php
++++ b/app/Services/BatchDeliveryService.php
+@@ -763,8 +763,58 @@
+     /**
+      * Dispatch all currently queued paid batches for the specified period to the Paid n8n Webhook.
+      */
+-    public function sendQueuedPaidInvoices(object $user, ?string $billingPeriod = null): array
++    public function sendQueuedPaidInvoices(object $user, ?string $billingPeriod = null, ?array $selectedInvoiceIds = null): array
+     {
++        // When the user selects specific queued invoices, dispatch only their notification IDs.
++        // Individual invoices can share a batch, so selecting one must never send its siblings.
++        if ($selectedInvoiceIds !== null) {
++            $selectedIds = array_values(array_unique(array_map('intval', $selectedInvoiceIds)));
++            if (!$selectedIds || count($selectedIds) !== count($selectedInvoiceIds)) {
++                throw new RuntimeException('Select at least one distinct queued invoice.');
++            }
++
++            $notifications = DB::table('notifications as n')
++                ->join('notification_batches as nb', 'nb.batch_id', '=', 'n.batch_id')
++                ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
++                ->where('nb.webhook_type', 'paid')
++                ->where('nb.status', 'queued')
++                ->where('n.status', 'queued')
++                ->where('n.kind', 'paid')
++                // Match the existing October 9 paid-receipt cutoff on dispatch as well as on screen.
++                ->whereExists(function ($receiptQ) {
++                    $receiptQ->selectRaw('1')
++                        ->from('invoice_items as receipt_ii')
++                        ->join('payment_allocations as receipt_pa', 'receipt_pa.invoice_item_id', '=', 'receipt_ii.id')
++                        ->join('payments as receipt_p', 'receipt_p.id', '=', 'receipt_pa.payment_id')
++                        ->whereColumn('receipt_ii.invoice_id', 'i.id')
++                        ->where('receipt_p.received_on', '>=', '2026-10-09');
++                })
++                ->whereIn('n.invoice_id', $selectedIds)
++                ->when($billingPeriod, fn ($q) => $q->where('nb.billing_period', $billingPeriod))
++                ->when(!in_array($user->role, ['super_admin', 'finance_admin'], true), function ($q) use ($user) {
++                    $q->where('i.campus_id', $user->campus_id)
++                        ->when($user->department_id, fn ($q) => $q->where('i.department_id', $user->department_id));
++                })
++                ->select('n.id', 'n.invoice_id', 'n.batch_id')
++                ->get();
++
++            // Fail closed if any selected invoice is no longer queued or accessible.
++            if ($notifications->pluck('invoice_id')->unique()->count() !== count($selectedIds)) {
++                throw new RuntimeException('One or more selected invoices are no longer queued or accessible. Refresh the list and select again.');
++            }
++
++            foreach ($notifications->groupBy('batch_id') as $batchId => $members) {
++                DispatchBatchToN8n::dispatch($batchId, $members->pluck('id')->all())->onQueue('notifications');
++            }
++
++            $count = $notifications->pluck('invoice_id')->unique()->count();
++            return [
++                'batches_count' => $notifications->groupBy('batch_id')->count(),
++                'invoices_count' => $count,
++                'message' => "Dispatched {$count} selected queued paid invoice(s). Unselected invoices remain queued.",
++            ];
++        }
++
+         $batchQuery = DB::table('notification_batches')
+             ->where('webhook_type', 'paid')
+             ->where('status', 'queued');
+--- a/app/Jobs/DispatchBatchToN8n.php
++++ b/app/Jobs/DispatchBatchToN8n.php
+@@ -23,7 +23,7 @@
+     public int $timeout = 300;
+     public array $backoff = [60, 300, 900];
+ 
+-    public function __construct(public string $batchId) {}
++    public function __construct(public string $batchId, public ?array $selectedNotificationIds = null) {}
+ 
+     public function handle(): void
+     {
+@@ -105,6 +105,7 @@
+         $notifications = DB::table('notifications')
+             ->where('batch_id', $batch->batch_id)
+             ->whereIn('status', ['queued', 'failed'])
++            ->when($this->selectedNotificationIds !== null, fn ($q) => $q->whereIn('id', $this->selectedNotificationIds))
+             ->get();
+ 
+         if ($notifications->isEmpty()) {
+@@ -114,13 +115,11 @@
+                 ->whereIn('status', ['queued', 'failed', 'blocked'])
+                 ->count();
+ 
+-            if ($unsubmittedCount === 0) {
+-                DB::table('notification_batches')->where('id', $batch->id)->update([
+-                    'status' => 'submitted',
+-                    'submitted_at' => now(),
+-                    'updated_at' => now(),
+-                ]);
+-            }
++            DB::table('notification_batches')->where('id', $batch->id)->update([
++                'status' => $unsubmittedCount === 0 ? 'submitted' : 'queued',
++                'submitted_at' => $unsubmittedCount === 0 ? now() : null,
++                'updated_at' => now(),
++            ]);
+             return;
+         }
+ 
+@@ -163,13 +162,11 @@
+                 ->whereIn('status', ['queued', 'failed'])
+                 ->count();
+ 
+-            if ($unsubmittedCount === 0) {
+-                DB::table('notification_batches')->where('id', $batch->id)->update([
+-                    'status' => 'submitted',
+-                    'submitted_at' => now(),
+-                    'updated_at' => now(),
+-                ]);
+-            }
++            DB::table('notification_batches')->where('id', $batch->id)->update([
++                'status' => $unsubmittedCount === 0 ? 'submitted' : 'queued',
++                'submitted_at' => $unsubmittedCount === 0 ? now() : null,
++                'updated_at' => now(),
++            ]);
+             return;
+         }
+ 
+@@ -297,11 +294,15 @@
+             }
+         }
+ 
+-        // If all chunks sent successfully, mark batch as submitted
++        // The batch remains queued if other invoices were not selected for dispatch.
+         if ($chunksSent >= $totalChunks) {
++            $hasPending = DB::table('notifications')
++                ->where('batch_id', $batch->batch_id)
++                ->whereIn('status', ['queued', 'failed'])
++                ->exists();
+             DB::table('notification_batches')->where('id', $batch->id)->update([
+-                'status' => 'submitted',
+-                'submitted_at' => now(),
++                'status' => $hasPending ? 'queued' : 'submitted',
++                'submitted_at' => $hasPending ? null : now(),
+                 'response_code' => $lastResponseCode,
+                 'response_body' => $lastResponseBody,
+                 'error' => null,
+--- a/tests/Feature/PaidInvoicesTabTest.php
++++ b/tests/Feature/PaidInvoicesTabTest.php
+@@ -415,4 +415,59 @@
+         $this->assertDatabaseHas('payments', ['id' => $new['paymentId'], 'received_on' => '2026-10-09']);
+     }
+ 
++
++    public function test_queued_paid_invoice_checkbox_sends_only_selected_invoice_from_shared_batch(): void
++    {
++        $data = $this->setupTestData();
++        $first = $this->createPaidFamilyWithReceipt($data, 301, 'Grade 1', 25000, 'RCP-Q-301');
++        $second = $this->createPaidFamilyWithReceipt($data, 302, 'Grade 1', 25000, 'RCP-Q-302');
++        $batchId = 'BATCH-TEST-PAID-QUEUED';
++        DB::table('notification_batches')->insert([
++            'batch_id' => $batchId,
++            'webhook_type' => 'paid',
++            'event_type' => 'invoice.paid.batch',
++            'billing_period' => '2026-10',
++            'channels' => json_encode(['whatsapp']),
++            'status' => 'queued',
++            'total_recipients' => 2,
++            'total_invoices' => 2,
++            'approved_by' => $data['superAdmin']->id,
++            'created_at' => now(), 'updated_at' => now(),
++        ]);
++        foreach ([$first['invId'], $second['invId']] as $invoiceId) {
++            DB::table('notifications')->insert([
++                'invoice_id' => $invoiceId,
++                'batch_id' => $batchId,
++                'kind' => 'paid',
++                'webhook_type' => 'paid',
++                'event_type' => 'invoice.paid',
++                'channel' => 'whatsapp',
++                'status' => 'queued',
++                'created_at' => now(), 'updated_at' => now(),
++            ]);
++        }
++        $response = $this->actingAs($data['superAdmin'])
++            ->get('/invoices?tab=paid&period=2026-10&paid_status=queued');
++        $response->assertOk()->assertSee('form="paid-queued-send-form"', false)
++            ->assertSee('Send Selected Queued Invoices');
++
++        Queue::fake([DispatchBatchToN8n::class]);
++        $this->actingAs($data['superAdmin'])->post('/invoices/paid/send-queue', [
++            'period' => '2026-10', 'invoice_ids' => [$first['invId']],
++        ])->assertSessionHasNoErrors();
++        Queue::assertPushed(DispatchBatchToN8n::class, 1);
++        $notificationId = DB::table('notifications')->where('invoice_id', $first['invId'])->value('id');
++        Queue::assertPushed(DispatchBatchToN8n::class, fn ($job) =>
++            $job->batchId === $batchId && $job->selectedNotificationIds === [$notificationId]
++        );
++
++        Http::fake([$data['paidUrl'] => Http::response(['ok' => true], 200)]);
++        (new DispatchBatchToN8n($batchId, [$notificationId]))->handle();
++        $this->assertDatabaseHas('notifications', ['invoice_id' => $first['invId'], 'status' => 'submitted']);
++        $this->assertDatabaseHas('notifications', ['invoice_id' => $second['invId'], 'status' => 'queued']);
++        $this->assertDatabaseHas('notification_batches', ['batch_id' => $batchId, 'status' => 'queued']);
++        Http::assertSentCount(1);
++        Http::assertSent(fn ($request) => $request->url() === $data['paidUrl'] && count($request['invoices']) === 1);
++    }
++
+ }

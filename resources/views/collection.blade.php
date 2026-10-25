@@ -609,23 +609,13 @@
                 <span class="myskool-card-gear" title="Settings">&#9881;</span>
                 <div class="myskool-avatar">&#128100;</div>
                 <div class="myskool-student-name">
-                    {{ $firstStudent?->student_name ?? ($family?->guardian_name ?? 'Laiqa Nazim') }}
+                    {{ $firstStudent?->student_name ?? ($family ? \App\Services\GuardianNameResolver::forFamily($family) : 'Laiqa Nazim') }}
                 </div>
                 <div class="myskool-father-name">
                     @php
-                        $fatherDisplay = null;
-                        if (!empty($family?->id)) {
-                            $firstReg = DB::table('students as s')
-                                ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
-                                ->where('s.family_id', $family->id)
-                                ->whereNotNull('sd.father_name')
-                                ->first();
-                            $fatherDisplay = $firstReg?->father_name;
-                        }
-                        $isFormula = !empty($family?->guardian_name) && str_starts_with(trim($family->guardian_name), '=');
-                        $guardianDisplay = (!$isFormula && !empty($family?->guardian_name)) ? $family->guardian_name : null;
+                        $resolvedParent = $family ? \App\Services\GuardianNameResolver::forFamilyDisplay($family) : null;
                     @endphp
-                    F/N: {{ $fatherDisplay ?: ($guardianDisplay ?: 'Not provided') }}
+                    {{ $resolvedParent['label'] ?? 'Parent / Guardian' }}: {{ $resolvedParent['name'] ?? 'Not provided' }}
                 </div>
                 <div class="myskool-class-name">
                     {{ $firstStudent?->class_name ?? '11th (FED) - A' }}

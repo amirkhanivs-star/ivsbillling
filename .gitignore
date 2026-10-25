@@ -1,81 +1,260 @@
-# Dependencies & Package Managers
+
+# ==========================================================
+# IQRA BILLING SYSTEM
+# GitHub Repository / Google AI Studio / Gemini Argon
+# Laravel 12 + MySQL
+# ==========================================================
+#
+# INCLUDE:
+# Laravel source code, migrations, models, controllers,
+# services, routes, UI, tests, configurations, documentation.
+#
+# EXCLUDE:
+# Real MySkool data, student records, payments, balances,
+# staging imports, database dumps, secrets, generated files.
+#
+# ==========================================================
+
+
+# 1. LARAVEL DEPENDENCIES
+# ==========================================================
+
 /vendor/
 /node_modules/
 
-# Environment & Credentials
+
+# 2. ENVIRONMENT & SECURITY
+# ==========================================================
+
 .env
 .env.*
 !.env.example
-!.env.production.example
+
+*.pem
 *.key
+*.p12
+*.pfx
+*.p8
+*.crt
+
 /storage/*.key
+/auth.json
 
-# PHPUnit & Testing Caches
-.phpunit.result.cache
+# Local credentials and secrets
+/secrets/
+/credentials/
+/private-keys/
 
-# Framework Storage, Caches & Logs
-/storage/logs/*
-!/storage/logs/.gitignore
+
+# 3. LARAVEL GENERATED FILES
+# ==========================================================
+
+/bootstrap/cache/*.php
+
 /storage/framework/cache/*
 !/storage/framework/cache/.gitignore
+
 /storage/framework/sessions/*
 !/storage/framework/sessions/.gitignore
+
 /storage/framework/views/*
 !/storage/framework/views/.gitignore
+
 /storage/framework/testing/*
 !/storage/framework/testing/.gitignore
-/storage/app/private/*
-/storage/app/public/*
-/storage/*.html
-/public/storage
-/public/preview_*.html
-/public/screenshot_test.png
-*.log
 
-# Sensitive Data: Student Info, Financial Dues, Payments & Exports
+.phpunit.result.cache
+/.phpunit.cache/
+
+
+# 4. LOGS AND DEBUG FILES
+# ==========================================================
+
+/storage/logs/*
+!/storage/logs/.gitignore
+
+*.log
+*.tmp
+*.temp
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+/debug/
+/tmp/
+/temp/
+
+
+# 5. MYSKOOL STUDENT & FINANCIAL DATA
+# ==========================================================
+
+# All real exported spreadsheets
+
 *.csv
+*.tsv
 *.xlsx
 *.xls
-/docs/*.csv
-/storage/app/imports/*
-!/storage/app/imports/.gitignore
+*.xlsm
+*.ods
+
+# Machine-readable data exports
+
+*.jsonl
+*.ndjson
+*.parquet
+
+# PDF exports and private reports
+# Remove this rule only for verified public documentation.
+
+*.pdf
+
+
+# 6. DATABASE DUMPS AND BACKUPS
+# ==========================================================
+
+*.sql
+*.dump
+*.bak
+*.backup
+
+*.sqlite
+*.sqlite3
+*.db
+
+/backups/
+/database/backups/
+/database/dumps/
+/database/imports/
+
+/storage/backups/
+/storage/app/backups/
+
+
+# 7. IMPORTED DATA & PRIVATE STORAGE
+# ==========================================================
+
+# Everything inside Laravel app storage is private.
+# Application code should live outside storage/app.
+
+/storage/app/
+
+# Other possible import directories
+
+/imports/
+/exports/
+/staging/
+/staging-data/
+/private-data/
+/data-imports/
+/myskool-data/
+/student-data/
+/financial-data/
+/uploads/
+
+/public/uploads/
+/public/imports/
+/public/exports/
+/public/storage/
+
+
+# 8. COMPRESSED ARCHIVES
+# ==========================================================
+
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+
+IQRA_STAGING_ONLY*
+
+
+# 9. PRIVATE MIGRATION AND ACCOUNTING REPORTS
+# ==========================================================
+
 PHASE_3A_2_DEPARTMENT_VERIFICATION_REPORT.md
 PHASE_3A_3_DEPARTMENT_APPROVAL_REPORT.md
+
 PHASE_3B_ACCOUNTING_DISCOVERY_REPORT.md
 PHASE_3B_1_CUTOFF_AND_ACCOUNTING_CONTROLS_REPORT.md
 PHASE_3B_2_FINANCIAL_READINESS_REPORT.md
+
 PHASE_3B_3_SNAPSHOT_RECONCILIATION_REPORT.md
 PHASE_3B_3_1_SNAPSHOT_ENGINE_HARDENING_REPORT.md
 PHASE_3B_3_1A_CURRENCY_RECONCILIATION_AUDIT.md
+
 PHASE_3C_0_QA_STUDENT_MIGRATION_REPORT.md
 PHASE_3C_1_UPDATED_WORKBOOK_QA_IMPORT_REPORT.md
+
 IQRA_22OCT_IMPLEMENTATION_PLAN.md
 Final database cleanup and single-database setup.md
 
 
-# Private Staging Exports, Scratch Scripts & Diagnostic Archives
+# 10. DEVELOPMENT SCRATCH FILES
+# ==========================================================
+
 /scratch/
 scratch_check.txt
-*.zip
-*.tar.gz
-*.tgz
-*.rar
-*.7z
-IQRA_STAGING_ONLY*
 
-# Database Dumps, Backups & Local SQLite Files
-*.sql
-!deployment/scripts/*.sql
-!scripts/*.sql
-*.dump
-/backups/
-/storage/backups/
-*.sqlite
-*.sqlite3
+/public/preview_*.html
+/public/screenshot_test.png
 
-# IDE & OS Artifacts
-.DS_Store
-Thumbs.db
+/screenshots/
+/test-output/
+
+
+# 11. FRONTEND GENERATED FILES
+# ==========================================================
+
+/public/hot
+/public/build
+
+/dist/
+/coverage/
+
+
+# 12. IDE AND EDITOR FILES
+# ==========================================================
+
 .vscode/
 .idea/
 
+*.swp
+*.swo
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+
+# ==========================================================
+# IMPORTANT:
+#
+# DO NOT IGNORE:
+#
+# app/
+# routes/
+# database/migrations/
+# database/seeders/ (fictional data only)
+# resources/
+# tests/
+# config/
+# public/ (application assets)
+# composer.json
+# composer.lock
+# package.json
+# package-lock.json
+# artisan
+# phpunit.xml
+# .env.example (placeholders only)
+#
+# These files help Gemini Argon understand the application.
+#
+# ==========================================================
+# END
+# ==========================================================
+# Local HTML renders and generated previews
+/storage/*.html

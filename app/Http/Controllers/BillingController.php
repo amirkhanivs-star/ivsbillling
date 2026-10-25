@@ -10,6 +10,7 @@ use App\Services\ReceivePaymentService;
 use App\Services\FeeAdjustmentService;
 use App\Services\ReceiptReversalService;
 use App\Services\WebhookSettingService;
+use App\Services\GuardianNameResolver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\URL;
@@ -44,20 +45,26 @@ class BillingController {
  public function students(Request $r){
   $q=DB::table('students as s')->join('families as f','f.id','=','s.family_id')
    ->leftJoin('student_registration_details as sd','sd.student_id','=','s.id')
-   ->select('s.*','f.family_code','f.guardian_name','f.whatsapp','sd.father_name','sd.registration_date')
+   ->select('s.*','f.family_code','f.guardian_name','f.whatsapp','sd.father_name','sd.guardian_name_override','sd.registration_date')
    ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByDesc('e.id')->select('grade_label')->limit(1),'current_class')
    ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByDesc('e.id')->select('monthly_fee_minor')->limit(1),'monthly_fee_minor')
    ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByDesc('e.id')->select('currency')->limit(1),'fee_currency');
   if(!in_array($r->user()->role,['super_admin','finance_admin'],true)){
    $q->whereExists(function($sub)use($r){$sub->selectRaw('1')->from('enrollments as e')->whereColumn('e.student_id','s.id')->where('e.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($x)=>$x->where('e.department_id',$r->user()->department_id));});
   }
-  if($term=trim((string)$r->query('q',''))){$q->where(fn($w)=>$w->where('s.name','like','%'.$term.'%')->orWhere('s.gr_number','like','%'.$term.'%')->orWhere('f.family_code','like','%'.$term.'%')->orWhere('sd.father_name','like','%'.$term.'%'));}
+  if($term=trim((string)$r->query('q',''))){$q->where(fn($w)=>$w->where('s.name','like','%'.$term.'%')->orWhere('s.gr_number','like','%'.$term.'%')->orWhere('f.family_code','like','%'.$term.'%')->orWhere('sd.father_name','like','%'.$term.'%')->orWhere('sd.guardian_name_override','like','%'.$term.'%')->orWhere('f.guardian_name','like','%'.$term.'%'));}
   if($status=$r->query('status')){if(in_array($status,['present','suspended','left','review_hold','historical_hold'],true))$q->where('s.status',$status);}
   return view('students',['students'=>$q->orderBy('s.id')->paginate(25)->withQueryString()]);
  }
  public function showStudent(int $student){
-  $s=DB::table('students as s')->join('families as f','f.id','=','s.family_id')->where('s.id',$student)->select('s.*','f.family_code','f.guardian_name','f.email','f.whatsapp','f.contact_verified','f.messaging_opt_in','f.whatsapp_verified','f.email_verified')->first();
+  $s=DB::table('students as s')
+   ->join('families as f','f.id','=','s.family_id')
+   ->leftJoin('student_registration_details as sd','sd.student_id','=','s.id')
+   ->where('s.id',$student)
+   ->select('s.*','f.family_code','f.guardian_name','f.email','f.whatsapp','f.contact_verified','f.messaging_opt_in','f.whatsapp_verified','f.email_verified','sd.father_name','sd.guardian_name_override')
+   ->first();
   abort_unless($s,404);
+  $s->resolved_guardian = GuardianNameResolver::resolveStudent($s);
   if(!in_array(auth()->user()->role,['super_admin','finance_admin'],true)){
    abort_unless(DB::table('enrollments')->where('student_id',$student)->where('campus_id',auth()->user()->campus_id)->when(auth()->user()->department_id,fn($q)=>$q->where('department_id',auth()->user()->department_id))->exists(),403);
   }
@@ -202,11 +209,13 @@ class BillingController {
 
    $availableMonths = $queueService->getAvailableBillingMonths();
    $selectedPeriod = $r->filled('period') ? $r->query('period') : $queueService->getLatestBillingMonth();
-   $currentTab = $r->query('tab', 'ready');
+   $currentTab = $r->boolean('paid_only') ? 'paid' : $r->query('tab', 'ready');
    $perPage = in_array((int)$r->query('per_page'), [25, 50, 100], true) ? (int)$r->query('per_page') : 25;
 
    $isPaidTab = ($currentTab === 'paid') || $r->boolean('paid_only');
    $webhookType = $isPaidTab ? 'paid' : 'monthly';
+   $paidStatus = $isPaidTab ? $r->query('paid_status', 'unqueued') : 'all';
+   if (!in_array($paidStatus, ['unqueued', 'queued', 'processing', 'submitted', 'attention', 'all'], true)) $paidStatus = 'unqueued';
 
    $filters = [
     'campus_id' => $r->query('campus_id'),
@@ -216,12 +225,28 @@ class BillingController {
     'contact_status' => $r->query('contact_status', 'all'),
     'payment_status' => $r->query('payment_status', 'all'),
     'paid_only' => $isPaidTab,
+    'paid_status' => $paidStatus,
     'webhook_type' => $webhookType,
     'send_mode' => $r->query('send_mode'),
     'search' => $r->query('search'),
    ];
 
+   if ($isPaidTab && $r->boolean('paid_refresh')) {
+    $tracking = $r->query('paid_tracking', '');
+    $trackingIds = is_string($tracking) ? array_slice(array_values(array_unique(array_filter(array_map('intval', explode(',', $tracking)), fn($id) => $id > 0))), 0, 100) : [];
+    return response()->json($queueService->getPaidWorkflowRefresh($filters, $r->user(), $perPage, $trackingIds))
+     ->header('Cache-Control', 'no-store');
+   }
+
    $dashboardStats = $queueService->getDashboardKpiStats($selectedPeriod, $r->user(), $filters);
+   $paidWorkflowStats = $isPaidTab ? $queueService->getPaidWorkflowStats($selectedPeriod, $r->user(), $filters) : [
+       'unqueued' => 0,
+       'queued' => 0,
+       'processing' => 0,
+       'attention' => 0,
+       'submitted' => 0,
+       'total' => 0,
+   ];
 
    // Tab content resolution
    $readyChallans = null;
@@ -235,7 +260,9 @@ class BillingController {
     $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
    } elseif ($currentTab === 'paid') {
     $paidInvoicesPage = $queueService->getPaidInvoices($filters, $r->user(), $perPage);
-    $selectionSnapshot = $batchService->resolveFilteredSelection(array_merge($filters, ['paid_only' => true, 'webhook_type' => 'paid']), $r->user(), ['whatsapp']);
+    if (in_array($paidStatus, ['unqueued', 'all'], true)) {
+     $selectionSnapshot = $batchService->resolveFilteredSelection(array_merge($filters, ['paid_only' => true, 'webhook_type' => 'paid', 'paid_status' => 'unqueued']), $r->user(), ['whatsapp']);
+    }
    } elseif ($currentTab === 'processing') {
     $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'queued']), $r->user(), $perPage);
    } elseif ($currentTab === 'sent') {
@@ -263,6 +290,9 @@ class BillingController {
 
    return view('invoices', [
     'currentTab' => $currentTab,
+    'currentPaidStatus' => $paidStatus,
+    'paidWorkflowStats' => $paidWorkflowStats,
+    'paidRefreshSignature' => $isPaidTab ? $queueService->paidWorkflowSignature($paidWorkflowStats, $paidInvoicesPage ?? []) : null,
     'availableMonths' => $availableMonths,
     'selectedPeriod' => $selectedPeriod,
     'dashboardStats' => $dashboardStats,
@@ -317,6 +347,7 @@ class BillingController {
    'snapshot_id'=>'nullable|string|max:100',
    'review_confirmed'=>'accepted',
    'webhook_type'=>'nullable|in:monthly,paid',
+   'action_type'=>'nullable|in:add_to_queue,send_now',
    'send_mode'=>'nullable|in:whatsapp,email',
    'selected_grade'=>'nullable|string|max:190',
    'campus_id'=>'nullable|integer',
@@ -330,6 +361,9 @@ class BillingController {
   ]);
 
   $webhookType=$d['webhook_type']??($r->boolean('paid_only')?'paid':'monthly');
+  $actionType=$d['action_type']??$r->input('action_type', 'send_now');
+  $dispatchNow=($actionType !== 'add_to_queue');
+
   $filters=[
    'campus_id'=>$d['campus_id']??null,
    'department_id'=>$d['department_id']??null,
@@ -338,6 +372,7 @@ class BillingController {
    'contact_status'=>$d['contact_status']??'all',
    'payment_status'=>$d['payment_status']??'all',
    'paid_only'=>($webhookType==='paid'),
+   'paid_status'=>'unqueued',
    'webhook_type'=>$webhookType,
    'send_mode'=>$d['send_mode']??null,
    'search'=>$r->input('search'),
@@ -363,7 +398,8 @@ class BillingController {
     $d['period']??null,
     $explicitIds,
     $d['snapshot_id']??null,
-    $r->boolean('review_confirmed')
+    $r->boolean('review_confirmed'),
+    $dispatchNow
    );
   } catch (\RuntimeException $e) {
    $errField = str_contains($e->getMessage(), 'snapshot') ? 'snapshot_id' : (str_contains($e->getMessage(), 'grade') ? 'confirmed_grades' : 'invoice_ids');
@@ -372,7 +408,47 @@ class BillingController {
    ]);
   }
 
+  if (!$dispatchNow) {
+      $targetPeriod = $filters['period'] ?: '2026-10';
+      $query = $this->paidWorkflowReturnQuery($r, $targetPeriod, 'queued');
+      unset($query['page']);
+      return redirect('/invoices?'.http_build_query($query))->with('notice', $result['message']);
+  }
+
   return back()->with('notice',$result['message']);
+ }
+
+ public function sendQueuedPaid(Request $r){
+  abort_if($r->user()->role==='auditor',403);
+  $data = $r->validate([
+   'period' => 'required|date_format:Y-m',
+   'invoice_ids' => 'required|array|min:1',
+   'invoice_ids.*' => 'required|integer|distinct|min:1',
+  ]);
+  $period = $data['period'];
+  $batchService = app(BatchDeliveryService::class);
+  try {
+   $result = $batchService->sendQueuedPaidInvoices($r->user(), $period, $data['invoice_ids']);
+  } catch (\RuntimeException $e) {
+   return redirect('/invoices?'.http_build_query($this->paidWorkflowReturnQuery($r, $period, 'queued')))->withErrors(['queue' => $e->getMessage()]);
+  }
+
+  $queueService = app(\App\Services\InvoiceDeliveryQueueService::class);
+  $stages = $queueService->paidInvoiceStages($data['invoice_ids'], ['period' => $period], $r->user());
+  $stage = $queueService->preferredPaidStage(array_values($stages));
+  $query = $this->paidWorkflowReturnQuery($r, $period, $stage);
+  if ($stage !== 'queued') unset($query['page']);
+  $query['paid_tracking'] = implode(',', array_slice($data['invoice_ids'], 0, 100));
+  return redirect('/invoices?'.http_build_query($query))->with('notice', $result['message']);
+ }
+
+ private function paidWorkflowReturnQuery(Request $r, string $period, string $stage): array {
+  $query = ['tab' => 'paid', 'period' => $period, 'paid_status' => $stage];
+  foreach (['search', 'campus_id', 'department_id', 'grade', 'contact_status', 'send_mode', 'per_page', 'page'] as $key) {
+   $value = $r->input($key);
+   if (is_scalar($value) && (string)$value !== '') $query[$key] = (string)$value;
+  }
+  return $query;
  }
 
  public function retryBatchFailed(Request $r, string $batch){
@@ -1568,7 +1644,8 @@ class BillingController {
     ->selectRaw('COALESCE(SUM(inv.total_minor - inv.paid_minor), 0) as remaining')
     ->value('remaining');
 
-   return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt',compact('p','family','items','branding','banner','remainingBalanceMinor'))
+   $resolvedGuardian = GuardianNameResolver::forFamily($family);
+   return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt',compact('p','family','items','branding','banner','remainingBalanceMinor','resolvedGuardian'))
     ->setPaper('a4')
     ->stream($p->receipt_number.'.pdf');
   }
@@ -1583,8 +1660,9 @@ class BillingController {
    $branding = DB::table('department_branding')->where('department_id', $receipt->department_id)->first();
    $banner = $this->bannerDataUri($branding);
    $family = $receipt->family;
+   $resolvedGuardian = GuardianNameResolver::forFamily($family);
 
-   return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.historical-receipt', compact('receipt', 'family', 'branding', 'banner'))
+   return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.historical-receipt', compact('receipt', 'family', 'branding', 'banner', 'resolvedGuardian'))
     ->setPaper('a4')
     ->stream('historical-slip-' . $receipt->slip_number . '.pdf');
   }
@@ -1602,12 +1680,13 @@ class BillingController {
   }
  private function renderInvoice(object $i){
   $family=DB::table('families')->where('id',$i->family_id)->first();
-  $fatherName = DB::table('students as s')
-   ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
-   ->where('s.family_id', $i->family_id)
-   ->whereNotNull('sd.father_name')
-   ->value('sd.father_name');
-  $parentDisplay = $this->resolveParentDisplay($family?->guardian_name, $fatherName);
+  $invoiceStudentIds = DB::table('invoice_items')->where('invoice_id', $i->id)->pluck('student_id')->filter()->unique()->values();
+  if ($invoiceStudentIds->count() === 1) {
+   $stu = DB::table('students as s')->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')->where('s.id', $invoiceStudentIds[0])->first();
+   $parentDisplay = GuardianNameResolver::forStudentDisplay($stu, $family);
+  } else {
+   $parentDisplay = GuardianNameResolver::forFamilyDisplay($family);
+  }
   $items=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')->where('item.invoice_id',$i->id)->select('item.*','s.name','s.gr_number')->get();
   $dept=DB::table('departments')->where('id',$i->department_id)->first();
   $branding=DB::table('department_branding')->where('department_id',$i->department_id)->first();
@@ -1639,7 +1718,7 @@ class BillingController {
    ->join('families as f', 'f.id', '=', 's.family_id')
    ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
    ->where('s.id', $student)
-   ->select('s.*', 'f.id as family_id', 'f.family_code', 'f.guardian_name', 'f.whatsapp', 'sd.father_name', 'sd.section_current')
+   ->select('s.*', 'f.id as family_id', 'f.family_code', 'f.guardian_name', 'f.whatsapp', 'sd.father_name', 'sd.guardian_name_override', 'sd.section_current')
    ->first();
   abort_unless($s, 404);
 
@@ -1696,7 +1775,7 @@ class BillingController {
   $dept = DB::table('departments')->where('id', $primaryDeptId)->first();
   $branding = DB::table('department_branding')->where('department_id', $primaryDeptId)->first();
   $banner = $this->bannerDataUri($branding);
-  $parentDisplay = $this->resolveParentDisplay($s->guardian_name, $s->father_name);
+  $parentDisplay = GuardianNameResolver::forStudentDisplay($s);
 
   return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.consolidated-challan', [
    'mode' => 'student',
@@ -1791,10 +1870,9 @@ class BillingController {
   $familyStudents = DB::table('students as s')
    ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
    ->where('s.family_id', $family)
-   ->select('s.*', 'sd.father_name')
+   ->select('s.*', 'sd.father_name', 'sd.guardian_name_override')
    ->get();
-  $fatherName = $familyStudents->firstWhere('father_name', '!=', null)?->father_name;
-  $parentDisplay = $this->resolveParentDisplay($f->guardian_name, $fatherName);
+  $parentDisplay = GuardianNameResolver::forFamilyDisplay($f, $familyStudents);
 
   $primaryDeptId = $items->first()?->department_id ?? 1;
   $dept = DB::table('departments')->where('id', $primaryDeptId)->first();
@@ -1817,9 +1895,8 @@ class BillingController {
  }
 
  private function resolveParentDisplay(?string $guardianName, ?string $fatherName): array {
-  $isFormula = !empty($guardianName) && str_starts_with(trim($guardianName), '=');
-  $validGuardian = (!$isFormula && !empty(trim($guardianName ?? ''))) ? trim($guardianName) : null;
-  $validFather = (!empty(trim($fatherName ?? '')) && !str_starts_with(trim($fatherName), '=')) ? trim($fatherName) : null;
+  $validGuardian = GuardianNameResolver::clean($guardianName);
+  $validFather = GuardianNameResolver::clean($fatherName);
 
   if ($validGuardian) {
    return ['label' => "Guardian Name", 'name' => $validGuardian];
@@ -1909,7 +1986,7 @@ class BillingController {
   $newEmailVerified = $emailChanged ? $verified : ($verified ?: (bool)($targetFamily->email_verified ?? false));
 
   DB::table('families')->where('id',$family)->update([
-   'guardian_name'=>$d['guardian_name']??$targetFamily->guardian_name,
+   'guardian_name'=>GuardianNameResolver::clean($d['guardian_name'] ?? null) ?? GuardianNameResolver::clean($targetFamily->guardian_name),
    'email'=>$newEmail,
    'whatsapp'=>$newPhone,
    'contact_verified'=>$verified,

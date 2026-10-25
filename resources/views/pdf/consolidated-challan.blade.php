@@ -1,259 +1,196 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
+<title>Consolidated Fee Challan</title>
 <style>
-  @page { margin: 28px 36px; }
-  body { font-family: DejaVu Sans, Arial, sans-serif; font-size: 9.5px; color: #1f2937; line-height: 1.35; }
-  .banner { width: 100%; max-height: 130px; object-fit: contain; }
-  .header-table { width: 100%; margin-top: 6px; margin-bottom: 8px; border-bottom: 2px solid #962a31; padding-bottom: 6px; }
-  .title { color: #91252b; text-align: center; font-size: 18px; font-weight: bold; margin: 6px 0 2px 0; text-transform: uppercase; letter-spacing: 0.5px; }
-  .subtitle { text-align: center; color: #4b5563; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
-  
-  .statement-badge { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 4px 8px; border-radius: 4px; font-size: 8.5px; text-align: center; margin-bottom: 8px; }
-  .currency-notice { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; padding: 4px 8px; border-radius: 4px; font-size: 8.5px; margin-bottom: 8px; }
-
-  .meta-table { width: 100%; margin-bottom: 10px; border-collapse: collapse; }
-  .meta-table td { padding: 3px 5px; font-size: 9px; vertical-align: top; }
-  .meta-label { color: #4b5563; font-weight: 600; width: 16%; }
-  .meta-val { color: #111827; font-weight: bold; width: 34%; }
-
-  .currency-header { background: #962a31; color: white; padding: 6px 10px; font-weight: bold; font-size: 11px; margin-top: 10px; border-radius: 2px 2px 0 0; }
-  .currency-header span { float: right; font-size: 10px; font-weight: normal; }
-
-  .data-table { width: 100%; border-collapse: collapse; font-size: 8.5px; margin-bottom: 8px; }
-  .data-table th { background: #b91c1c; color: white; text-align: left; padding: 5px 6px; font-size: 8.5px; }
-  .data-table td { border-bottom: 1px solid #e5e7eb; padding: 4.5px 6px; vertical-align: top; }
-  .data-table tr:nth-child(even) td { background: #fbfbfb; }
-
-  .student-subheading td { background: #f3f4f6; font-weight: bold; color: #1f2937; font-size: 9px; padding: 4px 6px; border-top: 1px solid #d1d5db; border-bottom: 1px solid #d1d5db; }
-  .student-subtotal td { background: #fef3c7; font-weight: bold; color: #92400e; font-size: 8.5px; border-top: 1px solid #f59e0b; padding: 4px 6px; }
-
-  .total-card { width: 100%; border-collapse: collapse; margin-top: 4px; margin-bottom: 12px; }
-  .total-card td { padding: 6px 10px; font-size: 11px; font-weight: bold; }
-  .total-label { background: #fee2e2; color: #991b1b; text-align: right; width: 75%; border: 1px solid #fca5a5; }
-  .total-amount { background: #991b1b; color: white; text-align: right; width: 25%; border: 1px solid #991b1b; font-size: 12px; }
-
-  .multi-curr-summary { width: 100%; border-collapse: collapse; margin-top: 8px; margin-bottom: 12px; background: #fafafa; border: 1px solid #e5e7eb; }
-  .multi-curr-summary th { background: #4b5563; color: white; text-align: left; padding: 5px 8px; font-size: 9px; }
-  .multi-curr-summary td { padding: 5px 8px; font-size: 9px; border-bottom: 1px solid #e5e7eb; }
-
-  .bar { background: #962a31; color: white; text-transform: uppercase; padding: 4px 8px; font-weight: bold; font-size: 9px; margin-top: 10px; }
-  .payment-box { border: 1px solid #d1d5db; padding: 8px; font-size: 8.5px; background: #f9fafb; white-space: pre-wrap; line-height: 1.4; }
-  .instr { margin-top: 8px; font-size: 8px; color: #4b5563; line-height: 1.4; }
-  .foot { position: fixed; bottom: -14px; left: -36px; right: -36px; background: #962a31; color: white; padding: 6px 36px; text-align: center; font-size: 8px; }
-  .page-break { page-break-before: always; }
-  .muted { color: #6b7280; font-size: 8px; }
-  .pill { display: inline-block; padding: 1px 4px; font-size: 7.5px; border-radius: 3px; font-weight: bold; }
-  .pill-disc { background: #e0e7ff; color: #3730a3; }
-  .pill-part { background: #fef3c7; color: #92400e; }
+  @page { size:A4 portrait; margin:26px 35px 46px; }
+  * { box-sizing:border-box; }
+  body { margin:0; color:#283344; font-family:DejaVu Sans,sans-serif; font-size:8.5px; line-height:1.38; }
+  .banner { display:block; width:100%; height:auto; margin:0 0 5px; }
+  .title { text-align:center; color:#982931; font-size:16px; font-weight:bold; letter-spacing:.35px; margin:4px 0 1px; }
+  .sub { text-align:center; color:#677282; text-transform:uppercase; font-size:7.7px; margin:0 0 9px; }
+  .notice { border:1px solid #f2cacc; background:#fff4f4; color:#a22a31; padding:6px 7px; font-size:8px; margin:0 0 9px; text-align:center; }
+  .meta { width:100%; table-layout:fixed; border-collapse:collapse; margin:4px 0 10px; }
+  .meta td { vertical-align:top; padding:3px 5px; word-wrap:break-word; }
+  .meta .k { width:17%; font-size:7.8px; color:#606d7d; }
+  .meta .v { width:33%; font-weight:bold; }
+  .bar { background:#962a31; color:white; padding:6px 8px; font-size:8.8px; text-transform:uppercase; font-weight:bold; }
+  .smallnote { float:right; font-size:8px; font-weight:normal; }
+  .fees { width:100%; border-collapse:collapse; table-layout:fixed; font-size:7.7px; }
+  .fees thead { display:table-header-group; }
+  .fees th { background:#b53139; color:#fff; padding:6px 4px; text-align:left; font-size:7.5px; }
+  .fees td { vertical-align:top; border-bottom:1px solid #e5e7eb; padding:5px 4px; word-wrap:break-word; }
+  .fees tbody tr:nth-child(even) td { background:#fcfcfd; }
+  .fees tr { page-break-inside:avoid; }
+  .fees .right { text-align:right; }
+  .fees .balance { text-align:right; color:#992630; font-weight:bold; white-space:nowrap; }
+  .fees .invoice-ref { word-wrap:break-word; font-size:7px; color:#455263; }
+  .fees .muted { font-size:7.2px; color:#6e7785; }
+  .fees .student-label td { background:#eff1f4!important; color:#263546; font-weight:bold; font-size:8.2px; border-top:1px solid #d1d5db; padding:5px 5px; }
+  .fees .student-total td { background:#fff7ec!important; color:#864818; font-weight:bold; border-top:1px solid #e9d4af; padding:6px 5px; }
+  .total { width:100%; table-layout:fixed; border-collapse:collapse; margin-top:7px; page-break-inside:avoid; }
+  .total td { padding:7px 8px; font-size:10px; font-weight:bold; }
+  .total .left { background:#f9e7e7; color:#9c242e; text-align:right; width:72%; border:1px solid #efc0c0; }
+  .total .right { background:#a0272f; color:#fff; text-align:right; width:28%; white-space:nowrap; }
+  .multicurr { margin-top:9px; width:100%; border-collapse:collapse; font-size:8px; }
+  .multicurr td,.multicurr th { padding:5px 6px; border:1px solid #e5e7eb; }
+  .multicurr th { background:#687381; color:white; text-align:left; }
+  .settlement { page-break-inside:avoid; margin-top:12px; }
+  .payment { width:100%; border-collapse:collapse; table-layout:fixed; }
+  .payment td { border:1px solid #e0e4e8; padding:8px 7px; vertical-align:top; font-size:7.7px; line-height:1.48; }
+  .bank { white-space:pre-line; word-wrap:break-word; }
+  .bank strong { color:#962a31; }
+  .qr { max-width:100%; width:100px; height:auto; }
+  .instruction { margin-top:9px; font-size:7.6px; line-height:1.5; }
+  .instruction strong { color:#263d69; }
+  .signature { text-align:right; margin:4px 0 0; }
+  .signature img { width:100px; height:auto; }
+  .page-break { page-break-before:always; }
+  .footer { position:fixed; left:-35px; right:-35px; bottom:-31px; padding:9px 20px; text-align:center; background:#962a31; color:white; font-size:7.7px; }
 </style>
 </head>
 <body>
-
 @php
-  $firstCurrency = true;
+  $qrPath=public_path('assets/receipt-qr.jpg');
+  $signPath=public_path('assets/receipt-sign.jpg');
+  $qrSrc=is_file($qrPath)?'data:image/jpeg;base64,'.base64_encode(file_get_contents($qrPath)):null;
+  $signSrc=is_file($signPath)?'data:image/jpeg;base64,'.base64_encode(file_get_contents($signPath)):null;
+  $payText=trim((string)($branding?->payment_instructions ?? ''));
+  $hasSavedBankAccounts = (bool) preg_match('/\bIBAN\b|\b(?:A\/C|ACCOUNT)\s*(?:NUMBER|NO\.?|#)?\s*[:#]\s*\d{6,}/i', $payText);
+  $footerPhone=trim((string)($branding?->footer_phone ?? '')) ?: '+92 335 524 5551';
+  $footerEmail=trim((string)($branding?->footer_email ?? '')) ?: 'acivs2021@gmail.com';
 @endphp
 
-@foreach($currencyGroups as $currency => $cData)
-  @if(!$loop->first)
-    <div class="page-break"></div>
-  @endif
-
-  @if(!empty($banner))
-    <img class="banner" src="{{ $banner }}" alt="Banner">
-  @endif
-
-  <div class="title">Consolidated Fee Challan / Outstanding Statement</div>
-  <div class="subtitle">Official Statement of Outstanding Fees &mdash; Department of Accounts</div>
-
-  <div class="statement-badge">
-    <strong>CONSOLIDATED STATEMENT</strong> &bull; This statement aggregates all currently unpaid fee obligations across outstanding billing periods.
+@forelse($currencyGroups as $currency => $cData)
+  @if(!$loop->first)<div class="page-break"></div>@endif
+  @if(!empty($banner))<img class="banner" src="{{ $banner }}" alt="IQRA Virtual School">@endif
+  <div class="title">Monthly FEE CHALLAN </div>
+    <div class="notice">
+    <strong> Monthly FEE STATEMENT</strong> 
     @if(count($currencyGroups) > 1)
-      &bull; <strong>Multi-Currency Scope:</strong> Section for <strong>{{ $currency }}</strong> dues only. Currencies are strictly segregated without conversion.
+      This page contains <strong>{{ $currency }}</strong> only. Other currencies are separate and are not converted.
     @endif
   </div>
-
-  <table class="meta-table">
-    <tr>
-      @if($mode === 'student')
-        <td class="meta-label">Student Name:</td>
-        <td class="meta-val">{{ $student->name }}</td>
-        <td class="meta-label">Reg # (GR):</td>
-        <td class="meta-val"><span style="font-family: monospace; font-size: 11px;">{{ $student->gr_number }}</span></td>
-      @else
-        <td class="meta-label">Family Code:</td>
-        <td class="meta-val"><span style="font-family: monospace; font-size: 11px;">{{ $family->family_code ?: ('FAM-' . $family->id) }}</span></td>
-        <td class="meta-label">Total Students:</td>
-        <td class="meta-val">{{ count($cData['students']) }} student(s) with {{ $currency }} dues</td>
-      @endif
-    </tr>
-    <tr>
-      <td class="meta-label">{{ $parentDisplay['label'] }}:</td>
-      <td class="meta-val">{{ $parentDisplay['name'] }}</td>
-      @if($mode === 'student')
-        <td class="meta-label">Class / Program:</td>
-        <td class="meta-val">{{ $enrollment->grade_label ?? 'Class not assigned' }}@if(!empty($student->section_current)) - {{ $student->section_current }}@endif</td>
-      @else
-        <td class="meta-label">Contact / WhatsApp:</td>
-        <td class="meta-val">{{ $family->whatsapp ?: 'Not provided' }}</td>
-      @endif
-    </tr>
-    <tr>
-      @if($mode === 'student')
-        <td class="meta-label">Family Code:</td>
-        <td class="meta-val">{{ $student->family_code ?: 'Not assigned' }}</td>
-      @else
-        <td class="meta-label">Statement Ref:</td>
-        <td class="meta-val" style="font-family: monospace;">{{ $statementNumber }}</td>
-      @endif
-      <td class="meta-label">Issue Date:</td>
-      <td class="meta-val">{{ \Carbon\Carbon::parse($generatedAt)->format('d-F-Y') }}</td>
-    </tr>
+  <table class="meta">
     @if($mode === 'student')
-    <tr>
-      <td class="meta-label">Contact / WhatsApp:</td>
-      <td class="meta-val">{{ $student->whatsapp ?: 'Not provided' }}</td>
-      <td class="meta-label">Statement Ref:</td>
-      <td class="meta-val" style="font-family: monospace;">{{ $statementNumber }}</td>
-    </tr>
+      <tr><td class="k">Student:</td><td class="v">{{ $student->name ?? 'N/A' }}</td><td class="k">Reg / GR:</td><td class="v">{{ $student->gr_number ?? 'N/A' }}</td></tr>
+      <tr><td class="k">{{ $parentDisplay['label'] ?? 'Guardian' }}:</td><td class="v">{{ $parentDisplay['name'] ?? 'Not provided' }}</td><td class="k">Class / Program:</td><td class="v">{{ $enrollment?->grade_label ?: 'Not assigned' }}@if(!empty($student->section_current)) &bull; {{ $student->section_current }}@endif</td></tr>
+      <tr><td class="k">Family Code:</td><td class="v">{{ $student->family_code ?: 'Not assigned' }}</td><td class="k">Issue Date:</td><td class="v">{{ \Carbon\Carbon::parse($generatedAt)->format('d-F-Y') }}</td></tr>
+      <tr><td class="k">WhatsApp:</td><td class="v">{{ $student->whatsapp ?: 'Not provided' }}</td><td class="k">Statement Ref:</td><td class="v">{{ $statementNumber }}</td></tr>
+    @else
+      <tr><td class="k">Family Code:</td><td class="v">{{ $family?->family_code ?: 'FAM-'.$family?->id }}</td><td class="k">Students with dues:</td><td class="v">{{ count($cData['students']) }}</td></tr>
+      <tr><td class="k">{{ $parentDisplay['label'] ?? 'Guardian' }}:</td><td class="v">{{ $parentDisplay['name'] ?? 'Not provided' }}</td><td class="k">WhatsApp:</td><td class="v">{{ $family?->whatsapp ?: 'Not provided' }}</td></tr>
+      <tr><td class="k">Statement Ref:</td><td class="v">{{ $statementNumber }}</td><td class="k">Issue Date:</td><td class="v">{{ \Carbon\Carbon::parse($generatedAt)->format('d-F-Y') }}</td></tr>
     @endif
   </table>
-
-  <div class="currency-header">
-    OUTSTANDING FEE PARTICULARS ({{ $currency }})
-    <span>Currency Isolation: {{ $currency }}</span>
-  </div>
-
-  <table class="data-table">
+  <div class="bar">OUTSTANDING FEE PARTICULARS ({{ $currency }}) <span class="smallnote">Single-currency ledger: {{ $currency }}</span></div>
+  <table class="fees">
     <thead>
       <tr>
-        <th style="width: 5%;">#</th>
-        <th style="width: 14%;">Month / Period</th>
+        <th style="width:4%;">#</th>
+        <th style="width:10%;">Month</th>
         @if($mode === 'family')
-          <th style="width: 20%;">Student</th>
-          <th style="width: 25%;">Particular / Description</th>
+          <th style="width:15%;">Student</th>
+          <th style="width:20%;">Particular / Description</th>
+          <th style="width:15%;">Invoice Ref</th>
+          <th style="width:12%;" class="right">Billed</th>
+          <th style="width:12%;" class="right">Balance</th>
         @else
-          <th style="width: 41%;">Particular / Description</th>
+          <th style="width:32%;">Particular / Description</th>
+          <th style="width:16%;">Invoice Ref</th>
+          <th style="width:12%;" class="right">Billed</th>
+          <th style="width:12%;" class="right">Balance</th>
         @endif
-        <th style="width: 18%;">Invoice Ref</th>
-        <th style="width: 11%; text-align: right;">Billed</th>
-        <th style="width: 11%; text-align: right;">Balance ({{ $currency }})</th>
       </tr>
     </thead>
     <tbody>
-      @php $rowIdx = 1; @endphp
-      @if($mode === 'student')
-        @foreach($cData['items'] as $item)
-          @php
-            $itemBal = max(0, (int)$item->net_minor - (int)$item->paid_minor);
-            $isPartial = (int)$item->paid_minor > 0;
-          @endphp
+    @php $rowIdx = 1; @endphp
+    @if($mode === 'student')
+      @foreach($cData['items'] as $item)
+        @php $balance=max(0, (int)$item->net_minor - (int)$item->paid_minor); @endphp
+        <tr>
+          <td>{{ $rowIdx++ }}</td>
+          <td>{{ \Carbon\Carbon::parse($item->period_start)->format('M-Y') }}</td>
+          <td>
+            <strong>{{ $item->description ?: 'Monthly Fee' }}</strong>
+            @if(!empty($item->grade_label) && $item->grade_label !== ($enrollment?->grade_label ?? ''))<br><span class="muted">Class: {{ $item->grade_label }}</span>@endif
+            @if((int)$item->paid_minor > 0)<br><span class="muted">Paid: {{ number_format($item->paid_minor / 100, 2) }}</span>@endif
+            @if((int)($item->discount_minor ?? 0) > 0)<br><span class="muted">Discount: {{ number_format($item->discount_minor / 100, 2) }}</span>@endif
+          </td>
+          <td class="invoice-ref">{{ $item->invoice_number }}</td>
+          <td class="right">{{ number_format($item->net_minor / 100, 2) }}</td>
+          <td class="balance">{{ number_format($balance / 100, 2) }}</td>
+        </tr>
+      @endforeach
+    @else
+      @foreach($cData['students'] as $sGroup)
+        <tr class="student-label"><td colspan="7">{{ $sGroup['student_name'] }} &bull; GR {{ $sGroup['gr_number'] }} &bull; {{ $sGroup['grade_label'] ?? 'Class not assigned' }}</td></tr>
+        @foreach($sGroup['items'] as $item)
+          @php $balance=max(0, (int)$item->net_minor - (int)$item->paid_minor); @endphp
           <tr>
             <td>{{ $rowIdx++ }}</td>
-            <td><strong>{{ \Carbon\Carbon::parse($item->period_start)->format('M-Y') }}</strong></td>
-            <td>
-              <strong>{{ $item->description ?: 'Monthly Fee' }}</strong>
-              @if(!empty($item->grade_label) && $item->grade_label !== ($enrollment->grade_label ?? ''))
-                <br><span class="muted">Class: {{ $item->grade_label }}</span>
-              @endif
-              @if($isPartial)
-                <br><span class="pill pill-part">Partially Paid (Paid: {{ number_format($item->paid_minor / 100, 2) }})</span>
-              @endif
-              @if((int)$item->discount_minor > 0)
-                <br><span class="pill pill-disc">Discount: {{ number_format($item->discount_minor / 100, 2) }}</span>
-              @endif
+            <td>{{ \Carbon\Carbon::parse($item->period_start)->format('M-Y') }}</td>
+            <td>{{ $sGroup['student_name'] }}</td>
+            <td><strong>{{ $item->description ?: 'Monthly Fee' }}</strong>
+              @if((int)$item->paid_minor > 0)<br><span class="muted">Paid: {{ number_format($item->paid_minor / 100, 2) }}</span>@endif
+              @if((int)($item->discount_minor ?? 0) > 0)<br><span class="muted">Discount: {{ number_format($item->discount_minor / 100, 2) }}</span>@endif
             </td>
-            <td><span style="font-family: monospace; font-size: 8px;">{{ $item->invoice_number }}</span></td>
-            <td style="text-align: right;">{{ number_format($item->net_minor / 100, 2) }}</td>
-            <td style="text-align: right; font-weight: bold; color: #991b1b;">{{ number_format($itemBal / 100, 2) }}</td>
+            <td class="invoice-ref">{{ $item->invoice_number }}</td>
+            <td class="right">{{ number_format($item->net_minor / 100, 2) }}</td>
+            <td class="balance">{{ number_format($balance / 100, 2) }}</td>
           </tr>
         @endforeach
-      @else
-        {{-- Family Mode: Grouped by Student --}}
-        @foreach($cData['students'] as $sGroup)
-          <tr class="student-subheading">
-            <td colspan="6">
-              &#128100; {{ $sGroup['student_name'] }} (GR: {{ $sGroup['gr_number'] }}) &bull; {{ $sGroup['grade_label'] ?? 'Class not assigned' }}
-            </td>
-          </tr>
-          @foreach($sGroup['items'] as $item)
-            @php
-              $itemBal = max(0, (int)$item->net_minor - (int)$item->paid_minor);
-              $isPartial = (int)$item->paid_minor > 0;
-            @endphp
-            <tr>
-              <td>{{ $rowIdx++ }}</td>
-              <td><strong>{{ \Carbon\Carbon::parse($item->period_start)->format('M-Y') }}</strong></td>
-              <td>{{ $sGroup['student_name'] }}</td>
-              <td>
-                <strong>{{ $item->description ?: 'Monthly Fee' }}</strong>
-                @if($isPartial)
-                  <br><span class="pill pill-part">Partially Paid (Paid: {{ number_format($item->paid_minor / 100, 2) }})</span>
-                @endif
-              </td>
-              <td><span style="font-family: monospace; font-size: 8px;">{{ $item->invoice_number }}</span></td>
-              <td style="text-align: right;">{{ number_format($item->net_minor / 100, 2) }}</td>
-              <td style="text-align: right; font-weight: bold; color: #991b1b;">{{ number_format($itemBal / 100, 2) }}</td>
-            </tr>
-          @endforeach
-          <tr class="student-subtotal">
-            <td colspan="5" style="text-align: right;">Subtotal for {{ $sGroup['student_name'] }} ({{ $currency }}):</td>
-            <td style="text-align: right;">{{ number_format($sGroup['student_subtotal_balance_minor'] / 100, 2) }}</td>
-          </tr>
-        @endforeach
-      @endif
+        <tr class="student-total"><td colspan="6" class="right">Subtotal for {{ $sGroup['student_name'] }} ({{ $currency }}):</td><td class="balance">{{ number_format($sGroup['student_subtotal_balance_minor']/100, 2) }}</td></tr>
+      @endforeach
+    @endif
     </tbody>
   </table>
+  <table class="total"><tr>
+    <td class="left">TOTAL OUTSTANDING PAYABLE ({{ $currency }}):</td>
+    <td class="right">{{ $currency }} {{ number_format($cData['total_balance_minor']/100, 2) }}</td>
+  </tr></table>
 
-  <table class="total-card">
-    <tr>
-      <td class="total-label">TOTAL OUTSTANDING PAYABLE ({{ $currency }}):</td>
-      <td class="total-amount">{{ $currency }} {{ number_format($cData['total_balance_minor'] / 100, 2) }}</td>
-    </tr>
-  </table>
-
-  @if(count($currencyGroups) > 1 && $loop->last)
-    <div style="margin-top: 10px;">
-      <div style="font-weight: bold; color: #111827; font-size: 9.5px; margin-bottom: 4px;">CONSOLIDATED SUMMARY ACROSS CURRENCIES:</div>
-      <table class="multi-curr-summary">
-        <thead>
-          <tr>
-            <th>Currency</th>
-            <th style="text-align: center;">Total Line Items</th>
-            <th style="text-align: right;">Total Amount Payable</th>
-            <th>Status / Scope</th>
-          </tr>
-        </thead>
-        <tbody>
-          @foreach($currencyGroups as $cName => $summary)
-            <tr>
-              <td><strong>{{ $cName }}</strong></td>
-              <td style="text-align: center;">{{ $mode === 'student' ? count($summary['items']) : $summary['students']->sum(fn($s) => count($s['items'])) }}</td>
-              <td style="text-align: right; font-weight: bold; color: #991b1b;">{{ $cName }} {{ number_format($summary['total_balance_minor'] / 100, 2) }}</td>
-              <td style="color: #4b5563; font-size: 8px;">Isolated Currency Ledger</td>
-            </tr>
-          @endforeach
-        </tbody>
-      </table>
-    </div>
+  @if(count($currencyGroups)>1 && $loop->last)
+    <table class="multicurr">
+      <tr><th>Separate Currency</th><th>Outstanding (Not Converted)</th></tr>
+      @foreach($currencyGroups as $cName=>$summary)
+        <tr><td>{{ $cName }}</td><td><strong>{{ $cName }} {{ number_format($summary['total_balance_minor']/100, 2) }}</strong></td></tr>
+      @endforeach
+    </table>
   @endif
 
-  <div class="bar">PAYMENT INSTRUCTIONS & BANK ACCOUNTS</div>
-  <div class="payment-box">{{ $branding?->payment_instructions ?: 'Payment can be made via bank transfer or deposit. Please contact the Accounts Department for authorized bank details.' }}</div>
-
-  <div class="instr">
-    <strong>Notice to Parents / Guardians:</strong><br>
-    &bull; This document is a consolidated statement of existing billed dues. Previous payments already verified have been credited.<br>
-    &bull; Please mention the Reg # (GR) and Statement Ref in your bank transfer description.<br>
-    &bull; Send the transaction receipt/slip to Accounts via WhatsApp: {{ $branding?->footer_phone ?? '+920000000000' }} or Email: {{ $branding?->footer_email ?? 'accounts@iqra.edu.pk' }}.
+  <div class="settlement">
+    <div class="bar">PAYMENT INSTRUCTIONS &amp; BANK ACCOUNTS</div>
+    <table class="payment"><tr>
+      <td style="width:78%;">
+        @if($hasSavedBankAccounts)
+          <div class="bank">{{ $payText }}</div>
+        @else
+          <table style="width:100%; border-collapse:collapse;"><tr>
+            <td style="border:0; padding:0 8px 0 0; width:50%;"><strong>IQRA VIRTUALSOLUTIONS</strong><br>Meezan Bank Peshawar<br>IBAN: PK71MEZN0007810111367793<br>Account: 07810111367793<br>Branch: 0781<br>Contact: +92 335 524 5551</td>
+            <td style="border:0; padding:0; width:50%;"><strong>IVSGLOBAL</strong><br>Mashreq Bank<br>IBAN: AE620330000019101455931<br>Account: 019101455931<br>Mobile: +971528838128<br>Ajman Industrial Area 2, UAE</td>
+          </tr></table>
+          @if($payText !== '')
+            <div style="margin-top:5px; color:#647080; font-size:7.3px;">{{ $payText }}</div>
+          @endif
+        @endif
+      </td>
+      <td style="width:22%; text-align:center;">@if($qrSrc)<img src="{{ $qrSrc }}" class="qr" alt="Scan to pay">@else Please contact Accounts @endif</td>
+    </tr></table>
+    <div class="instruction"><strong>Notice to Parents / Guardians:</strong><br>
+      &bull; This statement lists unpaid obligations already billed. Verified previous payments have already been credited.<br>
+      &bull; Quote the Reg / GR and Statement Ref when making payment.<br>
+      &bull; Upload payment evidence: https://forms.gle/W4y3Q1VjyU8cRDvp7<br>
+      &bull; Contact Accounts if your receipt has not arrived within 72 hours. Refunded/rejected payments are not paid.
+    </div>
+    @if($signSrc)<div class="signature"><img src="{{ $signSrc }}" alt="Accounts Manager Signature"></div>@endif
   </div>
-
-  <div class="foot">
-    IQRA VIRTUAL SCHOOL &bull; Accounts Department &bull; {{ $branding?->footer_phone ?? '' }} &bull; {{ $branding?->footer_email ?? 'accounts@iqra.edu.pk' }}
-  </div>
-
-@endforeach
-
+@empty
+  @if(!empty($banner))<img class="banner" src="{{ $banner }}" alt="IQRA Virtual School">@endif
+  <div class="title">CONSOLIDATED FEE CHALLAN</div>
+  <div class="notice">There are no unpaid billed fee items to display for this account.</div>
+@endforelse
+<div class="footer">IQRA VIRTUAL SCHOOL &bull; {{ $footerPhone }} &bull; {{ $footerEmail }} &bull; {{ $statementNumber }}</div>
 </body>
 </html>

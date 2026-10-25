@@ -394,6 +394,18 @@ class BatchDeliveryTest extends TestCase
         $famUnpaid = $this->createFamilyWithInvoice($data, 301, 'Grade 1', true, true, 10000, 0, 'issued');
         $famPaid = $this->createFamilyWithInvoice($data, 302, 'Grade 1', true, true, 10000, 10000, 'paid');
 
+        $itemId = DB::table('invoice_items')->where('invoice_id', $famPaid['invId'])->value('id');
+        $paymentId = DB::table('payments')->insertGetId([
+            'family_id' => $famPaid['famId'], 'campus_id' => $data['campus'], 'department_id' => $data['dept'],
+            'currency' => 'SAR', 'receipt_number' => 'FICTIONAL-PAID-302', 'amount_minor' => 10000,
+            'received_on' => '2026-10-09', 'received_by' => $data['superAdmin']->id,
+            'idempotency_key' => 'fictional-paid-302', 'request_hash' => hash('sha256', 'fictional-paid-302'),
+            'status' => 'received', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('payment_allocations')->insert([
+            'payment_id' => $paymentId, 'invoice_item_id' => $itemId, 'amount_minor' => 10000,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
         $service = app(BatchDeliveryService::class);
 
         // 1. Monthly batch
@@ -406,7 +418,7 @@ class BatchDeliveryTest extends TestCase
 
         // 2. Paid batch
         $resP = $service->createAndDispatchBatch(['webhook_type' => 'paid'], ['Grade 1'], ['whatsapp'], $data['superAdmin'], '2026-10');
-        (new DispatchBatchToN8n($resP['batch_id']))->handle();
+        (new DispatchBatchToN8n($resP['batch_id'], DB::table('notifications')->where('batch_id', $resP['batch_id'])->pluck('id')->all()))->handle();
 
         Http::assertSent(function ($request) use ($data) {
             return $request->url() === $data['paidUrl'] && $request['event_type'] === 'invoice.paid.batch';

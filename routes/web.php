@@ -19,6 +19,11 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/settings/webhooks/carry-forward/preview',[\App\Http\Controllers\WebhookSettingsController::class,'carryForwardPreview'])->name('settings.webhooks.carry_forward.preview');
  Route::post('/settings/webhooks/{type}',[\App\Http\Controllers\WebhookSettingsController::class,'update'])->name('settings.webhooks.update');
  Route::post('/settings/webhooks/{type}/test',[\App\Http\Controllers\WebhookSettingsController::class,'test'])->name('settings.webhooks.test');
+ Route::get('/settings/users',[\App\Http\Controllers\UserController::class,'index'])->name('settings.users.index');
+ Route::post('/settings/users',[\App\Http\Controllers\UserController::class,'store'])->name('settings.users.store');
+ Route::put('/settings/users/{id}',[\App\Http\Controllers\UserController::class,'update'])->name('settings.users.update');
+ Route::post('/settings/users/{id}/toggle-status',[\App\Http\Controllers\UserController::class,'toggleStatus'])->name('settings.users.toggle');
+ Route::post('/settings/users/{id}/reset-password',[\App\Http\Controllers\UserController::class,'resetPassword'])->name('settings.users.reset_password');
  Route::get('/manage-branches',[B::class,'campuses']);Route::post('/manage-branches',[B::class,'addCampus']);
  Route::get('/manage-classes',[B::class,'classes']);Route::post('/manage-classes',[B::class,'addClass']);
  Route::get('/manage-student',[B::class,'students']);Route::post('/manage-student/import',[Admission::class,'import'])->name('student.import');Route::post('/manage-student/import-preloaded',[Admission::class,'importPreloaded'])->name('student.import.preloaded');Route::get('/manage-student/admission/new',[Admission::class,'create'])->name('student.admission.create');Route::post('/manage-student/admission/new',[Admission::class,'store'])->name('student.admission.store');Route::get('/manage-student/admission/check-number',[Admission::class,'checkRegistrationNumber'])->name('student.admission.check-number')->middleware('throttle:30,1');Route::get('/manage-student/{student}',[B::class,'showStudent']);Route::get('/manage-student/{student}/edit',[Admission::class,'edit'])->name('student.admission.edit');Route::put('/manage-student/{student}',[Admission::class,'update'])->name('student.admission.update');Route::post('/manage-student/{student}/status',[B::class,'studentStatus'])->name('student.status');Route::delete('/manage-student/{student}',[B::class,'deleteStudent'])->name('student.delete');Route::post('/manage-student/{student}/enrollments',[B::class,'addEnrollment']);Route::post('/families/{family}/contact',[B::class,'updateFamilyContact']);
@@ -31,6 +36,7 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/invoices/batches/{batch}',[B::class,'batchDetails'])->name('invoices.batch_details');
  Route::get('/invoices/selection-snapshot',[B::class,'selectionSnapshot'])->name('invoices.selection_snapshot');
  Route::post('/invoices/send-batch',[B::class,'approveSendBatch'])->name('invoices.send_batch');
+ Route::post('/invoices/paid/send-queue',[B::class,'sendQueuedPaid'])->name('invoices.paid.send_queue');
  Route::post('/invoices/batches/{batch}/retry-failed',[B::class,'retryBatchFailed'])->name('invoices.batches.retry_failed');
  Route::post('/invoices/notifications/{notification}/retry',[B::class,'retryNotification'])->name('invoices.notifications.retry');
  Route::post('/invoices/notifications/process-queue',[B::class,'processQueue'])->name('invoices.notifications.process_queue');

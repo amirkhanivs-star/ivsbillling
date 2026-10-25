@@ -1,0 +1,113 @@
+diff --git a/app/Services/BatchDeliveryService.php b/app/Services/BatchDeliveryService.php
+--- a/app/Services/BatchDeliveryService.php
++++ b/app/Services/BatchDeliveryService.php
+@@ -892,13 +892,13 @@
+             DispatchBatchToN8n::dispatch($batchId, $notificationIds)->onQueue('notifications');
+             return;
+         }
+-        $groups = [];
+-        foreach (DB::table('notifications')->where('batch_id', $batchId)->whereIn('id', $notificationIds ?? [])->get(['id', 'invoice_id']) as $notification) {
+-            $queue = PaidInvoiceEligibility::portalPaid((int) $notification->invoice_id) ? 'paid-future' : 'notifications';
+-            $groups[$queue][] = $notification->id;
+-        }
+-        foreach ($groups as $queue => $ids) {
+-            DispatchBatchToN8n::dispatch($batchId, $ids)->onQueue($queue);
++        // Every newly approved, explicitly selected paid notification uses the
++        // dedicated worker. Provenance determines eligibility, not queue routing.
++        // Existing jobs on the historical notifications queue are not moved.
++        $ids = DB::table('notifications')->where('batch_id', $batchId)
++            ->whereIn('id', $notificationIds ?? [])->pluck('id')->all();
++        if ($ids) {
++            DispatchBatchToN8n::dispatch($batchId, $ids)->onQueue('paid-future');
+         }
+     }
+ }
+diff --git a/app/Jobs/DispatchBatchToN8n.php b/app/Jobs/DispatchBatchToN8n.php
+--- a/app/Jobs/DispatchBatchToN8n.php
++++ b/app/Jobs/DispatchBatchToN8n.php
+@@ -151,9 +151,11 @@
+                 ]);
+                 continue;
+             }
+-            if ($this->queue === 'paid-future' && ($webhookType !== 'paid' || !PaidInvoiceEligibility::portalPaid((int) $notification->invoice_id))) {
++            // The dedicated queue is for explicitly selected paid notifications,
++            // including imported invoices whose receipts meet the eligibility rules.
++            if ($this->queue === 'paid-future' && $webhookType !== 'paid') {
+                 DB::table('notifications')->where('id', $notification->id)->update([
+-                    'status' => 'blocked', 'error' => 'This queue accepts only portal-generated invoices with audited portal receipts.', 'updated_at' => now(),
++                    'status' => 'blocked', 'error' => 'This queue accepts paid invoice notifications only.', 'updated_at' => now(),
+                 ]);
+                 continue;
+             }
+@@ -261,8 +263,7 @@
+             }
+ 
+             foreach ($notifChunk as $pending) {
+-                if ($webhookType === 'paid' && (!PaidInvoiceEligibility::eligible((int) $pending->invoice_id)
+-                    || ($this->queue === 'paid-future' && !PaidInvoiceEligibility::portalPaid((int) $pending->invoice_id)))) {
++                if ($webhookType === 'paid' && !PaidInvoiceEligibility::eligible((int) $pending->invoice_id)) {
+                     throw new RuntimeException('Paid eligibility changed during payload preparation.');
+                 }
+             }
+diff --git a/tests/Feature/PaidInvoicesTabTest.php b/tests/Feature/PaidInvoicesTabTest.php
+--- a/tests/Feature/PaidInvoicesTabTest.php
++++ b/tests/Feature/PaidInvoicesTabTest.php
+@@ -836,31 +836,47 @@
+         $this->assertDatabaseHas('notifications', ['id' => $f['ids'][1], 'status' => 'queued', 'attempts' => 0]);
+     }
+ 
+-    public function test_mixed_selected_batch_routes_only_portal_members_to_paid_future(): void
++    public function test_mixed_paid_selection_uses_one_automatic_job_without_early_submission(): void
+     {
+         $f = $this->stagedPair(); $this->markPortalProvenance($f['data'], $f['first']);
+         Queue::fake([DispatchBatchToN8n::class]);
+         app(BatchDeliveryService::class)->sendQueuedPaidInvoices($f['data']['superAdmin'], '2026-10', [$f['first']['invId'], $f['second']['invId']]);
+-        Queue::assertPushed(DispatchBatchToN8n::class, 2);
+-        Queue::assertPushed(DispatchBatchToN8n::class, fn ($j) => $j->queue === 'paid-future' && $j->selectedNotificationIds === [$f['ids'][0]]);
+-        Queue::assertPushed(DispatchBatchToN8n::class, fn ($j) => $j->queue === 'notifications' && $j->selectedNotificationIds === [$f['ids'][1]]);
+-    }
+-
+-    public function test_paid_future_never_dispatches_imported_rows_and_respects_disable_switch(): void
+-    {
+-        $f = $this->stagedPair();
++        Queue::assertPushed(DispatchBatchToN8n::class, 1);
++        Queue::assertPushed(DispatchBatchToN8n::class, fn ($j) => $j->queue === 'paid-future' && $j->selectedNotificationIds === $f['ids']);
++        $this->assertSame(2, DB::table('notifications')->whereIn('id', $f['ids'])->where('status', 'queued')->count());
++        $this->assertSame(0, DB::table('notifications')->whereIn('id', $f['ids'])->where('status', 'submitted')->count());
++        Http::assertNothingSent();
++    }
++
++    public function test_paid_future_dispatches_cutoff_eligible_imported_invoice_and_respects_disable_switch(): void
++    {
++        $f = $this->stagedPair();
++        $this->assertFalse(\App\Services\PaidInvoiceEligibility::portalPaid($f['second']['invId']));
+         Http::fake([$f['data']['paidUrl'] => Http::response(['ok' => true], 200)]);
+         (new DispatchBatchToN8n($f['batch'], [$f['ids'][1]]))->onQueue('paid-future')->handle();
+-        Http::assertNothingSent();
+-        $this->assertDatabaseHas('notifications', ['id' => $f['ids'][1], 'status' => 'blocked', 'attempts' => 0]);
++        Http::assertSentCount(1);
++        $this->assertDatabaseHas('notifications', ['id' => $f['ids'][1], 'status' => 'submitted', 'attempts' => 1, 'response_code' => 200]);
+         $this->markPortalProvenance($f['data'], $f['first']);
+         config(['services.n8n.paid_automatic_dispatch' => false]);
++        Http::swap(new \Illuminate\Http\Client\Factory());
++        Http::fake([$f['data']['paidUrl'] => Http::response(['ok' => true], 200)]);
+         $queueJob = \Mockery::mock(\Illuminate\Contracts\Queue\Job::class);
+         $queueJob->shouldReceive('release')->once()->with(60);
+         $job = (new DispatchBatchToN8n($f['batch'], [$f['ids'][0]]))->onQueue('paid-future');
+         $job->setJob($queueJob); $job->handle();
+         $this->assertDatabaseHas('notifications', ['id' => $f['ids'][0], 'status' => 'queued', 'attempts' => 0]);
+         Http::assertNothingSent();
++    }
++
++    public function test_paid_future_still_rejects_historical_receipt_before_cutoff(): void
++    {
++        $f = $this->stagedPair();
++        DB::table('payments')->where('id', $f['second']['paymentId'])->update(['received_on' => '2026-10-08']);
++        $this->assertFalse(\App\Services\PaidInvoiceEligibility::eligible($f['second']['invId']));
++        Http::fake([$f['data']['paidUrl'] => Http::response(['ok' => true], 200)]);
++        (new DispatchBatchToN8n($f['batch'], [$f['ids'][1]]))->onQueue('paid-future')->handle();
++        Http::assertNothingSent();
++        $this->assertDatabaseHas('notifications', ['id' => $f['ids'][1], 'status' => 'blocked', 'attempts' => 0]);
+     }
+ 
+     public function test_opening_balance_run_never_gets_portal_cutoff_exemption(): void

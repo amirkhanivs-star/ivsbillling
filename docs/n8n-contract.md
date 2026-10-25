@@ -1,5 +1,14 @@
 # IQRA Laravel -> n8n -> BotCommerce/Email contract
 
+> Historical flat-message contract below. The current batch dispatcher sends
+> `invoice.monthly.batch` or `invoice.paid.batch` with an `invoices` array;
+> each invoice includes `notification_id`, `event_id`, `idempotency_key`, nested
+> invoice/family/student/PDF fields, and paid events include `payment_details`.
+> HMAC still signs the exact raw JSON body. Current dispatch uses the per-type
+> database webhook setting. The deployed n8n workflow must be checked against
+> this batch structure before live verification; this document does not prove
+> its configuration. See [paid dispatch operations](paid-dispatch-recovery.md).
+
 ## Delivery workflow
 
 1. Finance staff generate invoices (status `generated`), review each family and click Send Selected.

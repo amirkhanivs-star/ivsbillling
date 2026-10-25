@@ -57,6 +57,7 @@ class InvoicePayloadBuilder
                     'name' => $item->student_name ?: 'Student #' . $sId,
                     'gr_number' => $item->gr_number ?: 'Not assigned',
                     'class_grade' => $item->grade_label ?: 'Not assigned',
+                    'guardian_name' => GuardianNameResolver::forStudent($sId, $family),
                     'itemized_fee_particulars' => [],
                 ];
             }
@@ -78,7 +79,7 @@ class InvoicePayloadBuilder
         $students = array_values($studentsMap);
 
         // 2. Guardian resolution
-        $guardianName = $this->resolveGuardianName($family);
+        $guardianName = $this->resolveGuardianName($family, $students);
 
         // 3. Requested channels
         $requestedChannels = [];
@@ -237,32 +238,18 @@ class InvoicePayloadBuilder
     }
 
     /**
-     * Resolve guardian or father name for the family.
+     * Resolve guardian or father name for the family or student.
      */
-    private function resolveGuardianName(?object $family): string
+    private function resolveGuardianName(?object $family, array $students = []): string
     {
         if (!$family) {
-            return 'Not provided';
+            return GuardianNameResolver::NOT_PROVIDED;
         }
 
-        if (!empty($family->guardian_name)) {
-            return trim((string)$family->guardian_name);
+        if (count($students) === 1 && !empty($students[0]['student_id'])) {
+            return GuardianNameResolver::forStudent((int)$students[0]['student_id'], $family);
         }
 
-        if (Schema::hasTable('student_registration_details')) {
-            $detail = DB::table('students as s')
-                ->join('student_registration_details as d', 'd.student_id', '=', 's.id')
-                ->where('s.family_id', $family->id)
-                ->whereNotNull('d.father_name')
-                ->where('d.father_name', '!=', '')
-                ->select('d.father_name')
-                ->first();
-
-            if ($detail && !empty($detail->father_name)) {
-                return trim((string)$detail->father_name);
-            }
-        }
-
-        return 'Not provided';
+        return GuardianNameResolver::forFamily($family);
     }
 }

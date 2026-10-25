@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Jobs\DispatchBatchToN8n;
+use App\Services\GuardianNameResolver;
 use App\Services\Staging\DatabaseSafetyGuard;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -35,12 +36,39 @@ class BatchDeliveryService
             $q->where('i.department_id', (int)$filters['department_id']);
         }
 
-        if (!empty($filters['period'])) {
-            $q->where('b.period_start', 'like', $filters['period'] . '%');
-        }
-
         // Mode: Monthly vs Paid
         $isPaid = !empty($filters['paid_only']) || ($filters['webhook_type'] ?? '') === 'paid';
+
+        if (!empty($filters['period'])) {
+            if ($isPaid && $filters['period'] === '2026-10') {
+                $q->where(function ($periodQ) {
+                    $periodQ->where('b.period_start', 'like', '2026-10%')
+                        ->orWhere(function ($olderQ) {
+                            $olderQ->where('b.period_start', '<', '2026-10-01')
+                                ->where(function ($subNotif) {
+                                    $subNotif->whereNotExists(function ($nSub) {
+                                        $nSub->select(DB::raw(1))
+                                            ->from('notifications as n_old')
+                                            ->whereColumn('n_old.invoice_id', 'i.id')
+                                            ->where('n_old.kind', 'paid')
+                                            ->whereIn('n_old.status', ['submitted', 'delivered', 'read']);
+                                    })
+                                    ->orWhereExists(function ($nSub2) {
+                                        $nSub2->select(DB::raw(1))
+                                            ->from('notifications as n_oct')
+                                            ->join('notification_batches as nb_oct', 'nb_oct.batch_id', '=', 'n_oct.batch_id')
+                                            ->whereColumn('n_oct.invoice_id', 'i.id')
+                                            ->where('n_oct.kind', 'paid')
+                                            ->where('nb_oct.billing_period', '2026-10');
+                                    });
+                                });
+                        });
+                });
+            } else {
+                $q->where('b.period_start', 'like', $filters['period'] . '%');
+            }
+        }
+
         if ($isPaid) {
             $q->where(function ($sub) {
                 $sub->where('i.status', 'paid')
@@ -49,6 +77,38 @@ class BatchDeliveryService
                            ->whereColumn('i.paid_minor', '>=', 'i.total_minor');
                     });
             });
+
+            // Paid delivery begins with actual receipts dated October 9, 2026 or later.
+            // Use payment allocations, not invoice issue/billing dates, to avoid sending older paid records.
+            PaidInvoiceEligibility::constrain($q);
+
+            if (!empty($filters['paid_status']) && $filters['paid_status'] !== 'all') {
+                if ($filters['paid_status'] === 'unqueued') {
+                    $q->whereNotExists(function ($sub) {
+                        $sub->select(DB::raw(1))
+                            ->from('notifications as n')
+                            ->whereColumn('n.invoice_id', 'i.id')
+                            ->where('n.kind', 'paid')
+                            ->whereIn('n.status', ['queued', 'processing', 'failed', 'blocked', 'submitted', 'delivered', 'read']);
+                    });
+                } elseif ($filters['paid_status'] === 'queued') {
+                    $q->whereExists(function ($sub) {
+                        $sub->select(DB::raw(1))
+                            ->from('notifications as n')
+                            ->whereColumn('n.invoice_id', 'i.id')
+                            ->where('n.kind', 'paid')
+                            ->where('n.status', 'queued');
+                    });
+                } elseif ($filters['paid_status'] === 'submitted') {
+                    $q->whereExists(function ($sub) {
+                        $sub->select(DB::raw(1))
+                            ->from('notifications as n')
+                            ->whereColumn('n.invoice_id', 'i.id')
+                            ->where('n.kind', 'paid')
+                            ->whereIn('n.status', ['submitted', 'delivered', 'read']);
+                    });
+                }
+            }
         } else {
             // Routine monthly: unsettled invoices
             $q->where('i.status', '!=', 'paid')
@@ -201,10 +261,10 @@ class BatchDeliveryService
         }
 
         // Group invoices by family for monthly mode (one consolidated monthly challan and one notification per family)
-        // or by family + currency for paid mode
+        // or by individual invoice for paid mode (each settled invoice is a distinct delivery item)
         $grouped = ($webhookType === 'monthly')
             ? $allInvoices->groupBy('family_id')
-            : $allInvoices->groupBy(fn($inv) => "{$inv->family_id}_{$inv->currency}");
+            : $allInvoices->groupBy(fn($inv) => (string)$inv->id);
 
         $eligibleRecipients = [];
         $eligibleInvoiceIds = [];
@@ -310,7 +370,7 @@ class BatchDeliveryService
                     continue;
                 }
 
-                if ($existingNotif->status === 'queued') {
+                if (in_array($existingNotif->status, ['queued', 'processing'], true)) {
                     $excludedBreakdown['already_queued']++;
                     $excludedReasons[$primaryInvoice->id] = "Already queued for dispatch";
                     continue;
@@ -361,7 +421,7 @@ class BatchDeliveryService
                 'invoice_number' => $primaryInvoice->invoice_number,
                 'family_id' => $primaryInvoice->family_id,
                 'family_code' => $primaryInvoice->family_code ?: 'Unnumbered family #' . $primaryInvoice->family_id,
-                'guardian_name' => $primaryInvoice->guardian_name,
+                'guardian_name' => GuardianNameResolver::isValid($primaryInvoice->guardian_name) ? $primaryInvoice->guardian_name : GuardianNameResolver::forFamily($primaryInvoice->family_id),
                 'whatsapp' => $primaryInvoice->whatsapp,
                 'currency' => $primaryInvoice->currency,
                 'total_minor' => (int)$primaryInvoice->total_minor,
@@ -509,7 +569,8 @@ class BatchDeliveryService
         ?string $billingPeriod = null,
         ?array $explicitInvoiceIds = null,
         ?string $snapshotId = null,
-        bool $reviewConfirmed = false
+        bool $reviewConfirmed = false,
+        bool $dispatchNow = true
     ): array {
         // Prevent concurrent batch dispatch double-clicks
         $webhookType = (!empty($filters['paid_only']) || ($filters['webhook_type'] ?? '') === 'paid') ? 'paid' : 'monthly';
@@ -641,6 +702,9 @@ class BatchDeliveryService
                     ->lockForUpdate()
                     ->first();
 
+                if ($existing && (($webhookType === 'paid' && (int) $existing->attempts > 0) || in_array($existing->status, ['queued', 'processing', 'submitted', 'delivered', 'read'], true))) {
+                    throw new RuntimeException('Selection changed while staging. Refresh before adding invoices again.');
+                }
                 if ($existing) {
                     // Update existing notification to queued with new batch_id and chunk_index
                     DB::table('notifications')->where('id', $existing->id)->update([
@@ -675,16 +739,73 @@ class BatchDeliveryService
             }
         });
 
-        // Dispatch background job AFTER transaction has successfully committed
-        DispatchBatchToN8n::dispatch($batchId)->onQueue('notifications');
+        if ($dispatchNow) {
+            // Dispatch background job AFTER transaction has successfully committed
+            $this->enqueueDispatch($batchId, $webhookType === 'paid' ? DB::table('notifications')->where('batch_id', $batchId)->pluck('id')->all() : null, $webhookType);
+            $msg = "Batch queued successfully: {$totalRecipients} eligible recipients. n8n submission is pending. (Batch ID: {$batchId})";
+        } else {
+            $msg = "Successfully added {$totalRecipients} paid invoice(s) to the delivery queue (Batch ID: {$batchId}). Ready for manual dispatch.";
+        }
 
         return [
             'batch_id' => $batchId,
             'status' => 'queued',
             'eligible_count' => $totalRecipients,
             'chunks_total' => $chunksTotal,
-            'message' => "Batch queued successfully: {$totalRecipients} eligible recipients. n8n submission is pending. (Batch ID: {$batchId})",
+            'message' => $msg,
         ];
+    }
+
+    /**
+     * Dispatch an explicit selection of queued paid invoices to the Paid n8n Webhook.
+     */
+    public function sendQueuedPaidInvoices(object $user, ?string $billingPeriod = null, ?array $selectedInvoiceIds = null): array
+    {
+        // When the user selects specific queued invoices, dispatch only their notification IDs.
+        // Individual invoices can share a batch, so selecting one must never send its siblings.
+        if ($selectedInvoiceIds !== null) {
+            $selectedIds = array_values(array_unique(array_map('intval', $selectedInvoiceIds)));
+            if (!$selectedIds || count($selectedIds) !== count($selectedInvoiceIds)) {
+                throw new RuntimeException('Select at least one distinct queued invoice.');
+            }
+
+            $selectionQuery = DB::table('notifications as n')
+                ->join('notification_batches as nb', 'nb.batch_id', '=', 'n.batch_id')
+                ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
+                ->where('nb.webhook_type', 'paid')
+                ->whereIn('nb.status', ['queued', 'processing', 'failed', 'blocked'])
+                ->whereIn('n.status', ['queued', 'failed', 'blocked'])
+                ->where('n.kind', 'paid')
+                ->where('n.attempts', 0)
+                // Match the existing October 9 paid-receipt cutoff on dispatch as well as on screen.
+                ->whereIn('n.invoice_id', $selectedIds)
+                ->when($billingPeriod, fn ($q) => $q->where('nb.billing_period', $billingPeriod))
+                ->when(!in_array($user->role, ['super_admin', 'finance_admin'], true), function ($q) use ($user) {
+                    $q->where('i.campus_id', $user->campus_id)
+                        ->when($user->department_id, fn ($q) => $q->where('i.department_id', $user->department_id));
+                })
+                ->select('n.id', 'n.invoice_id', 'n.batch_id');
+            $notifications = PaidInvoiceEligibility::constrain($selectionQuery)->get();
+
+            // Fail closed if any selected invoice is no longer queued or accessible.
+            if ($notifications->pluck('invoice_id')->unique()->count() !== count($selectedIds)) {
+                throw new RuntimeException('One or more selected invoices are no longer queued or accessible. Refresh the list and select again.');
+            }
+
+            foreach ($notifications->groupBy('batch_id') as $batchId => $members) {
+                $this->enqueueDispatch($batchId, $members->pluck('id')->all(), 'paid');
+            }
+
+            $count = $notifications->pluck('invoice_id')->unique()->count();
+            return [
+                'batches_count' => $notifications->groupBy('batch_id')->count(),
+                'invoices_count' => $count,
+                'message' => "Queued {$count} selected paid invoice(s) for background dispatch. Unselected invoices remain queued.",
+            ];
+        }
+
+        throw new RuntimeException('Select specific queued paid invoices before dispatching.');
+
     }
 
     /**
@@ -714,10 +835,21 @@ class BatchDeliveryService
 
         // Re-evaluate eligibility and update to queued
         $retriedCount = 0;
+        $retryIds = [];
         foreach ($failedNotifications as $notif) {
             $invoice = DB::table('invoices')->where('id', $notif->invoice_id)->first();
             $family = $invoice ? DB::table('families')->where('id', $invoice->family_id)->first() : null;
+            if ($invoice && !in_array($user->role, ['super_admin', 'finance_admin'], true)
+                && ($invoice->campus_id != $user->campus_id || ($user->department_id && $invoice->department_id != $user->department_id))) {
+                continue;
+            }
             $failureReason = WebhookSettingService::evaluateContactEligibility($family, $channels);
+            if (($batch->webhook_type ?? 'monthly') === 'paid' && (!$invoice || !PaidInvoiceEligibility::eligible((int) $notif->invoice_id))) {
+                $failureReason = 'Paid invoice no longer qualifies for receipt delivery.';
+            }
+            if (($batch->webhook_type ?? 'monthly') === 'paid' && (int) $notif->attempts > 0) {
+                $failureReason = 'Previous HTTP acceptance must be reconciled before retrying.';
+            }
 
             if ($failureReason !== null) {
                 DB::table('notifications')->where('id', $notif->id)->update([
@@ -732,18 +864,19 @@ class BatchDeliveryService
                     'updated_at' => now(),
                 ]);
                 $retriedCount++;
+                $retryIds[] = $notif->id;
             }
         }
 
         if ($retriedCount > 0) {
             // Update batch status to queued and dispatch
-            DB::table('notification_batches')->where('id', $batch->id)->update([
+            DB::table('notification_batches')->where('id', $batch->id)->where('status', '!=', 'processing')->update([
                 'status' => 'queued',
                 'error' => null,
                 'updated_at' => now(),
             ]);
 
-            DispatchBatchToN8n::dispatch($batchId)->onQueue('notifications');
+            $this->enqueueDispatch($batchId, $retryIds, $batch->webhook_type ?? 'monthly');
         }
 
         return [
@@ -751,5 +884,21 @@ class BatchDeliveryService
             'retried_count' => $retriedCount,
             'message' => "Retried {$retriedCount} failed recipient(s) in Batch {$batchId}.",
         ];
+    }
+
+    private function enqueueDispatch(string $batchId, ?array $notificationIds, string $webhookType): void
+    {
+        if ($webhookType !== 'paid') {
+            DispatchBatchToN8n::dispatch($batchId, $notificationIds)->onQueue('notifications');
+            return;
+        }
+        // Every newly approved, explicitly selected paid notification uses the
+        // dedicated worker. Provenance determines eligibility, not queue routing.
+        // Existing jobs on the historical notifications queue are not moved.
+        $ids = DB::table('notifications')->where('batch_id', $batchId)
+            ->whereIn('id', $notificationIds ?? [])->pluck('id')->all();
+        if ($ids) {
+            DispatchBatchToN8n::dispatch($batchId, $ids)->onQueue('paid-future');
+        }
     }
 }

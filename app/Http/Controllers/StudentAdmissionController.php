@@ -2,6 +2,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\Money;
+use App\Services\GuardianNameResolver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -46,10 +47,17 @@ class StudentAdmissionController
         $en=DB::table('enrollments')->where('student_id',$student)->orderBy('id')->first();
         $details=DB::table('student_registration_details')->where('student_id',$student)->first();
         $family=DB::table('families')->where('id',$s->family_id)->first();
+        $resolvedGuardian = GuardianNameResolver::resolveStudent($s, $family, $details);
+        $hasSiblings = DB::table('students')->where('family_id', $s->family_id)->where('id', '!=', $student)->exists();
         $initial=array_merge((array)$details,(array)$s,[
             'registration_number'=>$s->gr_number,'family_code'=>$family?->family_code,
             'family_email'=>$family?->email,'family_whatsapp'=>$family?->whatsapp,
-            'guardian_name'=>$family?->guardian_name,'campus_id'=>$en?->campus_id,
+            'guardian_name'=>$resolvedGuardian['name'] !== GuardianNameResolver::NOT_PROVIDED ? $resolvedGuardian['name'] : '',
+            'guardian_name_override'=>GuardianNameResolver::clean($details?->guardian_name_override),
+            'is_guardian_override'=>$resolvedGuardian['is_override'],
+            'family_guardian_name'=>GuardianNameResolver::clean($family?->guardian_name),
+            'has_family_siblings'=>$hasSiblings,
+            'campus_id'=>$en?->campus_id,
             'department_id'=>$en?->department_id,'grade_label'=>$en?->grade_label,
             'subject_name'=>$en?->subject_name,'class_days_per_week'=>$en?->class_days_per_week,
             'currency'=>$en?->currency,
@@ -217,9 +225,11 @@ class StudentAdmissionController
                 $finalWhatsappVerified = $phoneChanged ? ($newVerified && $newOptIn) : ($newVerified ?: (bool)($curFamily->whatsapp_verified ?? false));
                 $finalEmailVerified = $emailChanged ? $newVerified : ($newVerified ?: (bool)($curFamily->email_verified ?? false));
 
-                DB::table('families')->where('id',$s->family_id)->update([
+                $submittedGuardian = GuardianNameResolver::clean($d['guardian_name'] ?? null);
+                $hasSiblings = DB::table('students')->where('family_id', $s->family_id)->where('id', '!=', $student)->exists();
+
+                $famUpdate = [
                     'family_code'=>$code,
-                    'guardian_name'=>$d['guardian_name']??null,
                     'email'=>$d['family_email'],
                     'whatsapp'=>$d['family_whatsapp'],
                     'contact_verified'=>$finalVerified,
@@ -227,7 +237,11 @@ class StudentAdmissionController
                     'email_verified'=>$finalEmailVerified,
                     'messaging_opt_in'=>$finalOptIn,
                     'updated_at'=>now(),
-                ]);
+                ];
+                if (!$hasSiblings && $submittedGuardian !== null) {
+                    $famUpdate['guardian_name'] = $submittedGuardian;
+                }
+                DB::table('families')->where('id',$s->family_id)->update($famUpdate);
 
                 if ($finalVerified !== (bool)$curFamily->contact_verified || $finalOptIn !== (bool)$curFamily->messaging_opt_in) {
                     DB::table('audit_logs')->insert([
@@ -248,9 +262,11 @@ class StudentAdmissionController
                 }
             }
 
+            $submittedGuardian = GuardianNameResolver::clean($d['guardian_name'] ?? null);
             DB::table('students')->where('id',$student)->update(['name'=>$d['name'],'gr_number'=>$d['registration_number'],'gender'=>$d['gender']??null,'date_of_admission'=>$d['date_of_admission']??null,'updated_at'=>now()]);
             $fields=['father_name','surname','dob','religion','last_institute','dob_words','place_of_birth','mother_tongue','nationality','area','current_address','permanent_address','physical_handicap','student_email','registration_date','session','class_admitted','section_admitted','section_current','challan_due_date','b_form','roll_number','house','phone_number','readmission_date','last_class','last_session','last_result'];
             $details=[];foreach($fields as $field)$details[$field]=$d[$field]??null;
+            $details['guardian_name_override'] = $submittedGuardian;
             $details['registration_number']=$d['registration_number'];$details['updated_at']=now();
             DB::table('student_registration_details')->where('student_id',$student)->update($details);
 
@@ -334,10 +350,9 @@ class StudentAdmissionController
             $now = now();
             $code = trim($data['family_code'] ?? '') ?: null;
             $existingFamily = $code === null ? null : DB::table('families')->where('family_code', $code)->lockForUpdate()->first();
-            if ($existingFamily && filled($data['guardian_name'] ?? null) && filled($existingFamily->guardian_name)
-                && strcasecmp(trim($data['guardian_name']), trim($existingFamily->guardian_name)) !== 0) {
-                throw ValidationException::withMessages(['family_code' => 'This family code belongs to another guardian. Verify the family before using it.']);
-            }
+            $submittedGuardian = GuardianNameResolver::clean($data['guardian_name'] ?? null);
+            $submittedFather = GuardianNameResolver::clean($data['father_name'] ?? null);
+
             if ($existingFamily) {
                 if (filled($existingFamily->email) && strcasecmp($existingFamily->email, $data['family_email']) !== 0) {
                     throw ValidationException::withMessages(['family_email' => 'This family number has a different email. Confirm the existing family before proceeding.']);
@@ -360,13 +375,16 @@ class StudentAdmissionController
             $verified = $request->boolean('contact_verified');
             $optIn = $request->boolean('messaging_opt_in');
             $familyId = $existingFamily?->id ?? DB::table('families')->insertGetId([
-                'family_code' => $code, 'guardian_name' => $data['guardian_name'] ?? ($data['father_name'] ?? null),
-                'email' => $data['family_email'], 'whatsapp' => $data['family_whatsapp'],
+                'family_code' => $code,
+                'guardian_name' => $submittedGuardian ?: ($submittedFather ?: null),
+                'email' => $data['family_email'],
+                'whatsapp' => $data['family_whatsapp'],
                 'contact_verified' => $verified,
                 'whatsapp_verified' => $verified,
                 'email_verified' => $verified,
                 'messaging_opt_in' => $optIn,
-                'created_at' => $now, 'updated_at' => $now,
+                'created_at' => $now,
+                'updated_at' => $now,
             ]);
 
             if ($verified || $optIn) {
@@ -413,6 +431,9 @@ class StudentAdmissionController
             $details = ['student_id' => $studentId, 'created_at' => $now, 'updated_at' => $now];
             foreach ($extraFields as $key) {
                 $details[$key] = $data[$key] ?? null;
+            }
+            if ($submittedGuardian !== null) {
+                $details['guardian_name_override'] = $submittedGuardian;
             }
             DB::table('student_registration_details')->insert($details);
             if ($fee > 0) {

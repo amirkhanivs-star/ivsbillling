@@ -15,7 +15,7 @@
  @forelse($students as $student)
  <tr><td>{{ $loop->iteration+($students->currentPage()-1)*$students->perPage() }}</td>
  <td><div class="iqra-name"><span class="iqra-avatar">♙</span><div><a class="iqra-highlight" href="/manage-student/{{ $student->id }}">{{ $student->name }}</a><div class="iqra-sub">GR: {{ $student->gr_number }} @if($student->family_code) · Family: {{ $student->family_code }} @endif</div>@if($student->date_of_admission)<div class="iqra-sub">{{ \Carbon\Carbon::parse($student->date_of_admission)->format('d M Y') }}</div>@endif</div></div></td>
- <td><span class="iqra-highlight">{{ $student->father_name ?: $student->guardian_name ?: '—' }}</span></td>
+ <td><span class="iqra-highlight">{{ \App\Services\GuardianNameResolver::forStudent($student) }}</span></td>
  <td>{{ $student->whatsapp ?: '—' }}</td><td><span class="iqra-highlight">{{ $student->current_class ?: '—' }}</span></td>
  <td>@if($student->monthly_fee_minor!==null){{ $student->fee_currency }} {{ \App\Services\Money::format((int)$student->monthly_fee_minor) }}@else — @endif</td>
  <td><span class="iqra-status {{ $student->status }}">{{ ucfirst($student->status) }}</span></td>

@@ -1,0 +1,17 @@
+diff --git a/app/Jobs/DispatchBatchToN8n.php b/app/Jobs/DispatchBatchToN8n.php
+--- a/app/Jobs/DispatchBatchToN8n.php
++++ b/app/Jobs/DispatchBatchToN8n.php
+@@ -23,7 +23,12 @@
+     public int $timeout = 300;
+     public array $backoff = [60, 300, 900];
+ 
+-    public function __construct(public string $batchId, public ?array $selectedNotificationIds = null) {}
++    public ?array $selectedNotificationIds = null;
++
++    public function __construct(public string $batchId, ?array $selectedNotificationIds = null)
++    {
++        $this->selectedNotificationIds = $selectedNotificationIds;
++    }
+ 
+     public function handle(): void
+     {

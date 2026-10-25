@@ -1,5 +1,5 @@
 @extends('layouts.app')
-@section('title', request('paid_only') ? 'Paid Invoices Review & Batch Delivery' : 'Monthly Invoices Review & Batch Delivery')
+@section('title', $currentTab === 'paid' ? 'Paid Invoices Review & Batch Delivery' : 'Monthly Invoices Review & Batch Delivery')
 @section('content')
 <link rel="stylesheet" href="{{ asset('assets/iqra-challan.css') }}">
 <style>
@@ -183,6 +183,12 @@
             <div class="kpi-label">📅 Billing Month</div>
             <form method="get" action="/invoices" id="month-selector-form" style="margin:4px 0 0 0;">
                 <input type="hidden" name="tab" value="{{ $currentTab }}">
+                @if($currentTab === 'paid')
+                    <input type="hidden" name="paid_status" value="{{ $currentPaidStatus }}">
+                    <input type="hidden" name="per_page" value="{{ $perPage }}">
+                    @if(request()->filled('search'))<input type="hidden" name="search" value="{{ request('search') }}">@endif
+                    @if(request()->filled('contact_status'))<input type="hidden" name="contact_status" value="{{ request('contact_status') }}">@endif
+                @endif
                 @if(!empty($currentFilters['grade']))
                     <input type="hidden" name="grade" value="{{ $currentFilters['grade'] }}">
                 @endif
@@ -555,9 +561,57 @@
 
     {{-- TAB: PAID INVOICES --}}
     @elseif($currentTab === 'paid')
+        <section id="paid-invoice-workflow" data-paid-stage="{{ $currentPaidStatus }}">
+        <div style="margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+            <h2 style="font-size:18px; font-weight:800; margin:0; color:#0f172a;">Paid Invoices · Review &amp; Outbound Delivery</h2>
+            <span id="paid-live-status" role="status" aria-live="polite" class="muted" style="font-size:12px;">Status updates automatically.</span>
+        </div>
+        <nav class="iq-subtabs-bar" aria-label="Paid invoice stages" style="display:flex; gap:8px; margin-bottom:14px; border-bottom:2px solid #e2e8f0; padding-bottom:10px; flex-wrap:wrap;">
+            @foreach(['unqueued' => 'Unqueued', 'queued' => 'In Queue', 'processing' => 'Processing', 'submitted' => 'Submitted', 'attention' => 'Needs Attention', 'all' => 'All Paid Invoices'] as $stage => $label)
+                <a href="{{ request()->fullUrlWithQuery(['tab' => 'paid', 'period' => $selectedPeriod, 'paid_status' => $stage, 'page' => null, 'paid_tracking' => null, 'paid_refresh' => null]) }}"
+                   data-paid-tab="{{ $stage }}"
+                   @if($currentPaidStatus === $stage) aria-current="page" @endif
+                   class="btn small {{ $currentPaidStatus === $stage ? 'green' : 'gray' }}"
+                   style="font-weight:700; padding:6px 14px; border-radius:20px; text-decoration:none; display:inline-flex; align-items:center; gap:6px;">
+                    {{ $label }}
+                    <span class="badge" data-paid-count="{{ $stage }}" style="background:rgba(255,255,255,0.3); padding:1px 6px; border-radius:10px;">{{ number_format($paidWorkflowStats[$stage === 'all' ? 'total' : $stage] ?? 0) }}</span>
+                </a>
+            @endforeach
+        </nav>
+
+        <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:14px 18px; margin-bottom:14px;">
+            @if($currentPaidStatus === 'queued')
+                <strong>Staged paid invoices awaiting dispatch.</strong> Select invoices and click Send Selected. Their progress appears here automatically.
+                @if(($paidWorkflowStats['queued'] ?? 0) > 0)
+                    <form id="paid-queued-send-form" method="post" action="{{ route('invoices.paid.send_queue') }}" style="margin-top:12px;">
+                        @csrf
+                        <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+                        @foreach(['search', 'campus_id', 'department_id', 'grade', 'contact_status', 'send_mode', 'per_page', 'page'] as $contextKey)
+                            @if(is_scalar(request()->query($contextKey)) && (string)request()->query($contextKey) !== '')
+                                <input type="hidden" name="{{ $contextKey }}" value="{{ request()->query($contextKey) }}">
+                            @endif
+                        @endforeach
+                        <button type="submit" class="btn green" id="btn-send-queued-paid">Send Selected Queued Invoices</button>
+                    </form>
+                @endif
+            @elseif($currentPaidStatus === 'processing')
+                <strong>Paid invoices are being dispatched.</strong> They move to Submitted after the paid webhook accepts them. No further processing action is needed.
+            @elseif($currentPaidStatus === 'submitted')
+                <strong>Paid webhook requests accepted.</strong> This includes later Delivered and Read states. Already submitted invoices cannot be selected again.
+            @elseif($currentPaidStatus === 'attention')
+                <strong>Paid dispatches need review.</strong> Failed, blocked and stalled invoices are listed below with their recorded details. Review acceptance evidence before retrying.
+            @elseif($currentPaidStatus === 'all')
+                <strong>All Paid Invoices:</strong> All delivery states matching the current period and filters.
+            @else
+                <strong>Unqueued paid invoices:</strong> Select invoices and approve Add to Queue. Staging sends nothing until Send Selected is clicked.
+            @endif
+        </div>
+
         {{-- FILTERS BAR --}}
-        <form method="get" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
+        <form method="get" id="paid-filter-form" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
+            <input type="hidden" name="per_page" value="{{ $perPage }}">
             <input type="hidden" name="tab" value="paid">
+            <input type="hidden" name="paid_status" value="{{ $currentPaidStatus ?? 'unqueued' }}">
             <input type="hidden" name="period" value="{{ $selectedPeriod }}">
 
             @if(in_array(auth()->user()->role, ['super_admin', 'finance_admin'], true))
@@ -598,11 +652,11 @@
             </select>
 
             <button type="submit" class="btn small" style="background:#16a34a; color:#fff; font-weight:600; padding:6px 14px;">Filter</button>
-            <a href="?tab=paid&period={{ $selectedPeriod }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
+            <a href="?tab=paid&period={{ $selectedPeriod }}&paid_status={{ $currentPaidStatus ?? 'unqueued' }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
         </form>
 
         {{-- SELECTION RECONCILIATION & SNAPSHOT BANNER --}}
-        @if($selectionSnapshot)
+        @if($selectionSnapshot && in_array($currentPaidStatus ?? 'unqueued', ['unqueued', 'all'], true))
             <div class="batch-snapshot-card" style="border-left-color:#16a34a;">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
                     <div>
@@ -630,7 +684,7 @@
                         @if(!empty($selectionSnapshot['contact_ineligible_count']))
                             <strong>{{ $selectionSnapshot['contact_ineligible_count'] }}</strong> is excluded pending contact verification/consent.
                         @endif
-                        This leaves exactly <strong>{{ number_format($selectionSnapshot['total_eligible_recipients']) }} eligible paid invoices to dispatch</strong> to the <strong>Paid Invoice Webhook</strong> (<code>invoice.paid.batch</code>).
+                        This leaves exactly <strong>{{ number_format($selectionSnapshot['total_eligible_recipients']) }} eligible paid invoices ready to queue</strong>.
                     </div>
                 </div>
             </div>
@@ -639,8 +693,11 @@
         {{-- BATCH ACTION & SEND CONTROLS --}}
         <form method="post" action="/invoices/send-batch" id="iq-send-form">
             @csrf
+            <input type="hidden" name="per_page" value="{{ $perPage }}">
+            @if(request()->filled('page'))<input type="hidden" name="page" value="{{ request('page') }}">@endif
             <input type="hidden" name="webhook_type" value="paid">
             <input type="hidden" name="paid_only" value="1">
+            <input type="hidden" name="action_type" value="add_to_queue">
             <input type="hidden" name="selection_mode" id="selection-mode" value="page">
             <input type="hidden" name="campus_id" value="{{ request('campus_id') }}">
             <input type="hidden" name="department_id" value="{{ request('department_id') }}">
@@ -657,35 +714,37 @@
                 @endif
             </div>
 
-            <div class="selection-toggle-bar">
-                <span style="font-size:12px; font-weight:700; color:#475569;">Selection Scope:</span>
-                <button type="button" class="btn-toggle-select active" id="btn-scope-page">
-                    Select Current Page ({{ $paidInvoicesPage ? $paidInvoicesPage->count() : 0 }})
-                </button>
-                <button type="button" class="btn-toggle-select" id="btn-scope-all">
-                    Select All Matching Filters ({{ number_format($selectionSnapshot['total_eligible_recipients'] ?? 0) }} Eligible Invoices)
-                </button>
-                <button type="button" class="btn-toggle-select" id="btn-scope-clear" style="margin-left:auto; color:#ef4444; border-color:#fca5a5;">
-                    Clear Selection
-                </button>
-            </div>
-
-            <div class="iq-send-controls" style="display:flex; justify-content:space-between; align-items:center; margin:15px 0; background:#f8fafc; padding:12px 16px; border-radius:6px; border:1px solid #e2e8f0; flex-wrap:wrap; gap:12px;">
-                <div style="display:flex; align-items:center; gap:15px;">
-                    <label style="font-weight:600;"><input type="checkbox" name="channels[]" value="whatsapp" checked> WhatsApp via Paid Webhook</label>
-                    <label style="font-weight:600;"><input type="checkbox" name="channels[]" value="email"> Email via Paid Webhook</label>
-                    <span class="muted" style="font-size:11px;">Sends to Paid n8n Webhook only (<code>invoice.paid.batch</code>).</span>
-                </div>
-                <div style="display:flex; align-items:center; gap:12px;">
-                    <label style="font-size:12px; font-weight:700; color:#1e293b; display:flex; align-items:center; gap:6px; cursor:pointer;">
-                        <input type="checkbox" name="review_confirmed" value="1" id="review-confirmed-input" required>
-                        I have reviewed the selected paid invoices &amp; payment receipts, and approve this delivery batch
-                    </label>
-                    <button class="btn green" type="submit" id="btn-submit-send" style="background:#16a34a; color:#fff; font-size:13px; font-weight:700; padding:8px 18px; border:none; border-radius:4px; cursor:pointer;">
-                        Queue Approved Paid Batch to Webhook
+            @if(in_array($currentPaidStatus ?? 'unqueued', ['unqueued', 'all'], true))
+                <div class="selection-toggle-bar">
+                    <span style="font-size:12px; font-weight:700; color:#475569;">Selection Scope:</span>
+                    <button type="button" class="btn-toggle-select active" id="btn-scope-page">
+                        Select Current Page ({{ $paidInvoicesPage ? $paidInvoicesPage->count() : 0 }})
+                    </button>
+                    <button type="button" class="btn-toggle-select" id="btn-scope-all">
+                        Select All Matching Filters ({{ number_format($selectionSnapshot['total_eligible_recipients'] ?? 0) }} Eligible Invoices)
+                    </button>
+                    <button type="button" class="btn-toggle-select" id="btn-scope-clear" style="margin-left:auto; color:#ef4444; border-color:#fca5a5;">
+                        Clear Selection
                     </button>
                 </div>
-            </div>
+
+                <div class="iq-send-controls" style="display:flex; justify-content:space-between; align-items:center; margin:15px 0; background:#f8fafc; padding:12px 16px; border-radius:6px; border:1px solid #e2e8f0; flex-wrap:wrap; gap:12px;">
+                    <div style="display:flex; align-items:center; gap:15px;">
+                        <label style="font-weight:600;"><input type="checkbox" name="channels[]" value="whatsapp" checked> WhatsApp via Paid Webhook</label>
+                        <label style="font-weight:600;"><input type="checkbox" name="channels[]" value="email"> Email via Paid Webhook</label>
+                        <span class="muted" style="font-size:11px;">Adds to delivery queue (<code>invoice.paid.batch</code>). Webhooks are sent from "In Queue" tab.</span>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <label style="font-size:12px; font-weight:700; color:#1e293b; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                            <input type="checkbox" name="review_confirmed" value="1" id="review-confirmed-input" required>
+                            I have reviewed the selected paid invoices &amp; payment receipts, and approve this delivery batch
+                        </label>
+                        <button class="btn green" type="submit" id="btn-submit-send" style="background:#16a34a; color:#fff; font-size:13px; font-weight:700; padding:8px 18px; border:none; border-radius:4px; cursor:pointer;">
+                            📥 Add to Queue <span style="font-size:11px; opacity:0.9;">(Queue Approved Paid Batch to Webhook)</span>
+                        </button>
+                    </div>
+                </div>
+            @endif
 
             {{-- PAID INVOICES TABLE --}}
             <div class="table-wrap">
@@ -707,7 +766,13 @@
                     @forelse($paidInvoicesPage ?? [] as $row)
                         <tr @if($row->is_already_queued_or_sent) style="background:#fcfdfd; opacity:0.85;" @endif>
                             <td>
-                                @if($row->is_already_queued_or_sent)
+                                @if(($currentPaidStatus ?? 'unqueued') === 'queued' && $row->paid_workflow_stage === 'queued' && (int) ($row->notification?->attempts ?? 0) === 0)
+                                    <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->id }}"
+                                           form="paid-queued-send-form"
+                                           data-invoice="{{ $row->invoice_number }}"
+                                           data-family="{{ $row->family_code }}"
+                                           title="Select this queued invoice for dispatch">
+                                @elseif($row->is_already_queued_or_sent || in_array($currentPaidStatus ?? 'unqueued', ['queued', 'submitted'], true))
                                     <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->id }}"
                                            data-invoice="{{ $row->invoice_number }}"
                                            data-family="{{ $row->family_code }}"
@@ -790,30 +855,16 @@
                                 @endif
                             </td>
                             <td>
-                                @if($row->is_already_queued_or_sent)
-                                    @if(in_array($row->delivery_status, ['submitted', 'delivered', 'read'], true))
-                                        <span class="badge" style="background:#dcfce7; color:#166534; font-size:10px; padding:2px 6px; font-weight:700;">
-                                            Sent ({{ strtoupper($row->delivery_status) }})
-                                        </span>
-                                    @elseif($row->delivery_status === 'queued')
-                                        <span class="badge" style="background:#e0f2fe; color:#0369a1; font-size:10px; padding:2px 6px; font-weight:700;">
-                                            Queued
-                                        </span>
-                                    @endif
-                                    @if($row->delivery_batch_id)
-                                        <div class="muted" style="font-size:10px; font-family:monospace; margin-top:2px;">{{ $row->delivery_batch_id }}</div>
-                                    @endif
-                                @elseif($row->delivery_status === 'failed')
-                                    <span class="badge" style="background:#fee2e2; color:#991b1b; font-size:10px; padding:2px 6px; font-weight:700;">
-                                        Failed
-                                    </span>
-                                    @if($row->delivery_error)
-                                        <div class="muted" style="font-size:10px; color:#dc2626; margin-top:2px;" title="{{ $row->delivery_error }}">{{ \Illuminate\Support\Str::limit($row->delivery_error, 25) }}</div>
-                                    @endif
-                                @else
-                                    <span class="badge" style="background:#f1f5f9; color:#475569; font-size:10px; padding:2px 6px;">
-                                        Ready to Send
-                                    </span>
+                                @php($paidBadgeLabels = ['unqueued' => 'Unqueued', 'queued' => 'In Queue', 'processing' => 'Processing', 'submitted' => 'Submitted', 'delivered' => 'Submitted (Delivered)', 'read' => 'Submitted (Read)', 'failed' => 'Failed', 'blocked' => 'Blocked', 'stalled' => 'Stalled', 'qa_suppressed' => 'Suppressed', 'attention' => 'Needs Attention'])
+                                @php($paidBadgeColor = ['submitted' => '#166534', 'processing' => '#1e40af', 'queued' => '#0369a1', 'attention' => '#991b1b', 'unqueued' => '#475569'][$row->paid_workflow_stage])
+                                <span class="badge" data-paid-state="{{ $row->paid_workflow_stage }}" style="background:#f1f5f9; color:{{ $paidBadgeColor }}; font-size:11px; padding:3px 7px; font-weight:700;">
+                                    {{ $paidBadgeLabels[$row->delivery_status] ?? 'Needs Attention' }}
+                                </span>
+                                @if($row->delivery_batch_id)
+                                    <div class="muted" style="font-size:10px; font-family:monospace; margin-top:2px;">{{ $row->delivery_batch_id }}</div>
+                                @endif
+                                @if($row->delivery_error && $row->paid_workflow_stage === 'attention')
+                                    <div style="font-size:11px; color:#991b1b; margin-top:4px;">{{ $row->delivery_error }}</div>
                                 @endif
                             </td>
                             <td style="text-align:right;">
@@ -832,8 +883,16 @@
                     @empty
                         <tr>
                             <td colspan="9" style="text-align:center; padding:30px; color:#64748b;">
-                                <strong>No paid invoices found matching the current filters for {{ $dashboardStats['selected_month'] }}.</strong><br>
-                                <span class="muted" style="font-size:12px;">Invoices become visible here once full parent payment is verified and recorded.</span>
+                                @if(($currentPaidStatus ?? 'unqueued') === 'queued')
+                                    <strong>No queued paid invoices found waiting to be sent for {{ $dashboardStats['selected_month'] }}.</strong><br>
+                                    <span class="muted" style="font-size:12px;">Add invoices to the queue from the "Unqueued" subtab.</span>
+                                @elseif(($currentPaidStatus ?? 'unqueued') === 'submitted')
+                                    <strong>No submitted paid invoices found for {{ $dashboardStats['selected_month'] }}.</strong><br>
+                                    <span class="muted" style="font-size:12px;">Invoices appear here once dispatched to the Paid Webhook.</span>
+                                @else
+                                    <strong>No paid invoices found matching the current filters for {{ $dashboardStats['selected_month'] }}.</strong><br>
+                                    <span class="muted" style="font-size:12px;">Invoices become visible here once full parent payment is verified and recorded.</span>
+                                @endif
                             </td>
                         </tr>
                     @endforelse
@@ -841,14 +900,18 @@
                 </table>
             </div>
 
-            <div class="iq-confirm" id="send-preview" role="status" aria-live="polite" style="margin-top:14px; padding:12px 16px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; font-weight:600; color:#334155;">
-                0 invoice(s) selected on this page. Select invoices or choose "Select All Matching Filters" to approve batch delivery.
-            </div>
+            @if(in_array($currentPaidStatus ?? 'unqueued', ['unqueued', 'all'], true))
+                <div class="iq-confirm" id="send-preview" role="status" aria-live="polite" style="margin-top:14px; padding:12px 16px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; font-weight:600; color:#334155;">
+                    0 invoice(s) selected on this page. Select invoices or choose "Select All Matching Filters" to approve batch delivery.
+                </div>
+            @endif
         </form>
 
         <div style="margin-top:14px;">
             {{ $paidInvoicesPage ? $paidInvoicesPage->appends(request()->query())->links() : '' }}
         </div>
+
+        </section>
 
     {{-- TAB 2: PROCESSING --}}
     @elseif($currentTab === 'processing')
@@ -937,7 +1000,7 @@
                                 <td><strong>{{ $b->billing_period ?: '—' }}</strong></td>
                                 <td>
                                     <strong>{{ number_format($b->total_recipients) }}</strong>
-                                    <div class="muted" style="font-size:10.5px;">{{ $b->queued_recipients }} queued</div>
+                                    <div class="muted" style="font-size:10.5px;">{{ $b->queued_recipients }} queued ? {{ $b->processing_recipients }} processing</div>
                                 </td>
                                 <td><span style="font-weight:700;">{{ $b->chunks_total }}</span></td>
                                 <td>
@@ -1400,6 +1463,18 @@
 (()=>{
     const boxes = [...document.querySelectorAll('.invoice-check')];
     const all = document.getElementById('invoice-select-all');
+    const queueSendForm = document.getElementById('paid-queued-send-form');
+    queueSendForm?.addEventListener('submit', event => {
+        const selected = boxes.filter(box => box.checked && !box.disabled && box.form === queueSendForm);
+        if (!selected.length) {
+            event.preventDefault();
+            alert('Select at least one queued paid invoice first.');
+            return;
+        }
+        if (!confirm(`Send only ${selected.length} selected queued paid invoice(s) to the Paid Webhook? The other queued invoices will remain unsent.`)) {
+            event.preventDefault();
+        }
+    });
     const summary = document.getElementById('send-preview');
     const form = document.getElementById('iq-send-form');
     if (!form) return;
@@ -1497,15 +1572,20 @@
             return;
         }
 
+        const actionType = form.querySelector('input[name="action_type"]')?.value;
+        const isAddToQueue = isPaidTab && actionType === 'add_to_queue';
+
         if (selectionMode === 'all_matching') {
             if (serverTotalEligible === 0) {
                 e.preventDefault();
                 alert('No eligible recipients match the applied filters.');
                 return;
             }
-            const confirmMsg = isPaidTab
-                ? `Queue approved Paid Batch for ${serverTotalEligible} eligible paid invoices across ALL matching pages to the Paid Webhook?\n\nChannels: ${channels.join(' and ')}\n\nEvent: invoice.paid.batch`
-                : `Queue approved Monthly Batch for ${serverTotalEligible} eligible families across ALL matching pages to the Monthly Webhook?\n\nChannels: ${channels.join(' and ')}\n\nOne latest consolidated challan per family.`;
+            const confirmMsg = isAddToQueue
+                ? `Add ${serverTotalEligible} eligible paid invoice(s) across ALL matching pages to the delivery queue?\n\nNote: Adding to queue does NOT trigger webhooks. You will manually confirm and send them from the "In Queue" tab.`
+                : (isPaidTab
+                    ? `Queue approved Paid Batch for ${serverTotalEligible} eligible paid invoices across ALL matching pages to the Paid Webhook?\n\nChannels: ${channels.join(' and ')}\n\nEvent: invoice.paid.batch`
+                    : `Queue approved Monthly Batch for ${serverTotalEligible} eligible families across ALL matching pages to the Monthly Webhook?\n\nChannels: ${channels.join(' and ')}\n\nOne latest consolidated challan per family.`);
             if (!confirm(confirmMsg)) {
                 e.preventDefault();
             }
@@ -1522,9 +1602,11 @@
             return;
         }
 
-        const confirmMsg = isPaidTab
-            ? `Queue ${chosen.length} selected paid invoices on this page to the Paid Webhook?\n\nChannels: ${channels.join(' and ')}\n\nEvent: invoice.paid.batch`
-            : `Queue ${chosen.length} selected family challans on this page to the Monthly Webhook?\n\nChannels: ${channels.join(' and ')}`;
+        const confirmMsg = isAddToQueue
+            ? `Add ${chosen.length} selected paid invoice(s) on this page to the delivery queue?\n\nNote: Adding to queue does NOT trigger webhooks. You will manually confirm and send them from the "In Queue" tab.`
+            : (isPaidTab
+                ? `Queue ${chosen.length} selected paid invoices on this page to the Paid Webhook?\n\nChannels: ${channels.join(' and ')}\n\nEvent: invoice.paid.batch`
+                : `Queue ${chosen.length} selected family challans on this page to the Monthly Webhook?\n\nChannels: ${channels.join(' and ')}`);
         if (!confirm(confirmMsg)) {
             e.preventDefault();
         }
@@ -1533,6 +1615,72 @@
     update();
 })();
 </script>
+
+
+@if($currentTab === 'paid')
+<script>
+(() => {
+    const root = document.getElementById('paid-invoice-workflow');
+    if (!root) return;
+    const liveStatus = document.getElementById('paid-live-status');
+    const initialSignature = @json($paidRefreshSignature);
+    let editingFilters = false;
+    let submitting = false;
+    let lastInteraction = 0;
+    root.addEventListener('input', event => {
+        if (!event.target.matches('input[type="checkbox"]')) editingFilters = true;
+        lastInteraction = Date.now();
+    });
+    root.addEventListener('change', event => {
+        if (!event.target.matches('.invoice-check, #invoice-select-all')) editingFilters = true;
+        lastInteraction = Date.now();
+    });
+    root.addEventListener('submit', event => {
+        // Form validation may cancel submission. Never reload while a POST starts.
+        if (!event.defaultPrevented) submitting = true;
+    });
+    const interactionBlocksRefresh = () => submitting || editingFilters || document.hidden
+        || document.activeElement?.closest('#month-selector-form')
+        || root.querySelector('.invoice-check:checked')
+        || root.querySelector('#selection-mode')?.value === 'all_matching'
+        || Date.now() - lastInteraction < 2000
+        || (root.contains(document.activeElement)
+            && document.activeElement.matches('input:not([type="checkbox"]):not([type="hidden"]), select, textarea'));
+    async function pollPaidWorkflow() {
+        try {
+            if (interactionBlocksRefresh()) {
+                if (!document.hidden) liveStatus.textContent = 'Updates paused while you select or edit.';
+                return;
+            }
+            const endpoint = new URL(window.location.href);
+            endpoint.searchParams.set('paid_refresh', '1');
+            const response = await fetch(endpoint, {headers: {'Accept': 'application/json'}, cache: 'no-store'});
+            if (!response.ok || response.redirected) return;
+            const state = await response.json();
+            // Recheck after the request: the user may have begun selecting meanwhile.
+            if (interactionBlocksRefresh()) return;
+            const destination = new URL(window.location.href);
+            if (state.tracking_stage && state.tracking_stage !== root.dataset.paidStage) {
+                destination.searchParams.set('paid_status', state.tracking_stage);
+                destination.searchParams.delete('page');
+                destination.searchParams.delete('paid_refresh');
+                window.location.replace(destination);
+            } else if (state.signature !== initialSignature) {
+                // Same-stage refresh preserves the current filters, page and page size.
+                window.location.reload();
+            } else {
+                liveStatus.textContent = 'Status is up to date.';
+            }
+        } catch (_) {
+            liveStatus.textContent = 'Status refresh unavailable; you can refresh manually.';
+        } finally {
+            window.setTimeout(pollPaidWorkflow, 5000);
+        }
+    }
+    window.setTimeout(pollPaidWorkflow, 5000);
+})();
+</script>
+@endif
 
 {{-- FIX CONTACT MODAL DIALOG --}}
 <div id="fix-contact-backdrop" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,0.6); z-index:9999; align-items:center; justify-content:center;">

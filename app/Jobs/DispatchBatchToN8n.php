@@ -3,6 +3,8 @@
 namespace App\Jobs;
 
 use App\Services\InvoicePayloadBuilder;
+use App\Services\BatchDispatchLock;
+use App\Services\PaidInvoiceEligibility;
 use App\Services\Staging\DatabaseSafetyGuard;
 use App\Services\WebhookSettingService;
 use Illuminate\Bus\Queueable;
@@ -21,51 +23,79 @@ class DispatchBatchToN8n implements ShouldQueue
 
     public int $tries = 3;
     public int $timeout = 300;
+    public int $maxExceptions = 3;
+    public bool $failOnTimeout = true;
     public array $backoff = [60, 300, 900];
 
-    public function __construct(public string $batchId) {}
+    public ?array $selectedNotificationIds = null;
+
+    public function __construct(public string $batchId, ?array $selectedNotificationIds = null)
+    {
+        $this->selectedNotificationIds = $selectedNotificationIds;
+    }
+
+
+    public function retryUntil(): \DateTimeInterface
+    {
+        // Stored in the payload. A two-hour window bounds 30-second contention
+        // releases below the database jobs.attempts unsigned-tinyint limit.
+        return now()->addHours(2);
+    }
 
     public function handle(): void
     {
+        if ($this->queue === 'paid-future' && !config('services.n8n.paid_automatic_dispatch', true)) {
+            if (!$this->job) {
+                throw new RuntimeException('Automatic paid dispatch is disabled.');
+            }
+            $this->release(60);
+            return;
+        }
+        $lock = app(BatchDispatchLock::class);
+        if (!$lock->acquire($this->batchId)) {
+            if (!$this->job) {
+                throw new RuntimeException('Batch is busy; retry this explicit selection later.');
+            }
+            $this->release(30);
+            return;
+        }
+
+        try {
+            $this->dispatchLocked();
+        } catch (\Throwable $e) {
+            // Transport exception messages can contain secret URLs.
+            $this->recover('Dispatch failed before completion ('.class_basename($e).').');
+            throw $e;
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function dispatchLocked(): void
+    {
+        $startedAt = microtime(true);
         $batch = DB::table('notification_batches')->where('batch_id', $this->batchId)->first();
-        if (!$batch) {
+        if (!$batch || in_array($batch->status, ['submitted', 'completed', 'qa_suppressed'], true)) {
             return;
         }
 
-        // Idempotency: if already submitted or completed, do not re-dispatch
-        if (in_array($batch->status, ['submitted', 'completed'], true)) {
-            return;
-        }
-
-        // Concurrency lock: atomically transition status to 'processing'
-        // This ensures two workers or retries cannot send the same batch concurrently
-        $claimed = DB::table('notification_batches')
-            ->where('batch_id', $this->batchId)
-            ->whereIn('status', ['queued', 'failed', 'partially_submitted'])
-            ->update([
-                'status' => 'processing',
+        if (($batch->webhook_type ?? 'monthly') === 'paid' && $this->selectedNotificationIds === null) {
+            DB::table('notification_batches')->where('id', $batch->id)->update([
+                'status' => 'blocked', 'error' => 'Legacy paid job has no explicit selection. Review and select invoices again.',
                 'updated_at' => now(),
             ]);
-
-        if ($claimed === 0) {
-            $current = DB::table('notification_batches')->where('batch_id', $this->batchId)->first();
-            if (!$current || in_array($current->status, ['submitted', 'completed', 'qa_suppressed', 'blocked'], true)) {
-                return;
-            }
-            // Allow recovery if previous processing attempt was stalled (updated > 10 minutes ago)
-            if ($current->status === 'processing') {
-                $recovered = DB::table('notification_batches')
-                    ->where('batch_id', $this->batchId)
-                    ->where('status', 'processing')
-                    ->where('updated_at', '<', now()->subMinutes(10))
-                    ->update(['updated_at' => now()]);
-
-                if (!$recovered) {
-                    // Actively processing under another worker
-                    return;
-                }
-            }
+            return;
         }
+
+        // The connection lock proves no other current worker owns this batch.
+        // Abandoned HTTP intent is ambiguous and must never be blindly replayed.
+        DB::table('notifications')->where('batch_id', $this->batchId)->where('status', 'processing')->update([
+            'status' => 'blocked', 'error' => 'Previous worker stopped during dispatch. Reconcile n8n acceptance before resending.',
+            'updated_at' => now(),
+        ]);
+        DB::table('notification_batches')->where('id', $batch->id)->update([
+            'status' => 'processing', 'error' => null, 'updated_at' => now(),
+        ]);
 
         // Safety guard: QA suppression
         if (config('services.notifications_disabled', false) || DatabaseSafetyGuard::isQaDatabase()) {
@@ -74,7 +104,7 @@ class DispatchBatchToN8n implements ShouldQueue
                 'error' => 'QA Portal: real notifications and external webhooks are disabled.',
                 'updated_at' => now(),
             ]);
-            DB::table('notifications')->where('batch_id', $batch->batch_id)->update([
+            $this->pendingNotifications()->update([
                 'status' => 'qa_suppressed',
                 'error' => 'QA Portal: real notifications and external webhooks are disabled.',
                 'updated_at' => now(),
@@ -93,7 +123,7 @@ class DispatchBatchToN8n implements ShouldQueue
                 'error' => $msg,
                 'updated_at' => now(),
             ]);
-            DB::table('notifications')->where('batch_id', $batch->batch_id)->update([
+            $this->pendingNotifications()->update([
                 'status' => 'blocked',
                 'error' => $msg,
                 'updated_at' => now(),
@@ -102,25 +132,10 @@ class DispatchBatchToN8n implements ShouldQueue
         }
 
         // Fetch all notifications belonging to this batch that need dispatching
-        $notifications = DB::table('notifications')
-            ->where('batch_id', $batch->batch_id)
-            ->whereIn('status', ['queued', 'failed'])
-            ->get();
+        $notifications = $this->pendingNotifications()->get();
 
         if ($notifications->isEmpty()) {
-            // Check if all notifications in batch are already submitted
-            $unsubmittedCount = DB::table('notifications')
-                ->where('batch_id', $batch->batch_id)
-                ->whereIn('status', ['queued', 'failed', 'blocked'])
-                ->count();
-
-            if ($unsubmittedCount === 0) {
-                DB::table('notification_batches')->where('id', $batch->id)->update([
-                    'status' => 'submitted',
-                    'submitted_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
+            $this->reconcileBatch();
             return;
         }
 
@@ -130,8 +145,23 @@ class DispatchBatchToN8n implements ShouldQueue
         $validNotifications = [];
 
         foreach ($notifications as $notification) {
+            if ($webhookType === 'paid' && (int) $notification->attempts > 0) {
+                DB::table('notifications')->where('id', $notification->id)->update([
+                    'status' => 'blocked', 'error' => 'Previous HTTP attempt requires acceptance reconciliation before resending.', 'updated_at' => now(),
+                ]);
+                continue;
+            }
+            // The dedicated queue is for explicitly selected paid notifications,
+            // including imported invoices whose receipts meet the eligibility rules.
+            if ($this->queue === 'paid-future' && $webhookType !== 'paid') {
+                DB::table('notifications')->where('id', $notification->id)->update([
+                    'status' => 'blocked', 'error' => 'This queue accepts paid invoice notifications only.', 'updated_at' => now(),
+                ]);
+                continue;
+            }
             // Check if superseded
             if ($notification->is_superseded) {
+                DB::table('notifications')->where('id', $notification->id)->update(['status' => 'superseded', 'updated_at' => now()]);
                 continue;
             }
 
@@ -147,7 +177,15 @@ class DispatchBatchToN8n implements ShouldQueue
             }
 
             $family = DB::table('families')->where('id', $invoice->family_id)->first();
-            if (!$family) {
+            $channels = json_decode($batch->channels ?: '["whatsapp"]', true, 512, JSON_THROW_ON_ERROR);
+            $eligibilityError = WebhookSettingService::evaluateContactEligibility($family, $channels);
+            if ($webhookType === 'paid' && !PaidInvoiceEligibility::eligible((int) $notification->invoice_id)) {
+                $eligibilityError = 'Paid invoice is not fully paid or lacks a qualifying positive, unreversed receipt (portal provenance or historical cutoff).';
+            }
+            if ($eligibilityError !== null) {
+                DB::table('notifications')->where('id', $notification->id)->update([
+                    'status' => 'blocked', 'error' => $eligibilityError, 'updated_at' => now(),
+                ]);
                 continue;
             }
 
@@ -158,29 +196,22 @@ class DispatchBatchToN8n implements ShouldQueue
         }
 
         if (empty($recipientPayloads)) {
-            $unsubmittedCount = DB::table('notifications')
-                ->where('batch_id', $batch->batch_id)
-                ->whereIn('status', ['queued', 'failed'])
-                ->count();
-
-            if ($unsubmittedCount === 0) {
-                DB::table('notification_batches')->where('id', $batch->id)->update([
-                    'status' => 'submitted',
-                    'submitted_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
+            $this->reconcileBatch();
             return;
         }
 
         // Chunking configuration
-        $chunkSize = config('services.n8n.batch_chunk_size', 50);
+        $chunkSize = max(1, (int) config('services.n8n.batch_chunk_size', 50));
         $chunks = array_chunk($recipientPayloads, $chunkSize);
         $notificationChunks = array_chunk($validNotifications, $chunkSize);
         $totalChunks = count($chunks);
 
+        $previousChunksSent = (int) $batch->chunks_sent;
+        $otherQueued = DB::table('notifications')->where('batch_id', $this->batchId)
+            ->whereIn('status', ['queued', 'failed'])
+            ->whereNotIn('id', array_map(fn ($n) => $n->id, $validNotifications))->count();
         DB::table('notification_batches')->where('id', $batch->id)->update([
-            'chunks_total' => $totalChunks,
+            'chunks_total' => $previousChunksSent + $totalChunks + (int) ceil($otherQueued / $chunkSize),
             'updated_at' => now(),
         ]);
 
@@ -194,6 +225,12 @@ class DispatchBatchToN8n implements ShouldQueue
         $chunksSent = 0;
 
         foreach ($chunks as $idx => $chunkPayloads) {
+            if (microtime(true) - $startedAt > 240 && $this->job) {
+                // Bound each reservation even on Windows workers without pcntl.
+                $this->reconcileBatch();
+                $this->release(30);
+                return;
+            }
             $chunkIndex = $idx + 1;
             $notifChunk = $notificationChunks[$idx];
 
@@ -225,9 +262,16 @@ class DispatchBatchToN8n implements ShouldQueue
                 $headers['X-IQRA-Signature'] = hash_hmac('sha256', $body, $setting->secret);
             }
 
+            foreach ($notifChunk as $pending) {
+                if ($webhookType === 'paid' && !PaidInvoiceEligibility::eligible((int) $pending->invoice_id)) {
+                    throw new RuntimeException('Paid eligibility changed during payload preparation.');
+                }
+            }
+            // Persist HTTP intent first; a killed worker must not cause blind replay.
             // Update notifications in chunk with payload & attempt
             $notifIds = array_map(fn($n) => $n->id, $notifChunk);
             DB::table('notifications')->whereIn('id', $notifIds)->update([
+                'status' => 'processing',
                 'chunk_index' => $chunkIndex,
                 'attempts' => DB::raw('attempts + 1'),
                 'last_attempt_at' => now(),
@@ -236,7 +280,9 @@ class DispatchBatchToN8n implements ShouldQueue
             ]);
 
             try {
-                $response = Http::timeout(30)
+                $lastResponseCode = null;
+                $lastResponseBody = null;
+                $response = Http::connectTimeout(10)->timeout(30)
                     ->withHeaders($headers)
                     ->withBody($body, 'application/json')
                     ->post($setting->url);
@@ -266,30 +312,30 @@ class DispatchBatchToN8n implements ShouldQueue
 
                 $chunksSent++;
                 DB::table('notification_batches')->where('id', $batch->id)->update([
-                    'chunks_sent' => $chunksSent,
+                    'chunks_sent' => $previousChunksSent + $chunksSent,
                     'response_code' => $lastResponseCode,
                     'response_body' => $lastResponseBody,
                     'error' => null,
                     'updated_at' => now(),
                 ]);
             } catch (\Throwable $e) {
-                // Mark chunk notifications as failed
+                // Preserve uncertainty for paid sends; retain the existing monthly retry behavior.
                 DB::table('notifications')
                     ->whereIn('id', $notifIds)
                     ->whereNotIn('status', ['submitted', 'delivered', 'read'])
                     ->update([
-                        'status' => 'failed',
-                        'response_code' => $lastResponseCode ?? 500,
+                        'status' => $webhookType === 'paid' ? 'blocked' : 'failed',
+                        'response_code' => $lastResponseCode,
                         'response_body' => $lastResponseBody,
-                        'error' => substr($e->getMessage(), 0, 1000),
+                        'error' => $webhookType === 'paid' ? 'HTTP acceptance uncertain; reconcile n8n before retrying ('.class_basename($e).').' : 'Webhook HTTP '.($lastResponseCode ?? 'connection failure'),
                         'updated_at' => now(),
                     ]);
 
                 DB::table('notification_batches')->where('id', $batch->id)->update([
-                    'status' => 'failed',
-                    'response_code' => $lastResponseCode ?? 500,
+                    'status' => $webhookType === 'paid' ? 'blocked' : 'failed',
+                    'response_code' => $lastResponseCode,
                     'response_body' => $lastResponseBody,
-                    'error' => substr($e->getMessage(), 0, 1000),
+                    'error' => $webhookType === 'paid' ? 'HTTP acceptance uncertain; reconcile n8n before retrying ('.class_basename($e).').' : 'Webhook HTTP '.($lastResponseCode ?? 'connection failure'),
                     'updated_at' => now(),
                 ]);
 
@@ -297,16 +343,71 @@ class DispatchBatchToN8n implements ShouldQueue
             }
         }
 
-        // If all chunks sent successfully, mark batch as submitted
-        if ($chunksSent >= $totalChunks) {
-            DB::table('notification_batches')->where('id', $batch->id)->update([
-                'status' => 'submitted',
-                'submitted_at' => now(),
-                'response_code' => $lastResponseCode,
-                'response_body' => $lastResponseBody,
-                'error' => null,
-                'updated_at' => now(),
-            ]);
+        $this->reconcileBatch();
+    }
+
+    private function pendingNotifications(): \Illuminate\Database\Query\Builder
+    {
+        return DB::table('notifications')->where('batch_id', $this->batchId)
+            ->where(function ($q) {
+                $q->whereIn('status', ['queued', 'failed']);
+                if ($this->selectedNotificationIds !== null) {
+                    $q->orWhere(fn ($blocked) => $blocked->where('status', 'blocked')->where('attempts', 0));
+                }
+            })
+            ->when($this->selectedNotificationIds !== null, fn ($q) => $q->whereIn('id', $this->selectedNotificationIds));
+    }
+
+    private function recover(string $message): void
+    {
+        DB::table('notifications')->where('batch_id', $this->batchId)->where('status', 'processing')->update([
+            'status' => 'blocked', 'error' => 'Worker stopped with HTTP acceptance unknown; reconcile before resending.', 'updated_at' => now(),
+        ]);
+        $this->pendingNotifications()->where('attempts', 0)->update(['status' => 'failed', 'error' => $message, 'updated_at' => now()]);
+        $recordedError = DB::table('notification_batches')->where('batch_id', $this->batchId)->value('error');
+        $this->reconcileBatch($recordedError ?: $message);
+    }
+
+    private function reconcileBatch(?string $error = null): void
+    {
+        $statuses = DB::table('notifications')->where('batch_id', $this->batchId)->pluck('status');
+        $status = match (true) {
+            $statuses->contains('processing') => 'processing',
+            $statuses->contains('queued') => 'queued',
+            $statuses->contains('failed') => 'failed',
+            $statuses->contains('blocked') => 'blocked',
+            default => 'submitted',
+        };
+        DB::table('notification_batches')->where('batch_id', $this->batchId)->update([
+            'status' => $status, 'error' => $error,
+            'submitted_at' => $status === 'submitted' ? now() : null, 'updated_at' => now(),
+        ]);
+    }
+
+    public function failed(?\Throwable $exception): void
+    {
+        // Laravel invokes this on a fresh instance. Inspect persisted intent while
+        // holding the lock so terminal recovery cannot modify an active worker.
+        $lock = app(BatchDispatchLock::class);
+        if (!$lock->acquire($this->batchId)) {
+            return;
+        }
+        try {
+            $batch = DB::table('notification_batches')->where('batch_id', $this->batchId)->first();
+            if (!$batch || in_array($batch->status, ['submitted', 'completed', 'qa_suppressed'], true)) {
+                return;
+            }
+            if (($batch->webhook_type ?? 'monthly') === 'paid' && $this->selectedNotificationIds === null) {
+                return;
+            }
+            $hasPendingSelection = DB::table('notifications')->where('batch_id', $this->batchId)
+                ->whereIn('status', ['queued', 'failed', 'processing'])
+                ->when($this->selectedNotificationIds !== null, fn ($q) => $q->whereIn('id', $this->selectedNotificationIds))->exists();
+            if ($hasPendingSelection) {
+                $this->recover('Dispatch job exhausted retries or worker timed out. Review before retrying.');
+            }
+        } finally {
+            $lock->release();
         }
     }
 }
