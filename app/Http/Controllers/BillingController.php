@@ -1809,7 +1809,7 @@ class BillingController {
    $resolvedGuardian = GuardianNameResolver::forFamily($family);
    return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt',compact('p','family','items','branding','banner','remainingBalanceMinor','resolvedGuardian'))
     ->setPaper('a4')
-    ->stream($p->receipt_number.'.pdf');
+    ->stream('Paid-Receipt.pdf');
   }
 
   public function historicalReceiptPdf(int $id, Request $r){
@@ -1951,7 +1951,7 @@ class BillingController {
    'banner' => $banner,
    'statementNumber' => 'CHL-STU-' . $s->gr_number . '-' . now()->format('Ymd'),
    'generatedAt' => now(),
-  ])->setPaper('a4')->stream('challan-student-' . $s->gr_number . '.pdf');
+  ])->setPaper('a4')->stream('Monthly-Fee-Invoice.pdf');
  }
 
  public function familyConsolidatedChallanPdf(int $family, Request $r){
@@ -2053,7 +2053,7 @@ class BillingController {
    'banner' => $banner,
    'statementNumber' => 'CHL-FAM-' . ($f->family_code ?: $f->id) . '-' . now()->format('Ymd'),
    'generatedAt' => now(),
-  ])->setPaper('a4')->stream('challan-family-' . ($f->family_code ?: $f->id) . '.pdf');
+  ])->setPaper('a4')->stream('Monthly-Fee-Invoice.pdf');
  }
 
  private function resolveParentDisplay(?string $guardianName, ?string $fatherName): array {
