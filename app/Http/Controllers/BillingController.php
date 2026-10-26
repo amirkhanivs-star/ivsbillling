@@ -2177,16 +2177,16 @@ class BillingController {
  public function processQueue(Request $r){
   abort_if($r->user()->role==='auditor',403);
   @set_time_limit(360);
-  $jobsBefore = DB::table('jobs')->where('queue','notifications')->count();
+  $jobsBefore = DB::table('jobs')->whereIn('queue', ['notifications', 'paid-future', 'default'])->count();
   \Illuminate\Support\Facades\Artisan::call('queue:work',[
-   '--queue'=>'notifications,default',
+   '--queue'=>'paid-future,notifications,default',
    '--stop-when-empty'=>true,
    '--max-jobs'=>50,
    '--timeout'=>300,
   ]);
-  $remaining=DB::table('jobs')->where('queue','notifications')->count();
+  $remaining=DB::table('jobs')->whereIn('queue', ['notifications', 'paid-future', 'default'])->count();
   $processed = max(0, $jobsBefore - $remaining);
-  return back()->with('notice',"Processed {$processed} batch job(s) from notifications queue. {$remaining} job(s) remaining.");
+  return back()->with('notice',"Processed {$processed} batch job(s) from queue. {$remaining} job(s) remaining.");
  }
  public function addEnrollment(Request $r,int $student){
   $d=$r->validate(['campus_id'=>'required|exists:campuses,id','department_id'=>'required|exists:departments,id','grade_label'=>'required|string|max:200','subject_name'=>'nullable|string|max:150','currency'=>'required|alpha|size:3','class_days_per_week'=>'nullable|integer|min:1|max:7','monthly_fee'=>['nullable','regex:/^\d{1,13}(?:\.\d{1,2})?$/']]);abort_if($r->user()->role==='auditor',403);$this->assertAccess($r,$d['department_id'],$d['campus_id']);abort_unless(DB::table('students')->where('id',$student)->exists(),404);

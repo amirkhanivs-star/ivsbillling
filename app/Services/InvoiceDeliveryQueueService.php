@@ -1934,8 +1934,8 @@ class InvoiceDeliveryQueueService
      */
     public function getQueueWorkerStatus(): array
     {
-        $pendingJobs = DB::table('jobs')->where('queue', 'notifications')->count();
-        $reservedJobs = DB::table('jobs')->where('queue', 'notifications')->whereNotNull('reserved_at')->count();
+        $pendingJobs = DB::table('jobs')->whereIn('queue', ['notifications', 'paid-future', 'default'])->count();
+        $reservedJobs = DB::table('jobs')->whereIn('queue', ['notifications', 'paid-future', 'default'])->whereNotNull('reserved_at')->count();
 
         $isRunning = false;
 

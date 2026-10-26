@@ -18,10 +18,10 @@ User=www-data
 Group=www-data
 Restart=always
 RestartSec=5
-WorkingDirectory=/var/www/iqra-billing
-ExecStart=/usr/bin/php /var/www/iqra-billing/artisan queue:work database --sleep=3 --tries=3 --max-time=3600 --timeout=90
-StandardOutput=append:/var/www/iqra-billing/storage/logs/queue-worker.log
-StandardError=append:/var/www/iqra-billing/storage/logs/queue-worker-error.log
+WorkingDirectory=/var/www/billing
+ExecStart=/usr/bin/php /var/www/billing/artisan queue:work database --queue=paid-future,notifications,default --sleep=3 --tries=3 --max-time=3600 --timeout=300
+StandardOutput=append:/var/www/billing/storage/logs/queue-worker.log
+StandardError=append:/var/www/billing/storage/logs/queue-worker-error.log
 
 [Install]
 WantedBy=multi-user.target
