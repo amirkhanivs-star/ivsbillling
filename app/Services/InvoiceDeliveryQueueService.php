@@ -1943,15 +1943,16 @@ class InvoiceDeliveryQueueService
         if ($reservedJobs > 0) {
             $isRunning = true;
         } else {
-            // 2. Check OS process list for queue:work
+            // 2. Check OS process list for queue:work scoped strictly to this application
             if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
                 $output = @shell_exec('wmic process where "name=\'php.exe\'" get commandline 2>nul');
                 if ($output && stripos($output, 'queue:work') !== false) {
                     $isRunning = true;
                 }
             } else {
-                $output = @shell_exec('pgrep -f "artisan queue:work" 2>/dev/null');
-                if (!empty(trim((string)$output))) {
+                $base = base_path();
+                $output = @shell_exec('pgrep -f "' . preg_quote($base, '/') . '.*queue:work" 2>/dev/null');
+                if ($output && !empty(trim((string)$output))) {
                     $isRunning = true;
                 }
             }
