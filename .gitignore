@@ -29,6 +29,7 @@
 .env
 .env.*
 !.env.example
+live.md
 
 *.pem
 *.key
