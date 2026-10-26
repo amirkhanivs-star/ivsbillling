@@ -916,40 +916,39 @@
     {{-- TAB 2: PROCESSING --}}
     @elseif($currentTab === 'processing')
         {{-- DISPATCHER / WORKER HEALTH BANNER --}}
-        @if(!empty($workerStatus))
-            @if(!$workerStatus['is_running'] && $workerStatus['pending_jobs'] > 0)
-                <div style="background:#fffbeb; border:1px solid #fde68a; border-left:4px solid #f59e0b; border-radius:6px; padding:14px 18px; margin-bottom:18px;">
-                    <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
-                        <div>
-                            <div style="display:flex; align-items:center; gap:8px;">
-                                <span style="font-size:16px;">⚠️</span>
-                                <strong style="color:#92400e; font-size:14px;">Queue Worker is Offline — {{ $workerStatus['pending_jobs'] }} Batch Dispatch Job(s) Buffered</strong>
-                            </div>
-                            <p style="margin:4px 0 0 24px; color:#78350f; font-size:12.5px; line-height:1.4;">
-                                Approved monthly challan batches are waiting in the local queue table because no background worker is running. Notifications will not reach n8n until a worker process is running or the queue is processed.
-                            </p>
-                            <div style="margin:8px 0 0 24px; font-size:11.5px; color:#b45309;">
-                                <strong>Persistent Worker Command:</strong> <code style="background:#fef3c7; padding:2px 6px; border-radius:4px; font-weight:700;">php artisan queue:work --queue=notifications,default --tries=3</code>
-                            </div>
+        @if(!empty($workerStatus) && $workerStatus['pending_jobs'] > 0)
+            <div style="background:#fffbeb; border:1px solid #fde68a; border-left:4px solid #f59e0b; border-radius:6px; padding:14px 18px; margin-bottom:18px;">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
+                    <div>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <span style="font-size:16px;">⚠️</span>
+                            <strong style="color:#92400e; font-size:14px;">Queue Worker is Offline — {{ $workerStatus['pending_jobs'] }} Batch Dispatch Job(s) Buffered</strong>
                         </div>
-                        <form method="post" action="{{ route('invoices.notifications.process_queue') }}" style="margin:0;">
-                            @csrf
-                            <button type="submit" class="btn" style="background:#d97706; color:#fff; font-weight:700; font-size:12px; padding:8px 14px; border:none; border-radius:5px; cursor:pointer; display:flex; align-items:center; gap:6px; box-shadow:0 1px 2px rgba(0,0,0,0.1);">
-                                <span>⚡</span> Process Pending Queue Now
-                            </button>
-                        </form>
+                        <p style="margin:4px 0 0 24px; color:#78350f; font-size:12.5px; line-height:1.4;">
+                            Approved monthly challan batches are waiting in the local queue table because no background worker is running. Notifications will not reach n8n until a worker process is running or the queue is processed.
+                        </p>
+                        <div style="margin:8px 0 0 24px; font-size:11.5px; color:#b45309;">
+                            <strong>Persistent Worker Command:</strong> <code style="background:#fef3c7; padding:2px 6px; border-radius:4px; font-weight:700;">php artisan queue:work --queue=notifications,default --tries=3</code>
+                        </div>
                     </div>
+                    <form method="post" action="{{ route('invoices.notifications.process_queue') }}" style="margin:0;">
+                        @csrf
+                        <button type="submit" class="btn" style="background:#d97706; color:#fff; font-weight:700; font-size:12px; padding:8px 14px; border:none; border-radius:5px; cursor:pointer; display:flex; align-items:center; gap:6px; box-shadow:0 1px 2px rgba(0,0,0,0.1);">
+                            <span>⚡</span> Process Pending Queue Now
+                        </button>
+                    </form>
                 </div>
-            @elseif($workerStatus['is_running'])
-                <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-left:4px solid #16a34a; border-radius:6px; padding:10px 16px; margin-bottom:18px; display:flex; justify-content:space-between; align-items:center;">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="display:inline-block; width:10px; height:10px; background:#16a34a; border-radius:50%; box-shadow:0 0 0 3px rgba(22,163,74,0.2);"></span>
-                        <strong style="color:#166534; font-size:13px;">Background Queue Worker Active</strong>
-                        <span style="color:#15803d; font-size:12px;">— Dispatches are being processed automatically in chunks.</span>
-                    </div>
-                    <span class="muted" style="font-size:11px;">{{ $workerStatus['pending_jobs'] }} job(s) in queue</span>
+            </div>
+        @elseif(!empty($workerStatus) && $workerStatus['is_running'])
+            <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-left:4px solid #16a34a; border-radius:6px; padding:10px 16px; margin-bottom:18px; display:flex; justify-content:space-between; align-items:center;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="display:inline-block; width:10px; height:10px; background:#16a34a; border-radius:50%; box-shadow:0 0 0 3px rgba(22,163,74,0.2);"></span>
+                    <strong style="color:#166534; font-size:13px;">Background Queue Worker Active</strong>
+                    <span style="color:#15803d; font-size:12px;">— Dispatches are being processed automatically in chunks.</span>
                 </div>
-            @else
+                <span class="muted" style="font-size:11px;">0 job(s) in queue</span>
+            </div>
+        @else
                 <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:10px 16px; margin-bottom:18px; display:flex; justify-content:space-between; align-items:center;">
                     <div style="display:flex; align-items:center; gap:8px;">
                         <span style="display:inline-block; width:10px; height:10px; background:#94a3b8; border-radius:50%;"></span>
