@@ -12,9 +12,6 @@ class QaDatabaseSeeder extends Seeder
     public function run(): void
     {
         $conn = $this->command?->getOutput() ? 'qa' : config('database.default');
-        if ($conn === 'mysql' && config('database.connections.mysql.database') === 'iqra_billing_qa') {
-            $conn = 'mysql';
-        }
 
         // Assert strictly QA or testing database
         if (config("database.connections.{$conn}.driver") === 'mysql') {

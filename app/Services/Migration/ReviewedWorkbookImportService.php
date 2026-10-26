@@ -16,6 +16,10 @@ class ReviewedWorkbookImportService
     public const APPROVED_BATCH_ID = 'BATCH-20261023-FINAL-MYSKOOL';
     public const APPROVED_VERSION_KEY = 'v3_final_myskool_20261023';
 
+    public const V4_APPROVED_WORKBOOK_SHA256 = 'ac83e8d71b89c992eb3a35ed2cd154929dd522432bb5c5c05742bdd0255622ae';
+    public const V4_APPROVED_BATCH_ID = 'BATCH-20261025-FINAL-MYSKOOL';
+    public const V4_APPROVED_VERSION_KEY = 'v4_final_myskool_20261025';
+
     // Legacy and alternative SHA-256 hashes
     public const EXPECTED_SHA256 = self::APPROVED_WORKBOOK_SHA256;
     public const LEGACY_OCT22_SHA256 = 'd2276cf0c75a0c17b143d1815fda568c9b5cc7e0154f546b8075d1a98e225401';
@@ -368,12 +372,51 @@ class ReviewedWorkbookImportService
         $this->validateFileAndHash($filePath, $expectedSha256);
         $this->validateConnection($conn);
 
-        $batchId = $batchId ?: (string) config('imports.active_batch_id', self::APPROVED_BATCH_ID);
+        $batchId = $batchId ?: HistoricalOpeningBalanceService::resolveActiveBatchId();
+        $actualFileSha256 = strtolower(hash_file('sha256', $filePath));
+
+        if ($expectedSha256 !== null) {
+            foreach ((array) config('imports.versions', []) as $verKey => $verCfg) {
+                $verBatch = trim((string) ($verCfg['batch_id'] ?? ''));
+                $verHash = strtolower(trim((string) ($verCfg['expected_sha256'] ?? '')));
+                if ($verBatch !== '' && $verBatch === $batchId && $verHash !== '' && $verHash !== $actualFileSha256) {
+                    throw new RuntimeException(
+                        "CRITICAL SAFETY STOP: Batch ID '{$batchId}' is assigned to version '{$verKey}' (SHA-256: {$verHash}), " .
+                        "which does not match workbook '{$filePath}' (SHA-256: {$actualFileSha256}). Refusing to overwrite another batch's staging data."
+                    );
+                }
+            }
+        }
+
         $now = now();
         $qa = DB::connection($conn);
 
-        return $qa->transaction(function () use ($filePath, $qa, $batchId, $now) {
+        return $qa->transaction(function () use ($filePath, $qa, $batchId, $now, $expectedSha256, $actualFileSha256) {
             @ini_set('memory_limit', '1536M');
+
+            $schema = $qa->getSchemaBuilder();
+
+            // Safeguard A: Prevent overwriting another workbook version's staging provenance in qa_import_versions
+            if ($expectedSha256 !== null && $schema->hasTable('qa_import_versions')) {
+                $existingVersion = $qa->table('qa_import_versions')->where('batch_id', $batchId)->first();
+                if ($existingVersion && !empty($existingVersion->sha256) && strtolower((string) $existingVersion->sha256) !== $actualFileSha256) {
+                    throw new RuntimeException(
+                        "CRITICAL SAFETY STOP: Batch '{$batchId}' already exists in qa_import_versions for a different workbook " .
+                        "(existing SHA-256: {$existingVersion->sha256}, current SHA-256: {$actualFileSha256}). " .
+                        "Refusing to silently overwrite another batch's staging data."
+                    );
+                }
+            }
+
+            // Safeguard B: Prevent deleting/replacing staged dues when opening-balance lineage already references this batch
+            if ($schema->hasTable('qa_opening_balance_lineage')
+                && $qa->table('qa_opening_balance_lineage')->where('batch_id', $batchId)->exists()
+            ) {
+                throw new RuntimeException(
+                    "CRITICAL SAFETY STOP: Opening-balance lineage records already exist for batch '{$batchId}'. " .
+                    "Refusing to overwrite staging rows and orphan existing opening-balance lineage."
+                );
+            }
 
             // Capture initial financial ledger baseline to guarantee zero ledger mutation
             $ledgerBefore = [
@@ -454,6 +497,7 @@ class ReviewedWorkbookImportService
             ];
 
             $seenWorkbookGrs = [];
+            $workbookStudentsByGr = [];
 
             // Preload existing students
             $existingStudentsMap = $qa->table('students')->get()->keyBy('gr_number');
@@ -469,7 +513,8 @@ class ReviewedWorkbookImportService
 
                 $seenWorkbookGrs[$gr] = true;
 
-                $famCode = trim((string) ($row[$idxFam] ?? ''));
+                $rawFamCode = trim((string) ($row[$idxFam] ?? ''));
+                $famCode = $rawFamCode;
                 $isProvisionalFamily = false;
                 if ($famCode === '') {
                     $famCode = 'PROV-FAM-' . $gr;
@@ -495,6 +540,14 @@ class ReviewedWorkbookImportService
                 $paidPdfCurrencies = $idxPaidPdf !== null ? trim((string) ($row[$idxPaidPdf] ?? '')) : '';
                 $outstandingPdfCurrencies = $idxOutPdf !== null ? trim((string) ($row[$idxOutPdf] ?? '')) : '';
                 $conflictFlags = $idxConflict !== null ? trim((string) ($row[$idxConflict] ?? '')) : '';
+
+                // Record authoritative workbook GR -> family/student mapping from Sheet 1 (never guess when family code is blank)
+                $workbookStudentsByGr[$gr] = [
+                    'family_code' => $rawFamCode !== '' ? $rawFamCode : null,
+                    'registration_name' => $name !== '' ? $name : null,
+                    'class' => $className !== '' ? $className : null,
+                    'registration_currency' => $currencyRaw !== '' ? $currencyRaw : null,
+                ];
 
                 // 3a. Family mapping
                 if (!isset($existingFamiliesMap[$famCode])) {
@@ -734,8 +787,15 @@ class ReviewedWorkbookImportService
                 $slip = trim((string) ($r[$idxColSlip] ?? ''));
                 $gr = trim((string) ($r[$idxColGr] ?? ''));
                 $stuName = trim((string) ($r[$idxColStuName] ?? ''));
+                $mappedStudent = ($gr !== '' && isset($workbookStudentsByGr[$gr])) ? $workbookStudentsByGr[$gr] : null;
                 $regName = $idxColRegName !== null ? trim((string) ($r[$idxColRegName] ?? '')) : null;
+                if (($regName === null || $regName === '') && $mappedStudent !== null) {
+                    $regName = $mappedStudent['registration_name'];
+                }
                 $famCode = $idxColFam !== null ? trim((string) ($r[$idxColFam] ?? '')) : null;
+                if (($famCode === null || $famCode === '') && $mappedStudent !== null) {
+                    $famCode = $mappedStudent['family_code'];
+                }
                 $particular = trim((string) ($r[$idxColPart] ?? ''));
                 $payDateRaw = $r[$idxColDate] ?? null;
                 $payDateParsed = self::parseExcelDate($payDateRaw);
@@ -744,6 +804,9 @@ class ReviewedWorkbookImportService
                 $amtDecimal = self::parseMoneyDecimal($r[$idxColAmt] ?? 0, $amtErr);
                 $amtMinor = self::parseMoneyMinor($r[$idxColAmt] ?? 0, $amtErr);
                 $regCurr = $idxColRegCurr !== null ? strtoupper(trim((string) ($r[$idxColRegCurr] ?? ''))) : null;
+                if (($regCurr === null || $regCurr === '') && $mappedStudent !== null) {
+                    $regCurr = $mappedStudent['registration_currency'];
+                }
                 $pdfPage = $idxColPdfPage !== null ? trim((string) ($r[$idxColPdfPage] ?? '')) : null;
                 $pdfY = $idxColPdfY !== null ? trim((string) ($r[$idxColPdfY] ?? '')) : null;
                 $grnOriginal = $idxColGrnOrig !== null ? trim((string) ($r[$idxColGrnOrig] ?? '')) : null;
@@ -875,17 +938,33 @@ class ReviewedWorkbookImportService
                 $sourceRow = $idx + 2;
                 $gr = trim((string) ($r[$idxDueGr] ?? ''));
                 $stuName = trim((string) ($r[$idxDueStuName] ?? ''));
+                $mappedStudent = ($gr !== '' && isset($workbookStudentsByGr[$gr])) ? $workbookStudentsByGr[$gr] : null;
                 $regName = $idxDueRegName !== null ? trim((string) ($r[$idxDueRegName] ?? '')) : null;
+                if (($regName === null || $regName === '') && $mappedStudent !== null) {
+                    $regName = $mappedStudent['registration_name'];
+                }
                 $famFinal = $idxDueFamFinal !== null ? trim((string) ($r[$idxDueFamFinal] ?? '')) : null;
+                if (($famFinal === null || $famFinal === '') && $mappedStudent !== null) {
+                    $famFinal = $mappedStudent['family_code'];
+                }
                 $famPdf = $idxDueFamPdf !== null ? trim((string) ($r[$idxDueFamPdf] ?? '')) : null;
                 $famReg = $idxDueFamReg !== null ? trim((string) ($r[$idxDueFamReg] ?? '')) : null;
+                if (($famReg === null || $famReg === '') && $mappedStudent !== null) {
+                    $famReg = $mappedStudent['family_code'];
+                }
                 $classDues = $idxDueClass !== null ? trim((string) ($r[$idxDueClass] ?? '')) : null;
+                if (($classDues === null || $classDues === '') && $mappedStudent !== null) {
+                    $classDues = $mappedStudent['class'];
+                }
                 $particular = trim((string) ($r[$idxDuePart] ?? ''));
                 $curr = strtoupper(trim((string) ($r[$idxDueCurr] ?? '')));
                 $dueAmtErr = null;
                 $amtDecimal = self::parseMoneyDecimal($r[$idxDueBal] ?? 0, $dueAmtErr);
                 $amtMinor = self::parseMoneyMinor($r[$idxDueBal] ?? 0, $dueAmtErr);
                 $regCurr = $idxDueRegCurr !== null ? strtoupper(trim((string) ($r[$idxDueRegCurr] ?? ''))) : null;
+                if (($regCurr === null || $regCurr === '') && $mappedStudent !== null) {
+                    $regCurr = $mappedStudent['registration_currency'];
+                }
                 $pdfPage = $idxDuePdfPage !== null ? trim((string) ($r[$idxDuePdfPage] ?? '')) : null;
                 $pdfY = $idxDuePdfY !== null ? trim((string) ($r[$idxDuePdfY] ?? '')) : null;
                 $grnOriginal = $idxDueGrnOrig !== null ? trim((string) ($r[$idxDueGrnOrig] ?? '')) : null;
@@ -980,6 +1059,7 @@ class ReviewedWorkbookImportService
                 $qa->table('qa_staged_dues')->insert($dueRowsToInsert);
                 $stats['dues_staged'] += count($dueRowsToInsert);
             }
+            unset($workbookStudentsByGr);
 
             // Insert exceptions in chunks
             foreach (array_chunk($exceptionsToInsert, 250) as $chunk) {
@@ -1072,10 +1152,11 @@ class ReviewedWorkbookImportService
             $actual = strtolower(hash_file('sha256', $filePath));
             $expected = strtolower($expectedSha256);
             $approved = strtolower(self::APPROVED_WORKBOOK_SHA256);
+            $v4Approved = strtolower(self::V4_APPROVED_WORKBOOK_SHA256);
             $revised = strtolower(self::REVISED_SHA256);
             $legacy = strtolower(self::LEGACY_OCT22_SHA256);
-            if ($actual !== $expected && $actual !== $approved && $actual !== $revised && $actual !== $legacy) {
-                throw new RuntimeException("SHA-256 mismatch for '{$filePath}'. Expected approved hash {$approved}, found {$actual}.");
+            if ($actual !== $expected && $actual !== $approved && $actual !== $v4Approved && $actual !== $revised && $actual !== $legacy) {
+                throw new RuntimeException("SHA-256 mismatch for '{$filePath}'. Expected approved hash {$expected}, found {$actual}.");
             }
         }
     }

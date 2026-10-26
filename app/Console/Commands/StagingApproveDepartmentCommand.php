@@ -16,7 +16,7 @@ class StagingApproveDepartmentCommand extends Command
      * @var string
      */
     protected $signature = 'staging:approve-department
-                            {--database=staging : Target database connection (must be iqra_billing_clean)}
+                            {--database=mysql : Target database connection (must be iqra_billing)}
                             {--department=all : Target department to approve (all, school, tuition)}
                             {--approver= : Name or email of verified administrator}
                             {--executor= : Context or identity of technical CLI executor}

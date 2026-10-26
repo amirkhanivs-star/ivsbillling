@@ -16,7 +16,7 @@ class StagingImportCommand extends Command
      */
     protected $signature = 'staging:import
                             {--zip= : Path to staging ZIP file}
-                            {--database=staging : Database connection to use (must be iqra_billing_clean)}
+                            {--database=mysql : Database connection to use (must be iqra_billing)}
                             {--dry-run : Validate and parse without persisting to database}
                             {--chunk-size=500 : Bulk insert chunk size}';
 
@@ -25,7 +25,7 @@ class StagingImportCommand extends Command
      *
      * @var string
      */
-    protected $description = 'Ingest verified Google Sheets staging data into isolated staging tables in iqra_billing_clean';
+    protected $description = 'Ingest verified Google Sheets staging data into isolated staging tables in iqra_billing';
 
     /**
      * Execute the console command.
@@ -142,7 +142,7 @@ class StagingImportCommand extends Command
                     'exceptions_staged' => $excResult['staged'],
                 ],
                 'artisan:staging:import',
-                'Phase 2 verified Google Sheets staging data ingested into iqra_billing_clean'
+                'Phase 2 verified Google Sheets staging data ingested into iqra_billing'
             );
         }
 

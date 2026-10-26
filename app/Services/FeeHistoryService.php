@@ -304,6 +304,42 @@ class FeeHistoryService
     }
 
     /**
+     * Resolve a map of GR number => ['family_id' => int, 'family_code' => string]
+     * from the students and families tables without guessing.
+     */
+    protected function resolveGrFamilyMap(array $grNumbers): array
+    {
+        $cleanGrs = array_values(array_unique(array_filter(
+            array_map(fn($g) => trim((string) $g), $grNumbers),
+            fn($g) => $g !== ''
+        )));
+
+        if (empty($cleanGrs) || !Schema::hasTable('students') || !Schema::hasTable('families')) {
+            return [];
+        }
+
+        $rows = DB::table('students as s')
+            ->join('families as f', 'f.id', '=', 's.family_id')
+            ->whereIn('s.gr_number', $cleanGrs)
+            ->select('s.gr_number', 's.family_id', 'f.family_code', 'f.is_provisional')
+            ->get();
+
+        $map = [];
+        foreach ($rows as $row) {
+            $gr = trim((string) $row->gr_number);
+            $famCode = trim((string) ($row->family_code ?? ''));
+            if ($gr !== '' && $famCode !== '' && !(bool) ($row->is_provisional ?? false) && !str_starts_with($famCode, 'PROV-FAM-')) {
+                $map[$gr] = [
+                    'family_id' => (int) $row->family_id,
+                    'family_code' => $famCode,
+                ];
+            }
+        }
+
+        return $map;
+    }
+
+    /**
      * Fetch historical staged collections for given GR numbers and/or family code,
      * and reconstruct them into verified receipt objects without double counting.
      */
@@ -320,8 +356,14 @@ class FeeHistoryService
 
         if (!empty($grNumbers) && !empty($familyCode)) {
             $query->where(function ($q) use ($grNumbers, $familyCode) {
-                $q->whereIn('gr_number', $grNumbers)
-                  ->orWhere('family_code', $familyCode);
+                $q->where(function ($sub) use ($grNumbers, $familyCode) {
+                    $sub->whereIn('gr_number', $grNumbers)
+                        ->where(function ($famCheck) use ($familyCode) {
+                            $famCheck->whereNull('family_code')
+                                     ->orWhere('family_code', '')
+                                     ->orWhere('family_code', $familyCode);
+                        });
+                })->orWhere('family_code', $familyCode);
             });
         } elseif (!empty($grNumbers)) {
             $query->whereIn('gr_number', $grNumbers);
@@ -339,21 +381,31 @@ class FeeHistoryService
             return collect();
         }
 
+        $grFamilyMap = $this->resolveGrFamilyMap($rows->pluck('gr_number')->all());
+        $fallbackFamilyCode = trim((string) ($familyCode ?? ''));
+
         // Reconstruct receipts using verified identity:
         // slip_number + family_code + date + currency
-        // If slip number is missing, keep separate to avoid ambiguous merges.
+        // If slip number is missing or family identity is unmatched, never merge across families/students.
         $grouped = [];
 
         foreach ($rows as $r) {
             $slip = trim((string) $r->slip_number);
+            $gr = trim((string) ($r->gr_number ?? ''));
             $date = $r->payment_date_parsed ?: $r->payment_date_raw;
             $curr = strtoupper(trim((string) ($r->currency ?: 'SAR')));
-            $fam = trim((string) ($r->family_code ?: ($familyCode ?: '')));
+            $stagedFam = trim((string) ($r->family_code ?? ''));
+            $mappedFam = ($gr !== '' && isset($grFamilyMap[$gr])) ? $grFamilyMap[$gr]['family_code'] : '';
+            $fam = $stagedFam !== '' ? $stagedFam : ($mappedFam !== '' ? $mappedFam : $fallbackFamilyCode);
 
             if ($slip === '' || $slip === '-' || $slip === '—' || $slip === '0') {
                 $key = 'UNSPECIFIED_SLIP_' . $r->id;
+            } elseif ($fam !== '') {
+                $key = $slip . '|FAM:' . $fam . '|' . $date . '|' . $curr;
+            } elseif ($gr !== '') {
+                $key = $slip . '|UNMATCHED_GR:' . $gr . '|' . $date . '|' . $curr;
             } else {
-                $key = $slip . '|' . $fam . '|' . $date . '|' . $curr;
+                $key = 'UNMATCHED_ROW_' . $r->id;
             }
 
             if (!isset($grouped[$key])) {
@@ -517,31 +569,65 @@ class FeeHistoryService
         }
 
         $slip = trim((string) $primary->slip_number);
+        $primaryGr = trim((string) ($primary->gr_number ?? ''));
         $date = $primary->payment_date_parsed ?: $primary->payment_date_raw;
         $curr = strtoupper(trim((string) ($primary->currency ?: 'SAR')));
-        $fam = trim((string) $primary->family_code);
+        $fam = trim((string) ($primary->family_code ?? ''));
 
-        // Fetch all verified sibling lines
-        $query = DB::table('qa_staged_collections')
-            ->where('batch_id', $activeBatch);
+        if ($fam === '' && $primaryGr !== '') {
+            $primaryGrMap = $this->resolveGrFamilyMap([$primaryGr]);
+            if (isset($primaryGrMap[$primaryGr])) {
+                $fam = $primaryGrMap[$primaryGr]['family_code'];
+            }
+        }
 
         if ($slip !== '' && $slip !== '-' && $slip !== '—' && $slip !== '0') {
-            $query->where('slip_number', $slip)
+            $query = DB::table('qa_staged_collections')
+                ->where('batch_id', $activeBatch)
+                ->where('slip_number', $slip)
                 ->where('currency', $curr);
-            if ($fam !== '') {
-                $query->where('family_code', $fam);
-            }
+
             if ($date) {
                 $query->where(function ($q) use ($date) {
                     $q->where('payment_date_parsed', $date)
                       ->orWhere('payment_date_raw', $date);
                 });
             }
-        } else {
-            $query->where('id', $primary->id);
-        }
 
-        $siblingRows = $query->orderBy('source_row')->get();
+            $candidateRows = $query->orderBy('source_row')->get();
+            $candidateGrMap = $this->resolveGrFamilyMap($candidateRows->pluck('gr_number')->all());
+
+            $siblingRows = $candidateRows->filter(function ($row) use ($primary, $fam, $primaryGr, $candidateGrMap) {
+                if ((int) $row->id === (int) $primary->id) {
+                    return true;
+                }
+
+                $rowGr = trim((string) ($row->gr_number ?? ''));
+                $rowStagedFam = trim((string) ($row->family_code ?? ''));
+                $rowMappedFam = ($rowGr !== '' && isset($candidateGrMap[$rowGr])) ? $candidateGrMap[$rowGr]['family_code'] : '';
+
+                // Never merge if staged family_code and student-table family_code both exist and disagree
+                if ($rowStagedFam !== '' && $rowMappedFam !== '' && $rowStagedFam !== $rowMappedFam) {
+                    return false;
+                }
+
+                $rowResolvedFam = $rowStagedFam !== '' ? $rowStagedFam : $rowMappedFam;
+
+                if ($fam !== '') {
+                    // Only include rows on this slip that resolve to the exact same family code
+                    return $rowResolvedFam === $fam;
+                }
+
+                // Unmatched family identity: never guess or combine other students on a shared slip
+                if ($primaryGr !== '') {
+                    return $rowResolvedFam === '' && $rowGr === $primaryGr;
+                }
+
+                return false;
+            })->values();
+        } else {
+            $siblingRows = collect([$primary]);
+        }
 
         $totalAmount = 0.0;
         $items = [];
@@ -592,17 +678,10 @@ class FeeHistoryService
             ];
         }
 
-        // Lookup family if available
+        // Lookup verified family only when family code is known (never guess for unmatched family identities)
         $family = null;
-        if (!empty($fam)) {
+        if ($fam !== '') {
             $family = DB::table('families')->where('family_code', $fam)->first();
-        }
-        if (!$family && !empty($students)) {
-            $firstGr = array_key_first($students);
-            $st = DB::table('students')->where('gr_number', $firstGr)->first();
-            if ($st) {
-                $family = DB::table('families')->where('id', $st->family_id)->first();
-            }
         }
 
         // Campus / department for branding
@@ -630,7 +709,7 @@ class FeeHistoryService
         $receipt->payment_method = $primary->payment_method ?: 'Cash';
         $receipt->batch_id = $activeBatch;
         $receipt->family = $family;
-        $receipt->family_code = $fam ?: ($family->family_code ?? '—');
+        $receipt->family_code = $fam !== '' ? $fam : ($family->family_code ?? '—');
         $receipt->department_id = $departmentId;
         $receipt->campus_id = $campusId;
         $receipt->students = array_values($students);

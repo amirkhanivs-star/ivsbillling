@@ -11,33 +11,154 @@
         }
     })->filter()->unique()->sort()->values();
     $defaultSelectedPeriod = old('selected_period', $invoiceMonths->first());
-    $totalDuesVal = $invoiceItems->sum(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor));
-    $grossTotalVal = $invoiceItems->sum(fn($it) => (int)$it->net_minor);
-    $firstStudent = $invoiceItems->first() ?? ($family ? DB::table('students')->where('family_id', $family->id)->first() : null);
+    $searchTerm = trim((string) (request('gr', '') ?: request('invoice', '') ?: request('family', '')));
+    $searchBy = strtolower(trim((string) request('search_by', '')));
+
+    $matchedStudent = null;
+    if ($family && isset($familyStudents) && $familyStudents instanceof \Illuminate\Support\Collection && $familyStudents->isNotEmpty()) {
+        if ($searchTerm !== '') {
+            $matchedStudent = $familyStudents->first(fn($st) => strcasecmp((string) $st->gr_number, $searchTerm) === 0);
+        }
+    }
+
+    $firstInvoiceItem = $invoiceItems->first();
+    if ($matchedStudent) {
+        $matchedInvoiceItem = $invoiceItems->first(fn($it) => (int) ($it->student_id ?? 0) === (int) $matchedStudent->id);
+        $firstStudent = $matchedInvoiceItem ?? (object) [
+            'id' => $matchedStudent->id,
+            'gr_number' => $matchedStudent->gr_number,
+            'student_name' => $matchedStudent->name,
+            'class_name' => $matchedStudent->grade_label ?: ($firstInvoiceItem?->class_name ?? ''),
+        ];
+    } else {
+        $fallbackFamilyStudent = (isset($familyStudents) && $familyStudents instanceof \Illuminate\Support\Collection)
+            ? $familyStudents->first()
+            : ($family ? DB::table('students')->where('family_id', $family->id)->orderBy('id')->first() : null);
+        $firstStudent = $firstInvoiceItem ?? ($fallbackFamilyStudent ? (object) [
+            'id' => $fallbackFamilyStudent->id,
+            'gr_number' => $fallbackFamilyStudent->gr_number,
+            'student_name' => $fallbackFamilyStudent->name,
+            'class_name' => $fallbackFamilyStudent->grade_label ?? '',
+        ] : null);
+    }
+
+    if ($family) {
+        $displayGr = $matchedStudent?->gr_number
+            ?? ($firstStudent?->gr_number ?? ($familyStudents?->first()?->gr_number ?? ''));
+        $displayFamilyCode = $family->family_code ?? '';
+        $displayInvoice = ($searchBy === 'invoice') ? $searchTerm : '';
+    } else {
+        $displayGr = ($searchBy !== 'family' && $searchBy !== 'invoice') ? $searchTerm : '';
+        $displayFamilyCode = ($searchBy === 'family') ? $searchTerm : '';
+        $displayInvoice = ($searchBy === 'invoice') ? $searchTerm : '';
+    }
+
     $outstandingItems = $invoiceItems->filter(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor) > 0)->values();
-    $totalAdvanceCreditMinor = ($advanceCredits ?? collect())->sum('unallocated_minor');
+
+    $currencySummaries = isset($summaryByCurrency) && $summaryByCurrency instanceof \Illuminate\Support\Collection
+        ? $summaryByCurrency
+        : $invoiceItems->groupBy(fn($it) => strtoupper(trim((string)($it->currency ?: 'SAR'))))->map(function ($items, $curr) {
+            return [
+                'currency' => $curr,
+                'total_session_fee_minor' => (int) $items->sum('amount_minor'),
+                'total_discount_minor' => (int) $items->sum('discount_minor'),
+                'total_exemption_minor' => (int) $items->sum('exemption_minor'),
+                'total_net_minor' => (int) $items->sum('net_minor'),
+                'total_received_minor' => (int) $items->sum('paid_minor'),
+                'total_due_minor' => (int) $items->sum(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor)),
+            ];
+        });
+
+    $currencyDuesMap = $currencySummaries->map(fn($cs) => (int) ($cs['total_due_minor'] ?? 0));
+    foreach (($dueGroups ?? collect()) as $dg) {
+        $dgCurr = strtoupper(trim((string) ($dg->currency ?: 'SAR')));
+        if (!$currencyDuesMap->has($dgCurr)) {
+            $currencyDuesMap->put($dgCurr, max(0, (int) $dg->balance));
+        }
+    }
+
+    $isMultiCurrencyDues = $currencyDuesMap->count() > 1;
+    $singleCurrencyCode = $currencyDuesMap->count() === 1 ? $currencyDuesMap->keys()->first() : null;
+    $singleCurrencyDueMinor = $singleCurrencyCode ? (int) $currencyDuesMap->get($singleCurrencyCode, 0) : 0;
+
+    if ($currencyDuesMap->isEmpty()) {
+        $defaultDuesDisplay = '0';
+    } elseif ($isMultiCurrencyDues) {
+        $defaultDuesDisplay = $currencyDuesMap
+            ->map(fn($balMinor, $curr) => $curr . ' ' . number_format($balMinor / 100, 2))
+            ->values()
+            ->implode(' | ');
+    } else {
+        $defaultDuesDisplay = number_format($singleCurrencyDueMinor / 100, 0, '.', '');
+    }
+
+    $currencyDuesFloatMap = $currencyDuesMap->map(fn($balMinor) => round($balMinor / 100, 2))->all();
+
+    $advanceCreditsByCurr = isset($advanceCreditsByCurrency) && $advanceCreditsByCurrency instanceof \Illuminate\Support\Collection
+        ? $advanceCreditsByCurrency
+        : ($advanceCredits ?? collect())
+            ->groupBy(fn($ac) => strtoupper(trim((string)($ac->currency ?: 'SAR'))))
+            ->map(fn($group, $curr) => [
+                'currency' => $curr,
+                'unallocated_minor' => (int) $group->sum('unallocated_minor'),
+                'count' => $group->count(),
+                'receipts' => $group->values(),
+            ]);
 @endphp
 
 <div class="myskool-challan-wrapper">
-    {{-- Accessible financial summary data for test and screen readers --}}
+    {{-- Accessible financial summary data for test and screen readers (strictly grouped by currency) --}}
     <div style="display:none;" aria-hidden="true">
-        <span>Session Fee (Gross) SAR {{ number_format($grossTotalVal / 100, 2) }}</span>
-        <span>Pending (Due) SAR {{ number_format($totalDuesVal / 100, 2) }}</span>
+        @forelse($currencySummaries as $currCode => $cs)
+            <span>Session Fee (Gross) {{ $currCode }} {{ number_format($cs['total_session_fee_minor'] / 100, 2) }}</span>
+            <span>Discount {{ $currCode }} {{ number_format((($cs['total_discount_minor'] ?? 0) + ($cs['total_exemption_minor'] ?? 0)) / 100, 2) }}</span>
+            <span>Received (Paid) {{ $currCode }} {{ number_format($cs['total_received_minor'] / 100, 2) }}</span>
+            <span>Pending (Due) {{ $currCode }} {{ number_format($cs['total_due_minor'] / 100, 2) }}</span>
+        @empty
+            <span>Session Fee (Gross) 0.00</span>
+            <span>Pending (Due) 0.00</span>
+        @endforelse
     </div>
 
-    {{-- ADVANCE CREDIT BANNER (If family has unallocated credit balance) --}}
-    @if($totalAdvanceCreditMinor > 0)
+    {{-- CURRENCY-GROUPED FAMILY SUMMARY STRIP (Never combines unlike currencies) --}}
+    @if($currencySummaries->isNotEmpty())
+        <div style="grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
+            @foreach($currencySummaries as $currCode => $cs)
+                <div class="ms-currency-summary-card" data-summary-currency="{{ $currCode }}" style="flex: 1 1 260px; background: #fff; border: 1px solid #ebe9f1; border-left: 4px solid #7367f0; border-radius: 6px; padding: 8px 14px; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 11px;">
+                    <div style="font-weight: 700; color: #5e5873; font-size: 12px;">
+                        <span class="ms-pill-lavender" style="font-weight: 700;">{{ $currCode }}</span> Summary
+                    </div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 12px; color: #6e6b7b;">
+                        <span>Gross: <strong>{{ $currCode }} {{ number_format($cs['total_session_fee_minor'] / 100, 2) }}</strong></span>
+                        @if((($cs['total_discount_minor'] ?? 0) + ($cs['total_exemption_minor'] ?? 0)) > 0)
+                            <span>Discount/Waiver: <strong style="color: #28c76f;">{{ $currCode }} {{ number_format((($cs['total_discount_minor'] ?? 0) + ($cs['total_exemption_minor'] ?? 0)) / 100, 2) }}</strong></span>
+                        @endif
+                        <span>Paid: <strong style="color: #0369a1;">{{ $currCode }} {{ number_format($cs['total_received_minor'] / 100, 2) }}</strong></span>
+                        <span>Outstanding: <strong style="color: #dc2626;">{{ $currCode }} {{ number_format($cs['total_due_minor'] / 100, 2) }}</strong></span>
+                    </div>
+                </div>
+            @endforeach
+        </div>
+    @endif
+
+    {{-- ADVANCE CREDIT BANNER (If family has unallocated credit balance, grouped strictly by currency) --}}
+    @if($advanceCreditsByCurr->isNotEmpty())
         <div style="grid-column: 1 / -1; background: #ecfdf5; border: 1px solid #10b981; border-radius: 6px; padding: 10px 16px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
             <div style="display: flex; align-items: center; gap: 8px;">
                 <span style="font-size: 18px;">💳</span>
                 <div>
-                    <strong style="color: #065f46; font-size: 13px;">Available Advance Credit Balance: {{ $advanceCredits->first()?->currency ?? 'SAR' }} {{ number_format($totalAdvanceCreditMinor / 100, 2) }}</strong>
+                    <strong style="color: #065f46; font-size: 13px;">
+                        Available Advance Credit Balance:
+                        @foreach($advanceCreditsByCurr as $acCurr => $acGroup)
+                            <span>{{ $acCurr }} {{ number_format($acGroup['unallocated_minor'] / 100, 2) }}</span>{{ !$loop->last ? ' | ' : '' }}
+                        @endforeach
+                    </strong>
                     <div style="font-size: 11px; color: #047857; margin-top: 2px;">
-                        Held across {{ $advanceCredits->count() }} receipt(s): 
+                        Held across {{ ($advanceCredits ?? collect())->count() }} receipt(s): 
                         @foreach($advanceCredits as $ac)
                             <span style="font-family: monospace; font-weight: 600;">{{ $ac->receipt_number }}</span> ({{ $ac->currency }} {{ number_format($ac->unallocated_minor / 100, 2) }}){{ !$loop->last ? ', ' : '' }}
                         @endforeach
-                        &bull; Will be automatically applied to future invoices upon generation or manual allocation.
+                        &bull; Will be automatically applied to future invoices in the same currency upon generation or manual allocation.
                     </div>
                 </div>
             </div>
@@ -51,17 +172,17 @@
         <div class="myskool-card">
             {{-- SEARCH FORM ROW --}}
             <form method="get" action="/challan" class="myskool-search-row" id="iq-search-form">
-                <div class="myskool-field" style="max-width: 120px;">
+                <div class="myskool-field" style="max-width: 130px;">
                     <label for="search-gr">GR #</label>
-                    <input id="search-gr" class="myskool-input" value="{{ request('family') }}" placeholder="4348" inputmode="text">
+                    <input id="search-gr" class="myskool-input" value="{{ $displayGr }}" placeholder="4348" inputmode="text" autocomplete="off">
                 </div>
-                <div class="myskool-field" style="max-width: 120px;">
+                <div class="myskool-field" style="max-width: 130px;">
                     <label for="search-family">Family Code</label>
-                    <input id="search-family" class="myskool-input" value="{{ $family?->family_code }}" placeholder="4348">
+                    <input id="search-family" class="myskool-input" value="{{ $displayFamilyCode }}" placeholder="4348" autocomplete="off">
                 </div>
                 <div class="myskool-field" style="flex: 1.5; min-width: 160px;">
                     <label for="search-invoice">Challan No</label>
-                    <input id="search-invoice" class="myskool-input" placeholder="Enter challan numk">
+                    <input id="search-invoice" class="myskool-input" value="{{ $displayInvoice }}" placeholder="Enter challan number" autocomplete="off">
                 </div>
 
                 <div style="display: flex; align-items: center; padding-bottom: 2px;">
@@ -71,12 +192,30 @@
                     </label>
                 </div>
 
-                <input id="search-query-hidden" type="hidden" name="family" value="{{ request('family') }}">
+                <input id="search-query-hidden" type="hidden" name="family" value="{{ $searchTerm }}">
+                <input id="search-by-hidden" type="hidden" name="search_by" value="{{ $searchBy }}">
                 <button type="submit" class="btn-ms-purple">Show</button>
                 <button type="button" class="btn-ms-icon" title="Reset filter" onclick="location.href='/challan'">Q</button>
                 <button type="button" class="btn-ms-purple" id="btn-open-create-fee">Create Fee</button>
-                <button type="button" class="btn-ms-purple" onclick="document.getElementById('fee-import-dialog').showModal()" style="margin-left:4px;" title="Import Outstanding or Collection CSV">⇪ Import Fees</button>
             </form>
+
+            @if($searchTerm !== '' && !$family)
+                <div id="search-no-results-banner" style="background: #fef2f2; border: 1px solid #fecaca; border-left: 4px solid #ef4444; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; color: #991b1b; font-size: 12px;">
+                    <div>
+                        <strong>No matching record found</strong> for
+                        @if($searchBy === 'family')
+                            Family Code
+                        @elseif($searchBy === 'invoice')
+                            Challan No
+                        @else
+                            GR # / Family Code
+                        @endif
+                        <span style="font-family: monospace; background: #fee2e2; padding: 1px 6px; border-radius: 4px; font-weight: 700;">{{ $searchTerm }}</span>.
+                        Please check the number and try again.
+                    </div>
+                    <a href="/challan" style="color: #b91c1c; font-weight: 600; text-decoration: underline; white-space: nowrap;">Clear Search</a>
+                </div>
+            @endif
 
             {{-- CREATE FEE PANEL (Enhanced with All 8 Fee Types, Rates & Live Preview) --}}
             <div id="create-fee-panel" class="create-fee-panel" style="{{ ($errors->has('fee_type_ids') || $errors->has('student_ids') || old('family_id')) ? 'display: block;' : 'display: none;' }}">
@@ -120,12 +259,12 @@
                             <div class="ms-chips-container" id="student-selector-chips">
                                 <button type="button" class="ms-chip active" data-student-id="all">All Students ({{ $familyStudents->count() }})</button>
                                 @foreach($familyStudents as $fst)
-                                    <button type="button" class="ms-chip" data-student-id="{{ $fst->id }}" data-grade="{{ $fst->grade_label }}" data-currency="{{ $fst->currency }}" data-dept="{{ $fst->department_id }}">{{ $fst->name }} ({{ $fst->grade_label ?: 'FS 1' }})</button>
+                                    <button type="button" class="ms-chip" data-student-id="{{ $fst->id }}">{{ $fst->name }} ({{ $fst->grade_label ?: 'FS 1' }})</button>
                                 @endforeach
                             </div>
                             <div id="hidden-student-inputs">
                                 @foreach($familyStudents as $fst)
-                                    <input type="hidden" name="student_ids[]" value="{{ $fst->id }}" class="cf-student-input">
+                                    <input type="hidden" name="student_ids[]" value="{{ $fst->id }}">
                                 @endforeach
                             </div>
                         </div>
@@ -157,7 +296,7 @@
                                 @endforeach
                             </div>
                             <div id="hidden-fee-type-inputs">
-                                <input type="hidden" name="fee_type_ids[]" value="{{ $typesList->firstWhere('code', 'monthly')?->id ?? 1 }}" class="cf-feetype-input">
+                                <input type="hidden" name="fee_type_ids[]" value="{{ $typesList->firstWhere('code', 'monthly')?->id ?? 1 }}">
                             </div>
                         </div>
 
@@ -176,7 +315,7 @@
                                     @endforeach
                                 </div>
                                 <div id="hidden-month-inputs">
-                                    <input type="hidden" name="months[]" value="{{ $currentMonth }}" class="cf-month-input">
+                                    <input type="hidden" name="months[]" value="{{ $currentMonth }}">
                                 </div>
                             </div>
                             <div style="width: 140px;">
@@ -237,9 +376,6 @@
                     <a href="/reports?family={{ urlencode($family?->family_code ?: (string)($family?->id ?? '')) }}" class="myskool-pill-btn" target="_blank">
                         Print Report
                     </a>
-                    <button type="button" class="myskool-pill-btn" onclick="document.getElementById('fee-import-dialog').showModal()">
-                        Upload
-                    </button>
                     <button type="button" class="myskool-pill-btn" title="View options" onclick="alertNotice('Viewing fee collection ledger options')">
                         &#9707;
                     </button>
@@ -272,23 +408,10 @@
                                 $balanceFmt = number_format($balanceMinor / 100, 0, '.', '');
                                 $isSettled = ($balanceMinor === 0);
                             @endphp
-                            <tr id="row-item-{{ $item->id }}" 
-                                class="clickable-row js-fee-row {{ $isSettled ? 'is-settled' : '' }}" 
-                                data-item-id="{{ $item->id }}" 
-                                data-period="{{ $periodKey }}" 
-                                data-period-label="{{ $periodLabel }}" 
-                                data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
-                                data-currency="{{ $item->currency }}"
-                                data-student="{{ $item->student_name }}"
-                                data-gr="{{ $item->gr_number }}"
-                                data-type="{{ $item->description ?: 'Monthly Fee' }}"
-                                data-dept="{{ $item->department_name ?? '' }}"
-                                data-discount="{{ number_format($item->discount_minor / 100, 2, '.', '') }}"
-                                data-discount-reason="{{ $item->discount_reason ?? '' }}"
+                            <tr class="clickable-row js-fee-row {{ $isSettled ? 'is-settled' : '' }}"
                                 style="{{ $isSettled ? 'opacity: 0.6; background: #fafafc;' : '' }}">
                                 <td style="text-align: center;">
-                                    <input type="checkbox" class="js-item-checkbox" value="{{ $item->id }}" 
-                                           data-item-id="{{ $item->id }}"
+                                    <input type="checkbox" class="js-item-checkbox" value="{{ $item->id }}"
                                            data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
                                            data-currency="{{ $item->currency }}"
                                            data-period="{{ $periodKey }}"
@@ -308,7 +431,7 @@
                                 </td>
                                 <td>{{ $item->description ?: 'Monthly Fee' }}</td>
                                 <td>
-                                    <span class="ms-pill-lavender js-target-month-btn" data-period="{{ $periodKey }}" title="Click to pick {{ $periodLabel }}">
+                                    <span class="ms-pill-lavender" title="Click to pick {{ $periodLabel }}">
                                         {{ $periodLabel }}
                                     </span>
                                     @if((int)$item->discount_minor > 0)
@@ -325,7 +448,7 @@
                                     @endif
                                 </td>
                                 <td>
-                                    <span class="ms-pill-lavender row-balance-pill" id="balance-pill-{{ $item->id }}">
+                                    <span class="ms-pill-lavender">
                                         {{ $item->currency }} {{ $balanceFmt }}
                                     </span>
                                 </td>
@@ -336,8 +459,6 @@
                                                 data-action="discount"
                                                 data-id="{{ $item->id }}"
                                                 data-currency="{{ $item->currency }}"
-                                                data-student="{{ $item->student_name }}"
-                                                data-month="{{ $periodLabel }}"
                                                 data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
                                                 data-discount="{{ number_format($item->discount_minor / 100, 2, '.', '') }}"
                                                 data-discount-reason="{{ $item->discount_reason ?? '' }}">
@@ -348,8 +469,6 @@
                                                 data-action="installment"
                                                 data-id="{{ $item->id }}"
                                                 data-currency="{{ $item->currency }}"
-                                                data-student="{{ $item->student_name }}"
-                                                data-month="{{ $periodLabel }}"
                                                 data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
                                                 title="Installments">
                                                 %
@@ -359,8 +478,6 @@
                                                 data-action="exempt"
                                                 data-id="{{ $item->id }}"
                                                 data-currency="{{ $item->currency }}"
-                                                data-student="{{ $item->student_name }}"
-                                                data-month="{{ $periodLabel }}"
                                                 data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
                                                 title="Exemption">
                                                 ☆
@@ -371,8 +488,6 @@
                                                     data-action="void"
                                                     data-id="{{ $item->id }}"
                                                     data-currency="{{ $item->currency }}"
-                                                    data-student="{{ $item->student_name }}"
-                                                    data-month="{{ $periodLabel }}"
                                                     data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
                                                     title="Void Fee">
                                                     🗑
@@ -389,6 +504,8 @@
                                 <td colspan="8" style="text-align: center; padding: 25px; color: #b9b9c3;">
                                     @if($family)
                                         No outstanding fee obligations for this family.
+                                    @elseif($searchTerm !== '')
+                                        <span style="color: #dc2626; font-weight: 600;">No student or family found matching "{{ $searchTerm }}".</span>
                                     @else
                                         Search a student by GR # or Family Code above to load fees.
                                     @endif
@@ -443,7 +560,7 @@
             </div>
         @endif
 
-                {{-- UNIFIED FEE HISTORY CARD --}}
+        {{-- UNIFIED FEE HISTORY CARD --}}
         @if($family)
             <div class="myskool-card" style="margin-top: 16px;">
                 <div class="myskool-history-header" id="historyToggleBtn">
@@ -461,7 +578,10 @@
 
                 {{-- FILTER / SEARCH BAR --}}
                 <form method="get" action="{{ url()->current() }}" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 16px; background: #fafafc; border-bottom: 1px solid #ebe9f1;">
-                    <input type="hidden" name="family" value="{{ request('family', $family->family_code ?: $family->id) }}">
+                    <input type="hidden" name="family" value="{{ $searchTerm !== '' ? $searchTerm : ($family->family_code ?: $family->id) }}">
+                    @if($searchBy !== '')
+                        <input type="hidden" name="search_by" value="{{ $searchBy }}">
+                    @endif
                     
                     {{-- Search Input --}}
                     <div style="flex: 1; min-width: 170px;">
@@ -500,58 +620,90 @@
                     <button type="submit" class="btn-ms-purple" style="height: 32px; padding: 0 12px; font-size: 12px; border-radius: 4px;">Filter</button>
                     
                     @if(request()->hasAny(['search', 'source', 'student_gr', 'date_from', 'date_to']))
-                        <a href="{{ url()->current() }}?family={{ urlencode(request('family', $family->family_code ?: (string)$family->id)) }}" style="font-size: 11px; color: #7367f0; text-decoration: none; padding: 4px 6px;">Clear</a>
+                        <a href="{{ url()->current() }}?family={{ urlencode($searchTerm !== '' ? $searchTerm : ($family->family_code ?: (string)$family->id)) }}{{ $searchBy !== '' ? '&search_by=' . urlencode($searchBy) : '' }}" style="font-size: 11px; color: #7367f0; text-decoration: none; padding: 4px 6px;">Clear</a>
                     @endif
                 </form>
 
                 <div id="historyTableContainer" style="overflow-x: auto;">
-                    <table class="myskool-table">
+                    <table class="myskool-table myskool-history-table">
                         <thead>
                             <tr>
-                                <th>SLIP NO#</th>
-                                <th>FEE TYPE</th>
-                                <th>CLASS</th>
-                                <th>STUDENT</th>
-                                <th>DETAILS</th>
-                                <th>DISCOUNT</th>
-                                <th>TOTAL</th>
-                                <th>RECEIVING DATE</th>
-                                <th>RECEIVED BY</th>
-                                <th style="text-align: right;">ACTIONS</th>
+                                <th class="col-slip">SLIP NO#</th>
+                                <th class="col-fee-type">FEE TYPE</th>
+                                <th class="col-class">CLASS</th>
+                                <th class="col-student">STUDENT</th>
+                                <th class="col-details">DETAILS</th>
+                                <th class="col-discount" style="text-align: right;">DISCOUNT</th>
+                                <th class="col-total" style="text-align: right;">TOTAL</th>
+                                <th class="col-date">RECEIVING DATE</th>
+                                <th class="col-received-by">RECEIVED BY</th>
+                                <th class="col-actions" style="text-align: right;">ACTIONS</th>
                             </tr>
                         </thead>
                         <tbody>
                             @forelse($feeHistory as $receipt)
                                 <tr style="{{ $receipt->is_reversed ? 'opacity: 0.6; background: #fff5f5;' : '' }}">
-                                    <td>
-                                        <span class="ms-pill-lavender" style="font-weight: 700; cursor: pointer;" onclick='showReceiptDetails(@json($receipt->details_payload))' title="Click to view complete itemized breakdown">
-                                            {{ $receipt->slip_number }}
-                                        </span>
-                                        @if($receipt->source === 'portal')
-                                            <span style="font-size: 9px; background: #e0f2fe; color: #0369a1; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">Portal</span>
-                                        @else
-                                            <span style="font-size: 9px; background: #fef3c7; color: #92400e; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">MySkool</span>
-                                        @endif
-                                        @if($receipt->is_reversed)
-                                            <span style="font-size: 9px; background: #fee2e2; color: #991b1b; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">REVERSED</span>
-                                        @endif
-                                    </td>
-                                    <td>{{ $receipt->fee_types_str }}</td>
-                                    <td>{{ $receipt->classes_str }}</td>
-                                    <td>
-                                        <div style="font-weight: 600; color: #5e5873; max-width: 170px; white-space: normal; line-height: 1.3;">
-                                            {{ $receipt->students_str }}
+                                    <td class="col-slip">
+                                        <div class="ms-history-slip-cell">
+                                            <span class="ms-pill-lavender" style="font-weight: 700; cursor: pointer;" onclick='showReceiptDetails(@json($receipt->details_payload))' title="Click to view complete itemized breakdown">
+                                                {{ $receipt->slip_number }}
+                                            </span>
+                                            @if($receipt->source === 'portal')
+                                                <span class="ms-source-badge portal">Portal</span>
+                                            @else
+                                                <span class="ms-source-badge myskool">MySkool</span>
+                                            @endif
+                                            @if($receipt->is_reversed)
+                                                <span class="ms-source-badge reversed">REVERSED</span>
+                                            @endif
                                         </div>
                                     </td>
-                                    <td><span class="ms-pill-lavender">{{ $receipt->months_str }}</span></td>
-                                    <td>{{ (int)$receipt->discount_minor > 0 ? $receipt->currency . ' ' . number_format($receipt->discount, 2) : '0' }}</td>
-                                    <td><b>{{ $receipt->currency }} {{ number_format($receipt->amount, 2) }}</b></td>
-                                    <td>{{ $receipt->received_on_formatted }}</td>
-                                    <td>
-                                        <div style="font-size: 11px; color: #5e5873;">{{ $receipt->received_by_name ?? '—' }}</div>
-                                        <div style="font-size: 10px; color: #b9b9c3;">{{ $receipt->payment_method ?? 'Cash' }}</div>
+                                    <td class="col-fee-type">{{ $receipt->fee_types_str }}</td>
+                                    <td class="col-class">{{ $receipt->classes_str }}</td>
+                                    <td class="col-student">
+                                        <div class="ms-history-students" title="{{ $receipt->students_str }}">
+                                            @if(!empty($receipt->students) && is_array($receipt->students))
+                                                @foreach($receipt->students as $stuEntry)
+                                                    @php
+                                                        $stuLabel = is_array($stuEntry)
+                                                            ? trim(($stuEntry['name'] ?? '') . (!empty($stuEntry['gr_number']) ? ' (' . $stuEntry['gr_number'] . ')' : ''))
+                                                            : trim((string) $stuEntry);
+                                                    @endphp
+                                                    @if($stuLabel !== '')
+                                                        <span class="ms-history-student-item">{{ $stuLabel }}</span>
+                                                    @endif
+                                                @endforeach
+                                            @else
+                                                <span class="ms-history-student-item">{{ $receipt->students_str }}</span>
+                                            @endif
+                                        </div>
                                     </td>
-                                    <td>
+                                    <td class="col-details">
+                                        <div class="ms-history-months" title="{{ $receipt->months_str }}">
+                                            @php
+                                                $monthItems = (!empty($receipt->months) && is_array($receipt->months))
+                                                    ? array_values(array_filter(array_map('trim', $receipt->months)))
+                                                    : array_values(array_filter(array_map('trim', explode(',', (string) $receipt->months_str))));
+                                            @endphp
+                                            @forelse($monthItems as $mItem)
+                                                <span class="ms-pill-lavender ms-month-badge">{{ $mItem }}</span>
+                                            @empty
+                                                <span class="ms-pill-lavender ms-month-badge">{{ $receipt->months_str ?: '—' }}</span>
+                                            @endforelse
+                                        </div>
+                                    </td>
+                                    <td class="col-discount" style="text-align: right; white-space: nowrap;">
+                                        {{ (int)$receipt->discount_minor > 0 ? $receipt->currency . ' ' . number_format($receipt->discount, 2) : '0' }}
+                                    </td>
+                                    <td class="col-total" style="text-align: right; white-space: nowrap;">
+                                        <b>{{ $receipt->currency }} {{ number_format($receipt->amount, 2) }}</b>
+                                    </td>
+                                    <td class="col-date" style="white-space: nowrap;">{{ $receipt->received_on_formatted }}</td>
+                                    <td class="col-received-by">
+                                        <div style="font-size: 11px; color: #5e5873; line-height: 1.25;">{{ $receipt->received_by_name ?? '—' }}</div>
+                                        <div style="font-size: 10px; color: #b9b9c3; line-height: 1.2;">{{ $receipt->payment_method ?? 'Cash' }}</div>
+                                    </td>
+                                    <td class="col-actions">
                                         <div class="ms-action-group">
                                             {{-- Print Action --}}
                                             <a href="{{ $receipt->print_url }}" target="_blank" class="btn-ms-square-action" style="background: var(--ms-purple); color: #fff; text-decoration: none;" title="{{ $receipt->is_historical ? 'Print Historical Payment Record' : 'Print Official Receipt' }}">
@@ -609,27 +761,43 @@
                 <span class="myskool-card-gear" title="Settings">&#9881;</span>
                 <div class="myskool-avatar">&#128100;</div>
                 <div class="myskool-student-name">
-                    {{ $firstStudent?->student_name ?? ($family ? \App\Services\GuardianNameResolver::forFamily($family) : 'Laiqa Nazim') }}
+                    @if($family)
+                        {{ $firstStudent?->student_name ?? \App\Services\GuardianNameResolver::forFamily($family) }}
+                    @elseif($searchTerm !== '')
+                        No Student Found
+                    @else
+                        No Student Selected
+                    @endif
                 </div>
                 <div class="myskool-father-name">
                     @php
                         $resolvedParent = $family ? \App\Services\GuardianNameResolver::forFamilyDisplay($family) : null;
                     @endphp
-                    {{ $resolvedParent['label'] ?? 'Parent / Guardian' }}: {{ $resolvedParent['name'] ?? 'Not provided' }}
+                    @if($family)
+                        {{ $resolvedParent['label'] ?? 'Parent / Guardian' }}: {{ $resolvedParent['name'] ?? 'Not provided' }}
+                    @elseif($searchTerm !== '')
+                        No record for "{{ $searchTerm }}"
+                    @else
+                        Search GR # or Family Code
+                    @endif
                 </div>
                 <div class="myskool-class-name">
-                    {{ $firstStudent?->class_name ?? '11th (FED) - A' }}
+                    {{ $family ? ($firstStudent?->class_name ?? '—') : '—' }}
                 </div>
                 <div class="myskool-badge-row">
-                    <span class="myskool-status-badge">present</span>
-                    <span class="myskool-campus-badge">Main Campus</span>
+                    @if($family)
+                        <span class="myskool-status-badge">present</span>
+                        <span class="myskool-campus-badge">Main Campus</span>
+                    @else
+                        <span class="myskool-campus-badge">Main Campus</span>
+                    @endif
                 </div>
                 <div class="myskool-profile-actions">
-                    <a href="{{ $family ? route('families.challan.pdf', $family->id) : '#' }}" target="_blank" class="myskool-profile-btn" style="text-decoration: none;" title="Print Family Consolidated Challan">
+                    <a href="{{ $family ? route('families.challan.pdf', $family->id) : '#' }}" target="{{ $family ? '_blank' : '_self' }}" class="myskool-profile-btn" style="text-decoration: none; {{ !$family ? 'pointer-events: none; opacity: 0.5;' : '' }}" title="Print Family Consolidated Challan">
                         &#128438; Print
                     </a>
-                    <button type="button" class="myskool-profile-btn" onclick="alertNotice('Message dialog opened for family')">&#9993;</button>
-                    <a href="/invoices?family={{ urlencode($family?->family_code ?: (string)($family?->id ?? '')) }}" class="myskool-profile-btn" style="text-decoration: none;">&#9707;</a>
+                    <button type="button" class="myskool-profile-btn" onclick="alertNotice('Message dialog opened for family')" {{ !$family ? 'disabled style=opacity:0.5;cursor:not-allowed;' : '' }}>&#9993;</button>
+                    <a href="{{ $family ? '/invoices?family=' . urlencode($family->family_code ?: (string)$family->id) : '/invoices' }}" class="myskool-profile-btn" style="text-decoration: none;">&#9707;</a>
                 </div>
             </div>
 
@@ -653,20 +821,20 @@
                 <div class="myskool-form-group">
                     <label style="display: flex; justify-content: space-between; align-items: center;">
                         <span>Total dues</span>
-                        @if($dueGroups->isNotEmpty())
+                        @if($currencyDuesMap->isNotEmpty())
                             <span style="font-size: 11px; color: var(--ms-purple); font-weight: 600;">
-                                {{ $dueGroups->pluck('currency')->unique()->implode(', ') }}
+                                {{ $currencyDuesMap->keys()->implode(', ') }}
                             </span>
                         @endif
                     </label>
-                    @if($dueGroups->isNotEmpty())
+                    @if($currencyDuesMap->isNotEmpty())
                         <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px;">
-                            @foreach($dueGroups as $dg)
-                                <span class="ms-pill-lavender" style="font-size: 11px; font-weight: 600;">{{ $dg->currency }} {{ number_format($dg->balance / 100, 2) }}</span>
+                            @foreach($currencyDuesMap as $dueCurr => $dueBalMinor)
+                                <span class="ms-pill-lavender" style="font-size: 11px; font-weight: 600;">{{ $dueCurr }} {{ number_format($dueBalMinor / 100, 2) }}</span>
                             @endforeach
                         </div>
                     @endif
-                    <input class="myskool-input disabled" id="disp_total_dues" readonly value="{{ number_format($totalDuesVal / 100, 0, '.', '') }}">
+                    <input class="myskool-input disabled" id="disp_total_dues" readonly value="{{ $defaultDuesDisplay }}">
                 </div>
 
                 {{-- Receiving Amount --}}
@@ -678,14 +846,14 @@
                 {{-- Balance --}}
                 <div class="myskool-form-group">
                     <label>Balance</label>
-                    <input class="myskool-input disabled" id="disp_remaining_balance" readonly value="{{ number_format($totalDuesVal / 100, 0, '.', '') }}">
+                    <input class="myskool-input disabled" id="disp_remaining_balance" readonly value="{{ $defaultDuesDisplay }}">
                 </div>
 
                 {{-- LIVE ALLOCATION BREAKDOWN CARD (Requirement 9) --}}
                 <div id="allocation_breakdown_card" style="display: none; border: 1px solid #dcd7fa; border-radius: 6px; padding: 10px; background: #faf9ff; margin-bottom: 12px; font-size: 11px;">
                     <div style="font-weight: 700; color: var(--ms-purple); margin-bottom: 6px; display: flex; justify-content: space-between;">
                         <span>Allocation Breakdown</span>
-                        <span id="breakdown_currency_badge" style="font-size: 10px; background: #e0e7ff; color: #4338ca; padding: 1px 6px; border-radius: 10px;">SAR</span>
+                        <span id="breakdown_currency_badge" style="font-size: 10px; background: #e0e7ff; color: #4338ca; padding: 1px 6px; border-radius: 10px;">{{ $singleCurrencyCode ?? 'SAR' }}</span>
                     </div>
                     <div id="allocation_breakdown_list" style="display: flex; flex-direction: column; gap: 4px;"></div>
                 </div>
@@ -731,14 +899,22 @@
                     <textarea class="myskool-input" id="receive_note" name="note" rows="3" placeholder="Enter note" style="height: 65px; resize: vertical;"></textarea>
                 </div>
 
-                {{-- Registration Fee Receiving --}}
-                @if(!empty($registrationStatus['has_obligation']) && empty($registrationStatus['is_fully_paid']) && empty($registrationStatus['is_exempted']))
+                {{-- Registration Fee Receiving (Grouped strictly by currency) --}}
+                @php
+                    $unpaidRegByCurr = collect($registrationStatus['by_currency'] ?? [])
+                        ->filter(fn($r) => !empty($r['has_obligation']) && empty($r['is_fully_paid']) && empty($r['is_exempted']) && (int)($r['balance_minor'] ?? 0) > 0);
+                @endphp
+                @if($unpaidRegByCurr->isNotEmpty())
+                    @php
+                        $regDueLabels = $unpaidRegByCurr->map(fn($r, $c) => $c . ' ' . number_format($r['balance_minor'] / 100, 2))->values()->implode(' | ');
+                        $firstRegEntry = $unpaidRegByCurr->first();
+                    @endphp
                     <div style="background: #f8f7ff; border: 1px solid #dcd7fa; border-radius: 4px; padding: 6px 8px; margin-top: 4px;">
                         <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; margin: 0; cursor: pointer; color: var(--ms-purple);">
                             <input type="checkbox" name="receive_registration_fee" id="reg_fee_toggle" value="1" checked>
-                            <b>Include Registration Fee (Due: {{ number_format($registrationStatus['balance_minor'] / 100, 2) }})</b>
+                            <b>Include Registration Fee (Due: {{ $regDueLabels }})</b>
                         </label>
-                        <input class="myskool-input" type="number" step=".01" min="0" name="registration_amount" id="reg_fee_amount" value="{{ number_format($registrationStatus['balance_minor'] / 100, 2, '.', '') }}" style="height: 28px; margin-top: 4px;">
+                        <input class="myskool-input" type="number" step=".01" min="0" name="registration_amount" id="reg_fee_amount" value="{{ number_format(($firstRegEntry['balance_minor'] ?? 0) / 100, 2, '.', '') }}" style="height: 28px; margin-top: 4px;">
                     </div>
                 @endif
 
@@ -762,7 +938,6 @@
         <form method="post" id="drawerActionForm" action="/challan/discount">
             @csrf
             <input type="hidden" name="invoice_item_id" id="drawer_item_id">
-            <input type="hidden" name="payment_id" id="drawer_payment_id">
 
             {{-- Existing Discount Info & Removal Option --}}
             <div id="drawer_existing_discount_box" style="display: none; background: #fff8e6; border: 1px solid #ffe2a8; border-radius: 4px; padding: 8px 10px; margin-bottom: 12px; font-size: 11px;">
@@ -783,26 +958,15 @@
             </div>
 
             {{-- 2. Discount Input --}}
-            <div class="myskool-drawer-field" id="drawer_discount_block">
+            <div class="myskool-drawer-field">
                 <label>Discount</label>
                 <input class="myskool-input" id="drawer_discount_input" name="amount" type="number" step=".01" min="0" placeholder="50" style="font-weight: 600;">
             </div>
 
             {{-- 3. Net Balance (Live calculated) --}}
-            <div class="myskool-drawer-field" id="drawer_net_block">
+            <div class="myskool-drawer-field">
                 <label>Net Balance</label>
                 <input class="myskool-input disabled" id="drawer_net_balance" readonly value="300">
-            </div>
-
-            {{-- Extra Installment Split block --}}
-            <div class="myskool-drawer-field" id="drawer_installment_block" hidden>
-                <label>Split into Installments</label>
-                <div style="display: flex; gap: 6px; margin-bottom: 8px;">
-                    <button type="button" class="myskool-pill-btn" onclick="buildInstallments(2)">2 Parts</button>
-                    <button type="button" class="myskool-pill-btn" onclick="buildInstallments(3)">3 Parts</button>
-                    <button type="button" class="myskool-pill-btn" onclick="buildInstallments(4)">4 Parts</button>
-                </div>
-                <div id="drawer_installment_rows"></div>
             </div>
 
             {{-- Discount Reason Category Preset --}}
@@ -840,31 +1004,131 @@
 <script>
 window.IQRA_CATALOG_RATES = @json($catalogRates ?? []);
 window.IQRA_FAMILY_STUDENTS = @json($familyStudents ?? []);
-window.IQRA_FEE_TYPES = @json($feeTypes ?? []);
 window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
+window.IQRA_CURRENCY_DUES = @json($currencyDuesFloatMap);
+window.IQRA_DEFAULT_DUES_DISPLAY = @json($defaultDuesDisplay);
+window.IQRA_IS_MULTI_CURRENCY = @json($isMultiCurrencyDues);
 </script>
 
 <script>
 (() => {
-  // Search handling
+  // Toast Notification Utility (Task 1.9B)
+  function showToast(message, type) {
+    const toastType = (type === 'error') ? 'error' : 'success';
+    const container = document.getElementById('msToastContainer') || document.body;
+    if (container.id === 'msToastContainer') {
+      container.innerHTML = '';
+    }
+    const toast = document.createElement('div');
+    toast.className = 'ms-toast ' + toastType;
+    toast.textContent = message || '';
+    container.appendChild(toast);
+    setTimeout(() => {
+      if (toast.parentNode) {
+        toast.parentNode.removeChild(toast);
+      }
+    }, 3500);
+  }
+  window.showToast = showToast;
+
+  window.alertNotice = function(msg, type = 'success') {
+    showToast(msg, type);
+  };
+
+  // Search handling (Active-field tracking + stale-field clearing)
   const form = document.getElementById('iq-search-form');
   const gr = document.getElementById('search-gr');
   const fam = document.getElementById('search-family');
   const inv = document.getElementById('search-invoice');
   const hiddenQ = document.getElementById('search-query-hidden');
+  const hiddenBy = document.getElementById('search-by-hidden');
 
-  if (form) {
+  if (form && gr && fam && inv && hiddenQ) {
+    const initialVals = {
+      gr: (gr.value || '').trim(),
+      family: (fam.value || '').trim(),
+      invoice: (inv.value || '').trim()
+    };
+    let activeSearchField = (hiddenBy && hiddenBy.value) ? hiddenBy.value : '';
+
+    const searchInputs = [
+      { mode: 'gr', el: gr, others: [fam, inv] },
+      { mode: 'family', el: fam, others: [gr, inv] },
+      { mode: 'invoice', el: inv, others: [gr, fam] }
+    ];
+
+    searchInputs.forEach(({ mode, el, others }) => {
+      const syncFromInput = () => {
+        activeSearchField = mode;
+        const currentVal = (el.value || '').trim();
+        if (currentVal !== '') {
+          others.forEach(otherEl => { otherEl.value = ''; });
+        }
+        hiddenQ.value = currentVal;
+        if (hiddenBy) {
+          hiddenBy.value = mode;
+        }
+      };
+
+      el.addEventListener('input', syncFromInput);
+      el.addEventListener('change', syncFromInput);
+      el.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          activeSearchField = mode;
+        }
+      });
+    });
+
     form.addEventListener('submit', e => {
-      const val = (fam.value || '').trim() || (gr.value || '').trim() || (inv.value || '').trim();
-      if (!val) { e.preventDefault(); gr.focus(); return; }
-      hiddenQ.value = val;
+      const grVal = (gr.value || '').trim();
+      const famVal = (fam.value || '').trim();
+      const invVal = (inv.value || '').trim();
+      const valByMode = { gr: grVal, family: famVal, invoice: invVal };
+
+      let chosenMode = '';
+      if (activeSearchField && valByMode[activeSearchField]) {
+        chosenMode = activeSearchField;
+      } else if (grVal && grVal !== initialVals.gr) {
+        chosenMode = 'gr';
+      } else if (famVal && famVal !== initialVals.family) {
+        chosenMode = 'family';
+      } else if (invVal && invVal !== initialVals.invoice) {
+        chosenMode = 'invoice';
+      } else if (document.activeElement === gr && grVal) {
+        chosenMode = 'gr';
+      } else if (document.activeElement === fam && famVal) {
+        chosenMode = 'family';
+      } else if (document.activeElement === inv && invVal) {
+        chosenMode = 'invoice';
+      } else if (grVal) {
+        chosenMode = 'gr';
+      } else if (famVal) {
+        chosenMode = 'family';
+      } else if (invVal) {
+        chosenMode = 'invoice';
+      }
+
+      const chosenVal = chosenMode ? valByMode[chosenMode] : '';
+      if (!chosenVal) {
+        e.preventDefault();
+        gr.focus();
+        return;
+      }
+
+      hiddenQ.value = chosenVal;
+      if (hiddenBy) {
+        hiddenBy.value = chosenMode;
+      }
     });
   }
 
-  // Receive Form & Multi-Item Allocation Engine
-  const totalDues = {{ $totalDuesVal / 100 }};
+  // Receive Form & Multi-Item Allocation Engine (Currency-Isolated)
+  const currencyDuesMap = window.IQRA_CURRENCY_DUES || {};
+  const defaultDuesDisplay = window.IQRA_DEFAULT_DUES_DISPLAY || '0';
+  const isMultiCurrency = Boolean(window.IQRA_IS_MULTI_CURRENCY);
   const inputMonthly = document.getElementById('input_monthly_amount');
   const dispRemaining = document.getElementById('disp_remaining_balance');
+  const ledgerScopeSelect = document.getElementById('ledger_scope');
   const regToggle = document.getElementById('reg_fee_toggle');
   const regAmount = document.getElementById('reg_fee_amount');
   const selectedPeriodInput = document.getElementById('selected_period');
@@ -873,54 +1137,72 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
   const selectedCount = document.getElementById('selected_items_count');
   const selectedSum = document.getElementById('selected_items_sum');
   const breakdownCard = document.getElementById('allocation_breakdown_card');
+  const breakdownCurrencyBadge = document.getElementById('breakdown_currency_badge');
   const breakdownList = document.getElementById('allocation_breakdown_list');
   const advanceCreditBox = document.getElementById('advance_credit_box');
   const advanceCreditText = document.getElementById('advance_credit_text');
   const chkAllowAdvanceCredit = document.getElementById('chk_allow_advance_credit');
-  const btnSubmitReceive = document.getElementById('btn-submit-receive');
   const chkSelectAll = document.getElementById('chk_select_all');
 
   const itemCheckboxes = Array.from(document.querySelectorAll('.js-item-checkbox'));
   const feeRows = Array.from(document.querySelectorAll('.js-fee-row'));
 
-  function getSelectedItems() {
-    return itemCheckboxes.filter(cb => cb.checked).map(cb => {
-      const row = cb.closest('tr');
-      return {
-        id: cb.value,
-        balance: parseFloat(cb.dataset.balance) || 0,
-        currency: cb.dataset.currency,
-        period: cb.dataset.period,
-        periodLabel: cb.dataset.periodLabel,
-        student: cb.dataset.student,
-        gr: cb.dataset.gr,
-        type: cb.dataset.type,
-      };
-    });
-  }
-
-  function updateHiddenInputs(selected) {
-    if (!hiddenSelectedItems) return;
-    hiddenSelectedItems.innerHTML = '';
-    selected.forEach(item => {
+  function renderHiddenInputs(container, inputName, values) {
+    if (!container) return;
+    container.innerHTML = '';
+    values.forEach(val => {
       const input = document.createElement('input');
       input.type = 'hidden';
-      input.name = 'selected_item_ids[]';
-      input.value = item.id;
-      hiddenSelectedItems.appendChild(input);
+      input.name = inputName;
+      input.value = val;
+      container.appendChild(input);
     });
   }
 
-  function updateAllocationBreakdown() {
-    const selected = getSelectedItems();
-    updateHiddenInputs(selected);
+  function getSelectedItems() {
+    return itemCheckboxes.filter(cb => cb.checked).map(cb => ({
+      id: cb.value,
+      balance: parseFloat(cb.dataset.balance) || 0,
+      currency: cb.dataset.currency,
+      period: cb.dataset.period,
+      periodLabel: cb.dataset.periodLabel,
+      student: cb.dataset.student,
+      gr: cb.dataset.gr,
+      type: cb.dataset.type,
+    }));
+  }
+
+  function resolveActiveCurrency(selected) {
+    if (selected.length > 0 && selected[0].currency) {
+      return selected[0].currency;
+    }
+    if (ledgerScopeSelect && ledgerScopeSelect.value && ledgerScopeSelect.value.includes(':')) {
+      const parts = ledgerScopeSelect.value.split(':');
+      if (parts[2]) return parts[2].toUpperCase();
+    }
+    const keys = Object.keys(currencyDuesMap);
+    return keys.length === 1 ? keys[0] : null;
+  }
+
+  function updateAllocationBreakdown(preselected) {
+    const selected = Array.isArray(preselected) ? preselected : getSelectedItems();
+    renderHiddenInputs(hiddenSelectedItems, 'selected_item_ids[]', selected.map(item => item.id));
 
     const monthlyVal = Number(inputMonthly?.value) || 0;
     const regVal = (regToggle && regToggle.checked && regAmount) ? (Number(regAmount.value) || 0) : 0;
     const paidTotal = monthlyVal + regVal;
+    const activeCurr = resolveActiveCurrency(selected);
 
     if (dispRemaining) {
-      dispRemaining.value = Math.max(0, totalDues - paidTotal).toFixed(0);
+      if (isMultiCurrency && selected.length === 0 && paidTotal <= 0) {
+        dispRemaining.value = defaultDuesDisplay;
+      } else if (activeCurr && Object.prototype.hasOwnProperty.call(currencyDuesMap, activeCurr)) {
+        const currDue = Number(currencyDuesMap[activeCurr]) || 0;
+        const rem = Math.max(0, currDue - paidTotal);
+        dispRemaining.value = isMultiCurrency ? `${activeCurr} ${rem.toFixed(2)}` : rem.toFixed(0);
+      } else {
+        dispRemaining.value = defaultDuesDisplay;
+      }
     }
 
     if (selected.length === 0) {
@@ -932,7 +1214,10 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
 
     // Show Selected Summary
     const totalSelectedBal = selected.reduce((acc, it) => acc + it.balance, 0);
-    const curr = selected[0]?.currency || 'SAR';
+    const curr = selected[0]?.currency || activeCurr || 'SAR';
+    if (breakdownCurrencyBadge) {
+      breakdownCurrencyBadge.textContent = curr;
+    }
     if (selectedSummary) {
       selectedSummary.style.display = 'block';
       selectedCount.textContent = `${selected.length} item(s) selected`;
@@ -945,17 +1230,14 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
       breakdownList.innerHTML = '';
 
       let availablePayment = monthlyVal;
-      let totalAllocated = 0;
 
       selected.forEach(item => {
         const itemDue = item.balance;
         const allocated = Math.min(availablePayment, itemDue);
         availablePayment -= allocated;
-        totalAllocated += allocated;
 
         const isFull = (allocated >= itemDue - 0.001);
         const isPartial = (allocated > 0 && !isFull);
-        const isNone = (allocated === 0);
 
         const rowDiv = document.createElement('div');
         rowDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 3px 0; border-bottom: 1px dashed #e2e8f0;';
@@ -990,6 +1272,17 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
     }
   }
 
+  function applySelectionToReceiveForm(selected, syncPeriod) {
+    const sum = selected.reduce((acc, it) => acc + it.balance, 0);
+    if (inputMonthly) {
+      inputMonthly.value = sum > 0 ? sum.toFixed(2) : '';
+    }
+    if (syncPeriod && selectedPeriodInput && selected.length > 0) {
+      selectedPeriodInput.value = selected[0].period;
+    }
+    updateAllocationBreakdown(selected);
+  }
+
   // Checkbox interactions with cross-currency prevention
   itemCheckboxes.forEach(cb => {
     cb.addEventListener('change', () => {
@@ -998,30 +1291,15 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
         const firstCurr = selected[0].currency;
         const mismatched = selected.find(it => it.currency !== firstCurr);
         if (mismatched) {
-          alertNotice(`Cross-currency allocation is not allowed. Items in ${mismatched.currency} cannot be combined with ${firstCurr}.`);
+          alertNotice(`Cross-currency allocation is not allowed. Items in ${mismatched.currency} cannot be combined with ${firstCurr}.`, 'error');
           cb.checked = false;
           return;
         }
       }
 
       // Sync row class
-      const row = cb.closest('tr');
-      if (row) {
-        if (cb.checked) row.classList.add('myskool-row-selected');
-        else row.classList.remove('myskool-row-selected');
-      }
-
-      // Auto-update receiving amount to selected sum if amount is empty or matches previous sum
-      const curSelected = getSelectedItems();
-      const sum = curSelected.reduce((acc, it) => acc + it.balance, 0);
-      if (inputMonthly) {
-        inputMonthly.value = sum > 0 ? sum.toFixed(2) : '';
-      }
-      if (selectedPeriodInput && curSelected.length > 0) {
-        selectedPeriodInput.value = curSelected[0].period;
-      }
-
-      updateAllocationBreakdown();
+      cb.closest('tr')?.classList.toggle('myskool-row-selected', cb.checked);
+      applySelectionToReceiveForm(selected, true);
     });
   });
 
@@ -1045,10 +1323,7 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
         }
       });
 
-      const curSelected = getSelectedItems();
-      const sum = curSelected.reduce((acc, it) => acc + it.balance, 0);
-      if (inputMonthly) inputMonthly.value = sum > 0 ? sum.toFixed(2) : '';
-      updateAllocationBreakdown();
+      applySelectionToReceiveForm(getSelectedItems(), false);
     });
   }
 
@@ -1071,6 +1346,7 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
   if (inputMonthly) inputMonthly.addEventListener('input', updateAllocationBreakdown);
   if (regAmount) regAmount.addEventListener('input', updateAllocationBreakdown);
   if (regToggle) regToggle.addEventListener('change', updateAllocationBreakdown);
+  if (ledgerScopeSelect) ledgerScopeSelect.addEventListener('change', updateAllocationBreakdown);
 
   // Form submit confirmation check for advance credit
   const receiveForm = document.getElementById('myskoolReceiveForm');
@@ -1083,7 +1359,7 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
       if (selected.length > 0 && monthlyVal > totalSelectedDue + 0.009) {
         if (chkAllowAdvanceCredit && !chkAllowAdvanceCredit.checked) {
           e.preventDefault();
-          alertNotice('Explicit confirmation is required before creating Advance Credit. Please check the advance credit confirmation checkbox.');
+          alertNotice('Explicit confirmation is required before creating Advance Credit. Please check the advance credit confirmation checkbox.', 'error');
           chkAllowAdvanceCredit.focus();
           return false;
         }
@@ -1110,20 +1386,14 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
   const drawerCloseBtn = document.getElementById('drawerCloseBtn');
   const drawerForm = document.getElementById('drawerActionForm');
   const drawerItemId = document.getElementById('drawer_item_id');
-  const drawerPaymentId = document.getElementById('drawer_payment_id');
   const drawerCurBal = document.getElementById('drawer_current_balance');
   const drawerDiscInput = document.getElementById('drawer_discount_input');
   const drawerNetBal = document.getElementById('drawer_net_balance');
-  const drawerReason = document.getElementById('drawer_reason');
-  const drawerReasonCat = document.getElementById('drawer_reason_category');
   const drawerReasonCatBlock = document.getElementById('drawer_reason_category_block');
-  const drawerSaveBtn = document.getElementById('drawerSaveBtn');
   const drawerExistBox = document.getElementById('drawer_existing_discount_box');
   const drawerExistVal = document.getElementById('drawer_existing_discount_val');
   const drawerExistReason = document.getElementById('drawer_existing_discount_reason');
-  const drawerRemoveBtn = document.getElementById('drawerRemoveDiscBtn');
 
-  let currentActiveAction = 'discount';
   let originalItemBalance = 0;
 
   function closeDrawer() {
@@ -1146,7 +1416,23 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
 
   if (drawerDiscInput) drawerDiscInput.addEventListener('input', updateDrawerNetBalance);
 
-  // Discount Action Triggers
+  function submitPostAction(actionUrl, fields) {
+    const actionForm = document.createElement('form');
+    actionForm.method = 'POST';
+    actionForm.action = actionUrl;
+    const allFields = Object.assign({ _token: '{{ csrf_token() }}' }, fields);
+    Object.entries(allFields).forEach(([name, value]) => {
+      const inp = document.createElement('input');
+      inp.type = 'hidden';
+      inp.name = name;
+      inp.value = value;
+      actionForm.appendChild(inp);
+    });
+    document.body.appendChild(actionForm);
+    actionForm.submit();
+  }
+
+  // Discount / Reversal / Void Action Triggers
   document.querySelectorAll('.action-trigger').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -1154,17 +1440,15 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
       const itemId = btn.dataset.id;
       const balance = parseFloat(btn.dataset.balance || 0);
       const currency = btn.dataset.currency || 'SAR';
-      const existingDiscount = parseFloat(btn.dataset.discount || 0);
-      const existingReason = btn.dataset.discountReason || '';
-
-      currentActiveAction = action;
-      originalItemBalance = balance;
-
-      if (drawerItemId) drawerItemId.value = itemId;
-      if (drawerCurBal) drawerCurBal.value = `${balance.toFixed(2)} ${currency}`;
-      if (drawerNetBal) drawerNetBal.value = `${balance.toFixed(2)} ${currency}`;
 
       if (action === 'discount') {
+        const existingDiscount = parseFloat(btn.dataset.discount || 0);
+        const existingReason = btn.dataset.discountReason || '';
+        originalItemBalance = balance;
+
+        if (drawerItemId) drawerItemId.value = itemId;
+        if (drawerCurBal) drawerCurBal.value = `${balance.toFixed(2)} ${currency}`;
+        if (drawerNetBal) drawerNetBal.value = `${balance.toFixed(2)} ${currency}`;
         if (drawerHeading) drawerHeading.textContent = 'Discount';
         if (drawerForm) drawerForm.action = '/challan/discount';
         if (drawerReasonCatBlock) drawerReasonCatBlock.style.display = 'block';
@@ -1181,32 +1465,18 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
         drawerDiscInput?.focus();
       } else if (action === 'reverse') {
         const slip = btn.dataset.slip;
-        const confirmRev = confirm(`Are you sure you want to REVERSE receipt #${slip} for ${currency} ${balance.toFixed(2)}?\n\nThis will restore all paid items to outstanding dues.`);
-        if (confirmRev) {
-          const revForm = document.createElement('form');
-          revForm.method = 'POST';
-          revForm.action = '/challan/reverse-receipt';
-          revForm.innerHTML = `
-            <input type="hidden" name="_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="payment_id" value="${itemId}">
-            <input type="hidden" name="reason" value="User reversed receipt via portal">
-          `;
-          document.body.appendChild(revForm);
-          revForm.submit();
+        if (confirm(`Are you sure you want to REVERSE receipt #${slip} for ${currency} ${balance.toFixed(2)}?\n\nThis will restore all paid items to outstanding dues.`)) {
+          submitPostAction('/challan/reverse-receipt', {
+            payment_id: itemId,
+            reason: 'User reversed receipt via portal'
+          });
         }
       } else if (action === 'void') {
-        const confirmVoid = confirm(`Are you sure you want to VOID this fee item?\n\nThis action cannot be undone.`);
-        if (confirmVoid) {
-          const voidForm = document.createElement('form');
-          voidForm.method = 'POST';
-          voidForm.action = '/challan/void';
-          voidForm.innerHTML = `
-            <input type="hidden" name="_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="invoice_item_id" value="${itemId}">
-            <input type="hidden" name="reason" value="Fee voided via portal">
-          `;
-          document.body.appendChild(voidForm);
-          voidForm.submit();
+        if (confirm(`Are you sure you want to VOID this fee item?\n\nThis action cannot be undone.`)) {
+          submitPostAction('/challan/void', {
+            invoice_item_id: itemId,
+            reason: 'Fee voided via portal'
+          });
         }
       }
     });
@@ -1315,7 +1585,6 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
 
     let rowsCount = 0;
     let missingRates = [];
-    let totalPlannedMinor = 0;
 
     targetStudents.forEach(student => {
       selectedTypes.forEach(ft => {
@@ -1360,89 +1629,51 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
   }
 
   // Hook Create Fee Selectors
-  document.querySelectorAll('#fee-types-selector-chips .ms-chip').forEach(chip => {
-    chip.addEventListener('click', function() {
-      this.classList.toggle('active');
-      const actives = document.querySelectorAll('#fee-types-selector-chips .ms-chip.active');
-      if (actives.length === 0) this.classList.add('active');
-
-      const hiddenFeeTypeInputs = document.getElementById('hidden-fee-type-inputs');
-      if (hiddenFeeTypeInputs) {
-        hiddenFeeTypeInputs.innerHTML = '';
-        document.querySelectorAll('#fee-types-selector-chips .ms-chip.active').forEach(c => {
-          const inp = document.createElement('input');
-          inp.type = 'hidden';
-          inp.name = 'fee_type_ids[]';
-          inp.value = c.dataset.feeTypeId;
-          hiddenFeeTypeInputs.appendChild(inp);
-        });
-      }
-      updateCreateFeePreview();
+  function bindMultiSelectChips(containerSelector, hiddenContainerId, inputName, dataKey) {
+    const hiddenContainer = document.getElementById(hiddenContainerId);
+    document.querySelectorAll(`${containerSelector} .ms-chip`).forEach(chip => {
+      chip.addEventListener('click', function() {
+        this.classList.toggle('active');
+        let actives = Array.from(document.querySelectorAll(`${containerSelector} .ms-chip.active`));
+        if (actives.length === 0) {
+          this.classList.add('active');
+          actives = [this];
+        }
+        renderHiddenInputs(hiddenContainer, inputName, actives.map(c => c.dataset[dataKey]));
+        updateCreateFeePreview();
+      });
     });
-  });
+  }
 
-  document.querySelectorAll('#months-selector-chips .ms-chip').forEach(chip => {
-    chip.addEventListener('click', function() {
-      this.classList.toggle('active');
-      const actives = document.querySelectorAll('#months-selector-chips .ms-chip.active');
-      if (actives.length === 0) this.classList.add('active');
-
-      const hiddenMonthInputs = document.getElementById('hidden-month-inputs');
-      if (hiddenMonthInputs) {
-        hiddenMonthInputs.innerHTML = '';
-        document.querySelectorAll('#months-selector-chips .ms-chip.active').forEach(c => {
-          const inp = document.createElement('input');
-          inp.type = 'hidden';
-          inp.name = 'months[]';
-          inp.value = c.dataset.monthVal;
-          hiddenMonthInputs.appendChild(inp);
-        });
-      }
-      updateCreateFeePreview();
-    });
-  });
+  bindMultiSelectChips('#fee-types-selector-chips', 'hidden-fee-type-inputs', 'fee_type_ids[]', 'feeTypeId');
+  bindMultiSelectChips('#months-selector-chips', 'hidden-month-inputs', 'months[]', 'monthVal');
 
   const yearSelect = document.getElementById('cf-year-select');
   if (yearSelect) yearSelect.addEventListener('change', updateCreateFeePreview);
 
-  document.querySelectorAll('#student-selector-chips .ms-chip').forEach(chip => {
-    chip.addEventListener('click', function() {
-      const sId = this.dataset.studentId;
-      const allChips = document.querySelectorAll('#student-selector-chips .ms-chip');
-      const hiddenStudentInputs = document.getElementById('hidden-student-inputs');
+  const allStudentChips = Array.from(document.querySelectorAll('#student-selector-chips .ms-chip'));
+  const allStudentsChip = document.querySelector('#student-selector-chips .ms-chip[data-student-id="all"]');
+  const hiddenStudentInputs = document.getElementById('hidden-student-inputs');
 
-      if (sId === 'all') {
-        allChips.forEach(c => c.classList.remove('active'));
+  allStudentChips.forEach(chip => {
+    chip.addEventListener('click', function() {
+      if (this.dataset.studentId === 'all') {
+        allStudentChips.forEach(c => c.classList.remove('active'));
         this.classList.add('active');
       } else {
-        const allChip = document.querySelector('#student-selector-chips .ms-chip[data-student-id="all"]');
-        if (allChip) allChip.classList.remove('active');
+        if (allStudentsChip) allStudentsChip.classList.remove('active');
         this.classList.toggle('active');
-        const actives = document.querySelectorAll('#student-selector-chips .ms-chip.active');
-        if (actives.length === 0 && allChip) allChip.classList.add('active');
-      }
-
-      if (hiddenStudentInputs) {
-        hiddenStudentInputs.innerHTML = '';
-        const actives = document.querySelectorAll('#student-selector-chips .ms-chip.active');
-        if (actives.length === 1 && actives[0].dataset.studentId === 'all') {
-          (window.IQRA_FAMILY_STUDENTS || []).forEach(st => {
-            const inp = document.createElement('input');
-            inp.type = 'hidden';
-            inp.name = 'student_ids[]';
-            inp.value = st.id;
-            hiddenStudentInputs.appendChild(inp);
-          });
-        } else {
-          actives.forEach(c => {
-            const inp = document.createElement('input');
-            inp.type = 'hidden';
-            inp.name = 'student_ids[]';
-            inp.value = c.dataset.studentId;
-            hiddenStudentInputs.appendChild(inp);
-          });
+        if (!allStudentChips.some(c => c.classList.contains('active')) && allStudentsChip) {
+          allStudentsChip.classList.add('active');
         }
       }
+
+      const actives = allStudentChips.filter(c => c.classList.contains('active'));
+      const studentIds = (actives.length === 1 && actives[0].dataset.studentId === 'all')
+        ? (window.IQRA_FAMILY_STUDENTS || []).map(st => st.id)
+        : actives.map(c => c.dataset.studentId);
+
+      renderHiddenInputs(hiddenStudentInputs, 'student_ids[]', studentIds);
       updateCreateFeePreview();
     });
   });
@@ -1473,78 +1704,31 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
           alertNotice(data.message || 'Fee created successfully');
           setTimeout(() => location.reload(), 600);
         } else {
-          const err = await resp.json();
-          alertNotice(err.message || 'Failed to create fee');
+          let errMsg = 'Failed to create fee';
+          try {
+            const err = await resp.json();
+            errMsg = err.message || errMsg;
+          } catch (_) {}
+          alertNotice(errMsg, 'error');
           if (btnSubmitCreateFee) {
             btnSubmitCreateFee.disabled = false;
             btnSubmitCreateFee.textContent = 'Save';
           }
         }
       } catch (ex) {
-        formCreateFee.submit();
+        alertNotice('Network or processing error during fee creation. Please refresh the page to verify fee records before retrying.', 'error');
+        if (btnSubmitCreateFee) {
+          btnSubmitCreateFee.disabled = false;
+          btnSubmitCreateFee.textContent = 'Save';
+        }
       }
     });
   }
 
   // Initialize breakdown on load if pre-selected
   updateAllocationBreakdown();
-
-  window.alertNotice = function(msg) {
-    showToast(msg, 'success');
-  };
 })();
 </script>
-
-{{-- FEE IMPORT & DATA MANAGEMENT DIALOG --}}
-<dialog id="fee-import-dialog" style="border:none;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.3);padding:0;max-width:620px;width:95%;margin:auto;font-family:inherit;">
- <div style="background:#7367f0;color:#fff;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-top-left-radius:8px;border-top-right-radius:8px;">
-  <strong style="font-size:16px;display:flex;align-items:center;gap:8px;">⇪ Fee Collection & Outstanding Reports Import</strong>
-  <button type="button" onclick="document.getElementById('fee-import-dialog').close()" style="background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;">&times;</button>
- </div>
- <div style="padding:22px;display:flex;flex-direction:column;gap:18px;font-size:13px;color:#5e5873;max-height:80vh;overflow-y:auto;">
-  
-  {{-- Card 1: Outstanding Fees --}}
-  <div style="background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:14px;">
-   <div style="font-weight:600;margin-bottom:6px;color:#7367f0;font-size:14px;">1. Outstanding Fees Report</div>
-   <div style="padding:8px 12px;background:#fff3cd;color:#856404;border-radius:4px;font-size:12px;margin-bottom:10px;font-weight:600;">🔒 Direct-to-ledger import disabled for Phase 1 Recovery Protection. Migration will proceed via verified staging tables in Phase 2.</div>
-   <p style="margin:0 0 10px;font-size:12px;color:#6e6b7b;">Creates unpaid invoice obligations by class, student GRN, and billing month matching the Outstanding Report.</p>
-   
-   <form method="post" action="{{ route('challan.import.outstanding.preloaded') }}" style="margin-bottom:12px;">
-    @csrf
-    <button type="submit" disabled style="width:100%;padding:9px;background:#c8c4f0;color:#fff;border:none;border-radius:4px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;cursor:not-allowed;">⚡ Preloaded Outstanding Report (Locked)</button>
-   </form>
-
-   <form method="post" action="{{ route('challan.import.outstanding') }}" enctype="multipart/form-data">
-    @csrf
-    <div style="display:flex;gap:8px;">
-     <input type="file" name="csv_file" accept=".csv,text/csv,text/plain" disabled style="flex:1;padding:6px;border:1px solid #d8d6de;border-radius:4px;background:#eee;font-size:12px;cursor:not-allowed;">
-     <button type="submit" disabled style="background:#f0f0f0;border:1px solid #ccc;color:#999;padding:6px 14px;border-radius:4px;font-weight:600;cursor:not-allowed;">Upload CSV (Locked)</button>
-    </div>
-   </form>
-  </div>
-
-  {{-- Card 2: Collection Report --}}
-  <div style="background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:14px;">
-   <div style="font-weight:600;margin-bottom:6px;color:#28c76f;font-size:14px;">2. Fee Collection (Paid Receipts) Report</div>
-   <div style="padding:8px 12px;background:#fff3cd;color:#856404;border-radius:4px;font-size:12px;margin-bottom:10px;font-weight:600;">🔒 Direct-to-ledger import disabled for Phase 1 Recovery Protection. Migration will proceed via verified staging tables in Phase 2.</div>
-   <p style="margin:0 0 10px;font-size:12px;color:#6e6b7b;">Records paid cash slips, receipts, and fee allocations by GRN and month matching the Collection Report.</p>
-   
-   <form method="post" action="{{ route('challan.import.collection.preloaded') }}" style="margin-bottom:12px;">
-    @csrf
-    <button type="submit" disabled style="width:100%;padding:9px;background:#a3e0be;color:#fff;border:none;border-radius:4px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;cursor:not-allowed;">⚡ Preloaded Collection Report (Locked)</button>
-   </form>
-
-   <form method="post" action="{{ route('challan.import.collection') }}" enctype="multipart/form-data">
-    @csrf
-    <div style="display:flex;gap:8px;">
-     <input type="file" name="csv_file" accept=".csv,text/csv,text/plain" disabled style="flex:1;padding:6px;border:1px solid #d8d6de;border-radius:4px;background:#eee;font-size:12px;cursor:not-allowed;">
-     <button type="submit" disabled style="background:#f0f0f0;border:1px solid #ccc;color:#999;padding:6px 14px;border-radius:4px;font-weight:600;cursor:not-allowed;">Upload CSV (Locked)</button>
-    </div>
-   </form>
-  </div>
-
- </div>
-</dialog>
 
 {{-- RECEIPT ITEMIZATION DETAILS DIALOG --}}
 <dialog id="receipt-details-dialog" style="border:none;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.3);padding:0;max-width:650px;width:95%;margin:auto;font-family:inherit;">

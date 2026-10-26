@@ -16,7 +16,7 @@ class QaPostOpeningBalancesCommand extends Command
                             {--force : Authorize and execute opening-balance posting}
                             {--yes : Bypass interactive confirmation prompt}';
 
-    protected $description = 'Safely post verified historical opening-balance invoices into iqra_billing_qa with source-line idempotency';
+    protected $description = 'Safely post verified historical opening-balance invoices into iqra_billing with source-line idempotency';
 
     public function handle(HistoricalOpeningBalanceService $service): int
     {
@@ -125,6 +125,8 @@ class QaPostOpeningBalancesCommand extends Command
         $this->line("  - Missing GR / Student Dues:        {$ex['missing_student_count']}");
         $this->line("  - Invalid / Non-Positive Amounts:   {$ex['invalid_amount_count']}");
         $this->line("  - Currency Mismatches:              {$ex['currency_mismatch_count']}");
+        $this->line("  - Tuition Rows (Policy Hold):       " . ($ex['tuition_policy_hold_count'] ?? 0));
+        $this->line("  - Urdu Subject Rows (Policy Hold):  " . ($ex['urdu_subject_policy_hold_count'] ?? 0));
 
         // 7. Check if All Rows Already Posted
         if ($s['remaining_eligible_lines'] === 0 && $s['already_posted_lines'] > 0) {

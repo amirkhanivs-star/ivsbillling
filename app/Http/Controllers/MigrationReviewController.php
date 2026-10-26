@@ -57,16 +57,16 @@ class MigrationReviewController
         $workbookHashMatches = ($workbookSha256 && strtolower($workbookSha256) === strtolower($activeImport['expected_sha256'] ?? '77d8e10f84726cc7b9708bfdb749948a7dbe717d60dab15b91361d5f2e4c4f4b'));
 
         $expectedWorkbook = [
-            'file_name' => $activeImport['filename'] ?? 'My skool fully updated (1).xlsx',
+            'file_name' => $activeImport['filename'] ?? 'My skool paid (1).xlsx',
             'relative_path' => $workbookRelativePath,
             'batch_id' => $activeBatchId,
             'version' => $activeKey,
-            'expected_sha256' => $activeImport['expected_sha256'] ?? '77d8e10f84726cc7b9708bfdb749948a7dbe717d60dab15b91361d5f2e4c4f4b',
+            'expected_sha256' => $activeImport['expected_sha256'] ?? 'ac83e8d71b89c992eb3a35ed2cd154929dd522432bb5c5c05742bdd0255622ae',
             'configured' => $workbookConfigured,
             'hash_verified' => $workbookHashMatches,
-            'expected_students' => 4358,
-            'expected_collections' => 38068,
-            'expected_dues' => 11351,
+            'expected_students' => $activeImport['expected_students'] ?? 3953,
+            'expected_collections' => $activeImport['expected_collections'] ?? 34712,
+            'expected_dues' => $activeImport['expected_dues'] ?? 10329,
         ];
 
         // Actual portal data queried live from current database

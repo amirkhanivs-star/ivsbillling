@@ -7,7 +7,6 @@
   --ms-green: #28c76f;
   --ms-green-hover: #22a95c;
   --ms-red: #ea5455;
-  --ms-red-border: #f87171;
   --ms-bg: #f8f7fa;
   --ms-card-bg: #ffffff;
   --ms-border: #ebe9f1;
@@ -22,12 +21,19 @@ body {
   font-family: 'Montserrat', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
 }
 
+/* Expand main layout container on Fee Collection page to utilize desktop width */
+.container {
+  max-width: 1500px !important;
+  width: 100%;
+}
+
 /* Centered 2-Column Wrapper */
 .myskool-challan-wrapper {
-  max-width: 1140px;
+  max-width: 1460px;
+  width: 100%;
   margin: 10px auto 25px auto;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 290px;
+  grid-template-columns: minmax(0, 1fr) 295px;
   gap: 16px;
   align-items: start;
 }
@@ -344,12 +350,148 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .myskool-history-chevron {
   font-size: 15px;
   color: #b9b9c3;
   transition: transform .2s ease;
+}
+
+.myskool-history-table {
+  width: 100%;
+  min-width: 960px;
+  table-layout: auto;
+}
+
+.myskool-history-table thead th {
+  padding: 8px 8px;
+  white-space: nowrap;
+}
+
+.myskool-history-table tbody td {
+  padding: 7px 8px;
+  vertical-align: middle;
+}
+
+.myskool-history-table th.col-slip,
+.myskool-history-table td.col-slip {
+  white-space: nowrap;
+  min-width: 118px;
+}
+
+.ms-history-slip-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.ms-source-badge {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 700;
+  display: inline-block;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.ms-source-badge.portal {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.ms-source-badge.myskool {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.ms-source-badge.reversed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.myskool-history-table th.col-fee-type,
+.myskool-history-table td.col-fee-type {
+  min-width: 96px;
+  line-height: 1.3;
+}
+
+.myskool-history-table th.col-class,
+.myskool-history-table td.col-class {
+  min-width: 92px;
+  line-height: 1.3;
+}
+
+.myskool-history-table th.col-student,
+.myskool-history-table td.col-student {
+  min-width: 230px;
+  max-width: 350px;
+}
+
+.ms-history-students {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+}
+
+.ms-history-student-item {
+  display: inline-block;
+  font-weight: 600;
+  color: #5e5873;
+  font-size: 11.5px;
+  line-height: 1.3;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.myskool-history-table th.col-details,
+.myskool-history-table td.col-details {
+  min-width: 175px;
+  max-width: 280px;
+}
+
+.ms-history-months {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.ms-month-badge {
+  font-size: 10.5px;
+  padding: 2px 6px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.myskool-history-table td.col-discount,
+.myskool-history-table td.col-total {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.myskool-history-table td.col-date {
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+
+.myskool-history-table td.col-received-by {
+  min-width: 105px;
+}
+
+.myskool-history-table td.col-actions {
+  white-space: nowrap;
+  text-align: right;
 }
 
 /* Right Side Panel */
@@ -569,30 +711,6 @@ body {
   background: var(--ms-green-hover) !important;
 }
 
-/* Compact Target Month Chips */
-.ms-month-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 4px;
-}
-
-.ms-month-chip {
-  background: #ffffff;
-  border: 1px solid var(--ms-purple);
-  color: var(--ms-purple);
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: 10px;
-  cursor: pointer;
-  font-weight: 500;
-}
-
-.ms-month-chip.active {
-  background: var(--ms-purple);
-  color: #ffffff;
-}
-
 /* Toast */
 .ms-toast {
   position: fixed;
@@ -618,4 +736,4 @@ body {
 }
 
 /* Create Fee Panel & Chips */
-.create-fee-panel{background:#fff;border:1px solid var(--ms-border);border-radius:6px;padding:16px 18px;margin-bottom:16px;animation:fadeIn 0.2s ease}.ms-chips-container{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.ms-chip{background:#fff;border:1px solid var(--ms-input-border);color:#5e5873;border-radius:4px;padding:5px 14px;font-size:11px;cursor:pointer;transition:all 0.15s ease;font-family:inherit;line-height:1.4;user-select:none}.ms-chip:hover{border-color:var(--ms-purple);color:var(--ms-purple)}.ms-chip.active{border-color:var(--ms-purple);color:var(--ms-purple);background:var(--ms-lavender-bg);font-weight:600}
+.create-fee-panel{background:#fff;border:1px solid var(--ms-border);border-radius:6px;padding:16px 18px;margin-bottom:16px}.ms-chips-container{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.ms-chip{background:#fff;border:1px solid var(--ms-input-border);color:#5e5873;border-radius:4px;padding:5px 14px;font-size:11px;cursor:pointer;transition:all 0.15s ease;font-family:inherit;line-height:1.4;user-select:none}.ms-chip:hover{border-color:var(--ms-purple);color:var(--ms-purple)}.ms-chip.active{border-color:var(--ms-purple);color:var(--ms-purple);background:var(--ms-lavender-bg);font-weight:600}

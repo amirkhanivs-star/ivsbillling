@@ -15,7 +15,7 @@ class StagingProcessMappingsCommand extends Command
      * @var string
      */
     protected $signature = 'staging:process-mappings
-                            {--database=staging : Database connection to use (must be iqra_billing_clean)}
+                            {--database=mysql : Database connection to use (must be iqra_billing)}
                             {--chunk-size=500 : Batch size for database writes}';
 
     /**

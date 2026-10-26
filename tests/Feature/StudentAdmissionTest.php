@@ -384,4 +384,165 @@ class StudentAdmissionTest extends TestCase
         $res->assertSee('RCP-TEST-999');
         $res->assertSee('100.00');
     }
+
+    public function test_department_manager_cannot_reassign_student_to_existing_family(): void
+    {
+        $this->actingAs($this->admin());
+        $campusId = DB::table('campuses')->value('id');
+        $deptId = DB::table('departments')->where('code', 'school')->value('id');
+
+        // Create student 1 in FAM-101
+        $this->post('/manage-student/admission/new', $this->payload([
+            'name' => 'Student One',
+            'registration_number' => 'REG-DM-101',
+            'family_code' => 'FAM-DM-101',
+            'family_email' => 'fam101@example.test',
+            'family_whatsapp' => '+923001111111',
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+        ]))->assertRedirect('/manage-student');
+
+        // Create student 2 in FAM-202
+        $this->post('/manage-student/admission/new', $this->payload([
+            'name' => 'Student Two',
+            'registration_number' => 'REG-DM-202',
+            'family_code' => 'FAM-DM-202',
+            'family_email' => 'fam202@example.test',
+            'family_whatsapp' => '+923002222222',
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+        ]))->assertRedirect('/manage-student');
+
+        $student2 = DB::table('students')->where('gr_number', 'REG-DM-202')->first();
+        $originalFamilyId2 = $student2->family_id;
+
+        // Create Department Manager scoped to this campus and department
+        $manager = User::create([
+            'name' => 'Scoped Manager',
+            'email' => 'scoped_mgr@example.test',
+            'password' => 'test-password',
+            'role' => 'department_manager',
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'is_active' => true,
+        ]);
+
+        $this->actingAs($manager);
+
+        // Attempt unauthorized reassignment of Student 2 to existing Family FAM-DM-101
+        $response = $this->put('/manage-student/' . $student2->id, [
+            'name' => 'Student Two Updated',
+            'father_name' => 'Khan',
+            'registration_number' => 'REG-DM-202',
+            'family_code' => 'FAM-DM-101',
+            'family_email' => 'fam101@example.test',
+            'family_whatsapp' => '+923001111111',
+            'grade_label' => 'Grade 5',
+        ]);
+
+        $response->assertForbidden();
+
+        // Verify family was NOT changed
+        $this->assertSame($originalFamilyId2, (int) DB::table('students')->where('id', $student2->id)->value('family_id'));
+    }
+
+    public function test_department_manager_can_update_student_profile_without_family_reassignment(): void
+    {
+        $this->actingAs($this->admin());
+        $campusId = DB::table('campuses')->value('id');
+        $deptId = DB::table('departments')->where('code', 'school')->value('id');
+
+        $this->post('/manage-student/admission/new', $this->payload([
+            'name' => 'Regular Student',
+            'registration_number' => 'REG-MGR-303',
+            'family_code' => 'FAM-MGR-303',
+            'family_email' => 'mgr_family@example.test',
+            'family_whatsapp' => '+923003333333',
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+        ]))->assertRedirect('/manage-student');
+
+        $student = DB::table('students')->where('gr_number', 'REG-MGR-303')->first();
+
+        $manager = User::create([
+            'name' => 'Dept Manager 2',
+            'email' => 'dept_mgr_2@example.test',
+            'password' => 'test-password',
+            'role' => 'department_manager',
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'is_active' => true,
+        ]);
+
+        $this->actingAs($manager);
+
+        // Normal profile edit with same family code
+        $response = $this->put('/manage-student/' . $student->id, [
+            'name' => 'Regular Student Modified',
+            'father_name' => 'Khan Modified',
+            'registration_number' => 'REG-MGR-303',
+            'family_code' => 'FAM-MGR-303',
+            'family_email' => 'mgr_family_updated@example.test',
+            'family_whatsapp' => '+923003333333',
+            'grade_label' => 'Grade 5',
+        ]);
+
+        $response->assertRedirect('/manage-student/' . $student->id);
+        $this->assertSame('Regular Student Modified', DB::table('students')->where('id', $student->id)->value('name'));
+        $this->assertSame('mgr_family_updated@example.test', DB::table('families')->where('id', $student->family_id)->value('email'));
+    }
+
+    public function test_finance_admin_can_reassign_student_to_existing_family(): void
+    {
+        $this->actingAs($this->admin());
+        $campusId = DB::table('campuses')->value('id');
+        $deptId = DB::table('departments')->where('code', 'school')->value('id');
+
+        $this->post('/manage-student/admission/new', $this->payload([
+            'name' => 'Child A',
+            'registration_number' => 'REG-FA-1',
+            'family_code' => 'FAM-FA-1',
+            'family_email' => 'fa1@example.test',
+            'family_whatsapp' => '+923004444444',
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+        ]))->assertRedirect('/manage-student');
+
+        $this->post('/manage-student/admission/new', $this->payload([
+            'name' => 'Child B',
+            'registration_number' => 'REG-FA-2',
+            'family_code' => 'FAM-FA-2',
+            'family_email' => 'fa2@example.test',
+            'family_whatsapp' => '+923005555555',
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+        ]))->assertRedirect('/manage-student');
+
+        $family1 = DB::table('families')->where('family_code', 'FAM-FA-1')->first();
+        $student2 = DB::table('students')->where('gr_number', 'REG-FA-2')->first();
+
+        // Finance Admin user
+        $financeAdmin = User::create([
+            'name' => 'Finance Admin User',
+            'email' => 'finance_admin@example.test',
+            'password' => 'test-password',
+            'role' => 'finance_admin',
+            'is_active' => true,
+        ]);
+
+        $this->actingAs($financeAdmin);
+
+        $response = $this->put('/manage-student/' . $student2->id, [
+            'name' => 'Child B',
+            'father_name' => 'Khan',
+            'registration_number' => 'REG-FA-2',
+            'family_code' => 'FAM-FA-1',
+            'family_email' => 'fa1@example.test',
+            'family_whatsapp' => '+923004444444',
+            'grade_label' => 'Grade 5',
+        ]);
+
+        $response->assertRedirect('/manage-student/' . $student2->id);
+        $this->assertSame($family1->id, (int) DB::table('students')->where('id', $student2->id)->value('family_id'));
+    }
 }

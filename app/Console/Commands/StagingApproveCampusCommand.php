@@ -16,7 +16,7 @@ class StagingApproveCampusCommand extends Command
      * @var string
      */
     protected $signature = 'staging:approve-campus
-                            {--database=staging : Target database connection (must be iqra_billing_clean)}
+                            {--database=mysql : Target database connection (must be iqra_billing)}
                             {--campus=main : Target campus code}
                             {--approver=Administrator : Name or title of the approving administrator}
                             {--notes= : Audit remarks for the approval}

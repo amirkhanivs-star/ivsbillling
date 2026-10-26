@@ -181,7 +181,20 @@ class QaImportReviewedWorkbookCommand extends Command
         $this->info("Executing import transaction into portal database...");
 
         try {
-            $batchId = $isRevised ? 'BATCH-20261022-PORTAL-V2-REVISED' : (string) config('imports.active_batch_id', ReviewedWorkbookImportService::APPROVED_BATCH_ID);
+            if ($isRevised) {
+                $batchId = 'BATCH-20261022-PORTAL-V2-REVISED';
+            } else {
+                $versionBatchId = isset($activeConfig['batch_id']) ? trim((string) $activeConfig['batch_id']) : null;
+                $batchId = \App\Services\Migration\HistoricalOpeningBalanceService::resolveActiveBatchId(
+                    $versionBatchId !== '' ? $versionBatchId : null
+                );
+                $configuredActiveBatch = trim((string) config('imports.active_batch_id', ''));
+                if ($configuredActiveBatch !== '' && $configuredActiveBatch !== $batchId) {
+                    throw new \RuntimeException(
+                        "CRITICAL SAFETY STOP: Configured imports.active_batch_id ('{$configuredActiveBatch}') conflicts with version '{$activeKey}' batch_id ('{$batchId}')."
+                    );
+                }
+            }
             $stats = $service->import($path, $expectedHash, $conn, $batchId);
         } catch (Throwable $e) {
             $this->error("IMPORT TRANSACTION FAILED: " . $e->getMessage());

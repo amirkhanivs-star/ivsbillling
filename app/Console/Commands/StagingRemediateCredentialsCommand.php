@@ -15,7 +15,7 @@ class StagingRemediateCredentialsCommand extends Command
      * @var string
      */
     protected $signature = 'staging:remediate-credentials
-                            {--database=staging : Target database connection (must be iqra_billing_clean)}
+                            {--database=mysql : Target database connection (must be iqra_billing)}
                             {--authorized-by=Mustafa <mustafa@gmail.com> (super_admin) : Business administrator who authorized policy}
                             {--executor= : Technical executor context (defaults to current system CLI user)}
                             {--dry-run : Simulate remediation without persisting changes}';
@@ -25,7 +25,7 @@ class StagingRemediateCredentialsCommand extends Command
      *
      * @var string
      */
-    protected $description = 'Safely isolate staging credentials by neutralizing live production password hashes in iqra_billing_clean';
+    protected $description = 'Safely isolate staging credentials by neutralizing live production password hashes in iqra_billing';
 
     /**
      * Execute the console command.

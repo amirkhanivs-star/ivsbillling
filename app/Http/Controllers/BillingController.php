@@ -825,12 +825,27 @@ class BillingController {
  }
  public function collection(Request $r){
   $family=null;$invoices=collect();$invoiceItems=collect();$payments=collect();$dueGroups=collect();$registrationStatus=null;
-  $summaryMetrics=['total_session_fee_minor'=>0,'total_discount_minor'=>0,'total_received_minor'=>0,'total_due_minor'=>0];
-  $term=trim((string)$r->query('family',''));
-  if($term){
-   $family=DB::table('families')->where('family_code',$term)->first();
-   if(!$family){$family=DB::table('families as f')->join('students as s','s.family_id','=','f.id')->where('s.gr_number',$term)->select('f.*')->first();}
-   if(!$family){$family=DB::table('families as f')->join('invoices as i','i.family_id','=','f.id')->where('i.invoice_number',$term)->select('f.*')->first();}
+  $summaryByCurrency=collect();$advanceCreditsByCurrency=collect();
+  $summaryMetrics=['currency'=>null,'is_multi_currency'=>false,'currencies'=>[],'by_currency'=>[],'total_session_fee_minor'=>0,'total_discount_minor'=>0,'total_exemption_minor'=>0,'total_net_minor'=>0,'total_received_minor'=>0,'total_due_minor'=>0];
+  $searchBy=strtolower(trim((string)$r->query('search_by','')));
+  $grQuery=trim((string)$r->query('gr',''));
+  $famQuery=trim((string)$r->query('family',''));
+  $invQuery=trim((string)$r->query('invoice',''));
+  if($searchBy==='gr'&&$grQuery!==''){$term=$grQuery;}
+  elseif($searchBy==='invoice'&&$invQuery!==''){$term=$invQuery;}
+  elseif($searchBy==='family'&&$famQuery!==''){$term=$famQuery;}
+  else{$term=$grQuery!==''?$grQuery:($invQuery!==''?$invQuery:$famQuery);}
+  if($term!==''){
+   $findByGr=fn()=>DB::table('families as f')->join('students as s','s.family_id','=','f.id')->where('s.gr_number',$term)->select('f.*')->first();
+   $findByFamilyCode=fn()=>DB::table('families')->where('family_code',$term)->first();
+   $findByInvoice=fn()=>DB::table('families as f')->join('invoices as i','i.family_id','=','f.id')->where('i.invoice_number',$term)->select('f.*')->first();
+   if($searchBy==='gr'||($grQuery!==''&&$searchBy==='')){
+    $family=$findByGr()??$findByFamilyCode()??$findByInvoice();
+   }elseif($searchBy==='invoice'||($invQuery!==''&&$searchBy==='')){
+    $family=$findByInvoice()??$findByFamilyCode()??$findByGr();
+   }else{
+    $family=$findByFamilyCode()??$findByGr()??$findByInvoice();
+   }
    if($family&&!in_array($r->user()->role,['super_admin','finance_admin'],true)){
     $visible=DB::table('enrollments as e')->join('students as s','s.id','=','e.student_id')
      ->where('s.family_id',$family->id)->where('e.campus_id',$r->user()->campus_id)
@@ -865,33 +880,60 @@ class BillingController {
     $invoiceItems=$invoiceItems->map(function($item)use($installmentsByItem,$adjustmentsByItem){
      $item->installments=$installmentsByItem->get($item->id,collect());
      $item->adjustments=$adjustmentsByItem->get($item->id,collect());
-     $latestDisc=$item->adjustments->firstWhere('kind','discount');
+     $latestDisc=((int)$item->discount_minor>0)?$item->adjustments->firstWhere('kind','discount'):null;
      $item->discount_reason=$latestDisc?->reason;
      return $item;
     });
    }
 
    $regFeeType=DB::table('fee_types')->where('code','registration')->first();
-   $regObligations=DB::table('invoice_items as ii')
+   $regRows=DB::table('invoice_items as ii')
     ->join('invoices as i','i.id','=','ii.invoice_id')
     ->where('i.family_id',$family->id)
     ->where('ii.fee_type_id',$regFeeType?->id)
     ->where('ii.status','!=','voided')
+    ->whereNotIn('i.status',['void','voided'])
+    ->select('ii.currency')
     ->selectRaw('COALESCE(SUM(ii.amount_minor),0) as charged, COALESCE(SUM(ii.discount_minor),0) as discount, COALESCE(SUM(ii.exemption_minor),0) as exemption, COALESCE(SUM(ii.net_minor),0) as net, COALESCE(SUM(ii.paid_minor),0) as paid')
-    ->first();
+    ->groupBy('ii.currency')
+    ->orderBy('ii.currency')
+    ->get();
 
-   $regCharged=(int)($regObligations?->charged??0);
-   $regPaid=(int)($regObligations?->paid??0);
-   $regNet=(int)($regObligations?->net??0);
-   $regBalance=max(0,$regNet-$regPaid);
+   $regByCurrency=[];
+   foreach($regRows as $rr){
+    $curr=strtoupper(trim((string)($rr->currency?:'SAR')));
+    $cCharged=(int)($rr->charged??0);
+    $cDiscount=(int)($rr->discount??0);
+    $cExemption=(int)($rr->exemption??0);
+    $cNet=(int)($rr->net??0);
+    $cPaid=(int)($rr->paid??0);
+    $cBalance=max(0,$cNet-$cPaid);
+    if($cCharged<=0 && $cNet<=0 && $cPaid<=0) continue;
+    $regByCurrency[$curr]=[
+     'currency'=>$curr,
+     'has_obligation'=>$cCharged>0,
+     'charged_minor'=>$cCharged,
+     'discount_minor'=>$cDiscount,
+     'exemption_minor'=>$cExemption,
+     'net_minor'=>$cNet,
+     'paid_minor'=>$cPaid,
+     'balance_minor'=>$cBalance,
+     'is_fully_paid'=>($cCharged>0 && $cBalance===0),
+     'is_exempted'=>($cCharged>0 && $cExemption>=$cCharged),
+    ];
+   }
 
+   $regSingle=count($regByCurrency)===1 ? reset($regByCurrency) : null;
    $registrationStatus=[
-    'has_obligation'=>$regCharged>0,
-    'charged_minor'=>$regCharged,
-    'paid_minor'=>$regPaid,
-    'balance_minor'=>$regBalance,
-    'is_fully_paid'=>($regCharged>0 && $regBalance===0),
-    'is_exempted'=>($regCharged>0 && (int)($regObligations?->exemption??0)>=$regCharged),
+    'has_obligation'=>!empty($regByCurrency),
+    'is_multi_currency'=>count($regByCurrency)>1,
+    'currency'=>$regSingle['currency']??null,
+    'charged_minor'=>$regSingle ? $regSingle['charged_minor'] : (empty($regByCurrency) ? 0 : null),
+    'paid_minor'=>$regSingle ? $regSingle['paid_minor'] : (empty($regByCurrency) ? 0 : null),
+    'balance_minor'=>$regSingle ? $regSingle['balance_minor'] : (empty($regByCurrency) ? 0 : null),
+    'is_fully_paid'=>!empty($regByCurrency) && collect($regByCurrency)->every(fn($x)=>$x['is_fully_paid']),
+    'is_exempted'=>!empty($regByCurrency) && collect($regByCurrency)->every(fn($x)=>$x['is_exempted']),
+    'by_currency'=>$regByCurrency,
    ];
 
    $payments=DB::table('payments as p')
@@ -911,30 +953,59 @@ class BillingController {
      ->leftJoin('fee_types as ft','ft.id','=','ii.fee_type_id')
      ->leftJoin('students as s','s.id','=','ii.student_id')
      ->whereIn('pa.payment_id',$paymentIds)
-     ->select('pa.payment_id','pa.amount_minor','ii.description','ii.discount_minor','ii.period_start','en.grade_label','ft.name as fee_type_name','s.name as student_name','s.gr_number')
+     ->select('pa.payment_id','pa.amount_minor','ii.currency','ii.description','ii.discount_minor','ii.period_start','en.grade_label','ft.name as fee_type_name','s.name as student_name','s.gr_number')
      ->get()->groupBy('payment_id');
    }
 
    $payments=$payments->map(function($payment)use($allocationsByPayment){
     $allocs=$allocationsByPayment->get($payment->id,collect());
+    $sameCurrAllocs=$allocs->filter(fn($a)=>strtoupper((string)($a->currency??$payment->currency))===strtoupper((string)$payment->currency));
     $payment->fee_types=$allocs->pluck('fee_type_name')->filter()->unique()->values()->all();
     if(empty($payment->fee_types))$payment->fee_types=$allocs->pluck('description')->filter()->unique()->values()->all();
     $payment->classes=$allocs->pluck('grade_label')->filter()->unique()->values()->all();
     $payment->months=$allocs->map(fn($a)=>\Carbon\Carbon::parse($a->period_start)->format('M Y'))->unique()->values()->all();
-    $payment->total_discount_minor=(int)$allocs->sum('discount_minor');
+    $payment->total_discount_minor=(int)$sameCurrAllocs->sum('discount_minor');
     $payment->method='Cash';
     $payment->allocations=$allocs;
     return $payment;
    });
 
+   $summaryByCurrency=$invoiceItems
+    ->groupBy(fn($item)=>strtoupper(trim((string)($item->currency?:'SAR'))))
+    ->map(function($items,$curr){
+     $gross=(int)$items->sum('amount_minor');
+     $disc=(int)$items->sum('discount_minor');
+     $exempt=(int)$items->sum('exemption_minor');
+     $net=(int)$items->sum('net_minor');
+     $paid=(int)$items->sum('paid_minor');
+     $due=(int)$items->sum(fn($item)=>max(0,(int)$item->net_minor-(int)$item->paid_minor));
+     return [
+      'currency'=>$curr,
+      'total_session_fee_minor'=>$gross,
+      'total_discount_minor'=>$disc,
+      'total_exemption_minor'=>$exempt,
+      'total_net_minor'=>$net,
+      'total_received_minor'=>$paid,
+      'total_due_minor'=>$due,
+     ];
+    });
+
+   $singleCurrSummary=$summaryByCurrency->count()===1 ? $summaryByCurrency->first() : null;
+   $isMultiCurrSummary=$summaryByCurrency->count()>1;
    $summaryMetrics=[
-    'total_session_fee_minor'=>(int)$invoiceItems->sum('amount_minor'),
-    'total_discount_minor'=>(int)$invoiceItems->sum('discount_minor'),
-    'total_received_minor'=>(int)$invoiceItems->sum('paid_minor'),
-    'total_due_minor'=>(int)$invoiceItems->sum(fn($item)=>max(0,(int)$item->net_minor-(int)$item->paid_minor)),
+    'currency'=>$singleCurrSummary['currency']??null,
+    'is_multi_currency'=>$isMultiCurrSummary,
+    'currencies'=>$summaryByCurrency->keys()->values()->all(),
+    'by_currency'=>$summaryByCurrency->all(),
+    'total_session_fee_minor'=>$singleCurrSummary ? $singleCurrSummary['total_session_fee_minor'] : ($isMultiCurrSummary ? null : 0),
+    'total_discount_minor'=>$singleCurrSummary ? $singleCurrSummary['total_discount_minor'] : ($isMultiCurrSummary ? null : 0),
+    'total_exemption_minor'=>$singleCurrSummary ? $singleCurrSummary['total_exemption_minor'] : ($isMultiCurrSummary ? null : 0),
+    'total_net_minor'=>$singleCurrSummary ? $singleCurrSummary['total_net_minor'] : ($isMultiCurrSummary ? null : 0),
+    'total_received_minor'=>$singleCurrSummary ? $singleCurrSummary['total_received_minor'] : ($isMultiCurrSummary ? null : 0),
+    'total_due_minor'=>$singleCurrSummary ? $singleCurrSummary['total_due_minor'] : ($isMultiCurrSummary ? null : 0),
    ];
 
-   $dueGroups=DB::table('invoices as i')->join('departments as d','d.id','=','i.department_id')->where('i.family_id',$family->id)->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id)))->select('d.name as department','i.currency')->selectRaw('SUM(i.total_minor-i.paid_minor) AS balance')->groupBy('d.name','i.currency')->get();
+   $dueGroups=DB::table('invoices as i')->join('departments as d','d.id','=','i.department_id')->where('i.family_id',$family->id)->whereNotIn('i.status',['void','voided'])->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id)))->select('d.name as department','i.currency')->selectRaw('SUM(CASE WHEN i.total_minor > i.paid_minor THEN i.total_minor-i.paid_minor ELSE 0 END) AS balance')->groupBy('d.name','i.currency')->orderBy('i.currency')->get();
   }
   $scopes=collect();
   if($family){
@@ -968,7 +1039,16 @@ class BillingController {
    ->where('family_id', $family->id)
    ->where('status', 'received')
    ->where('unallocated_minor', '>', 0)
+   ->orderBy('id')
    ->get() : collect();
+  $advanceCreditsByCurrency = $advanceCredits
+   ->groupBy(fn($ac) => strtoupper(trim((string)($ac->currency ?: 'SAR'))))
+   ->map(fn($group, $curr) => [
+    'currency' => $curr,
+    'unallocated_minor' => (int) $group->sum('unallocated_minor'),
+    'count' => $group->count(),
+    'receipts' => $group->values(),
+   ]);
 
   $activeBatch = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
   $familyGrNumbers = $family ? DB::table('students')->where('family_id', $family->id)->pluck('gr_number')->filter()->all() : [];
@@ -981,7 +1061,7 @@ class BillingController {
 
   $feeHistoryService = app(\App\Services\FeeHistoryService::class);
   $feeHistory = $family ? $feeHistoryService->getFamilyFeeHistory($family->id, $r->all(), $r->user()) : new \Illuminate\Pagination\LengthAwarePaginator([], 0, 20);
-  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','feeHistory','dueGroups','scopes','registrationStatus','summaryMetrics','feeTypes','familyStudents','catalogRates','studentFeePlans','advanceCredits','historicalCollections','historicalDues'));
+  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','feeHistory','dueGroups','scopes','registrationStatus','summaryMetrics','summaryByCurrency','feeTypes','familyStudents','catalogRates','studentFeePlans','advanceCredits','advanceCreditsByCurrency','historicalCollections','historicalDues'));
  }
 
  public function createChallanFee(Request $r){
@@ -1029,12 +1109,18 @@ class BillingController {
   $skippedItems=0;
   $paidDuplicatesCount=0;
   $unpaidDuplicatesCount=0;
+  $crossCurrencyConflictCount=0;
+  $crossCurrencyConflictMessages=[];
   $affectedInvoices=[];
 
   try {
-   DB::transaction(function() use ($d,$students,$family,$r,&$createdItems,&$skippedItems,&$paidDuplicatesCount,&$unpaidDuplicatesCount,&$affectedInvoices){
+   DB::transaction(function() use ($d,$students,$family,$r,&$createdItems,&$skippedItems,&$paidDuplicatesCount,&$unpaidDuplicatesCount,&$crossCurrencyConflictCount,&$crossCurrencyConflictMessages,&$affectedInvoices){
     $year=(int)$d['year'];
     $feeTypes=DB::table('fee_types')->whereIn('id',$d['fee_type_ids'])->get()->keyBy('id');
+    $historicalMap=app(\App\Services\Migration\HistoricalOpeningBalanceService::class)
+     ->buildHistoricalObligationMap(
+      $students->pluck('gr_number')->filter()->unique()->values()->all()
+     );
 
     foreach($students as $student){
      $this->assertAccess($r,$student->department_id,$student->campus_id);
@@ -1110,11 +1196,11 @@ class BillingController {
          ->select('ii.*','inv.status as invoice_status','inv.paid_minor as inv_paid','inv.total_minor as inv_total')->get();
        }
 
-       if($alreadyBilledItems->isNotEmpty()){
+        if($alreadyBilledItems->isNotEmpty()){
         $skippedItems++;
         $hasConfirmedPayment=false;
         foreach($alreadyBilledItems as $it){
-         if((int)$it->paid_minor > 0 || $it->invoice_status === 'paid' || ((int)$it->inv_total > 0 && (int)$it->inv_paid >= (int)$it->inv_total)){
+         if((int)$it->paid_minor > 0 || $it->status === 'paid' || ((int)$it->net_minor > 0 && (int)$it->inv_total > 0 && (int)$it->inv_paid >= (int)$it->inv_total)){
           $hasConfirmedPayment=true;
           break;
          }
@@ -1148,7 +1234,7 @@ class BillingController {
         $skippedItems++;
         $hasConfirmedPayment=false;
         foreach($inHistoricalItems as $it){
-         if((int)$it->paid_minor > 0 || $it->invoice_status === 'paid'){
+         if((int)$it->paid_minor > 0 || $it->status === 'paid' || ((int)$it->net_minor > 0 && $it->invoice_status === 'paid')){
           $hasConfirmedPayment=true;
           break;
          }
@@ -1161,7 +1247,78 @@ class BillingController {
         continue;
        }
 
-       // Rule 8 & 9: Find existing regular family invoice for this period. NEVER attach to opening balance invoices!
+       // Rule 7b: Prevent duplicate fee obligations already settled in historical staging or held on cross-currency conflict
+       $histCheck=\App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
+        $historicalMap,
+        (string)($student->gr_number??''),
+        (string)$feeType->code,
+        $periodStart,
+        (string)$student->currency,
+        $planItem?->subject_name??null
+       );
+       if($histCheck===null && $isOneTime){
+        $histCheck=\App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
+         $historicalMap,
+         (string)($student->gr_number??''),
+         (string)$feeType->code,
+         'ONE_TIME',
+         (string)$student->currency,
+         $planItem?->subject_name??null
+        );
+       }
+
+       if($histCheck!==null && ($histCheck['blocks_billing']??true)){
+        $skippedItems++;
+        if(!empty($histCheck['review_required']) || ($histCheck['status']??'')==='cross_currency_conflict'){
+         $crossCurrencyConflictCount++;
+         $conflictCurrencies=implode(', ',$histCheck['conflicting_currencies']??($histCheck['currencies']??[]));
+         $periodLabel=$isOneTime?$feeType->name:date('M-Y',strtotime($periodStart));
+         $crossCurrencyConflictMessages[]="Historical obligation for GR {$student->gr_number} ({$feeType->name} — {$periodLabel}) exists in a different currency ({$conflictCurrencies} vs {$student->currency}) and requires manual review rather than automatic billing.";
+        }elseif(!empty($histCheck['is_settled'])){
+         $paidDuplicatesCount++;
+        }else{
+         $unpaidDuplicatesCount++;
+        }
+        continue;
+       }
+
+       // Check if a voided (or existing unique-key) invoice_items row already occupies (fee_plan_item_id, period_key)
+       // or matches this student/fee_type/period so we can safely recreate it instead of colliding with uniqueness constraints.
+       $voidedItem=null;
+       if($planItem){
+        $existingKeyRow=DB::table('invoice_items')
+         ->where('fee_plan_item_id',$planItem->id)
+         ->where('period_key',$periodKey)
+         ->lockForUpdate()
+         ->first();
+        if($existingKeyRow){
+         if($existingKeyRow->status!=='voided'){
+          $skippedItems++;
+          if((int)$existingKeyRow->paid_minor > 0 || $existingKeyRow->status === 'paid'){
+           $paidDuplicatesCount++;
+          }else{
+           $unpaidDuplicatesCount++;
+          }
+          continue;
+         }
+         $voidedItem=$existingKeyRow;
+        }
+       }
+       if(!$voidedItem){
+        $voidedQuery=DB::table('invoice_items')
+         ->where('student_id',$student->id)
+         ->where('fee_type_id',$feeType->id)
+         ->where('status','voided');
+        if(!$isOneTime){
+         $voidedQuery->where(function($q) use ($periodKey,$periodStart){
+          $q->where('period_key',$periodKey)->orWhere('period_start',$periodStart);
+         });
+        }
+        $voidedItem=$voidedQuery->orderByDesc('id')->lockForUpdate()->first();
+       }
+
+       // Rule 8 & 9: Find existing regular family invoice for this period/frequency. NEVER attach to opening balance invoices!
+       $targetFrequency=$isOneTime?'one_time':'monthly';
        $invoice=DB::table('invoices as i')
         ->join('billing_runs as b','b.id','=','i.billing_run_id')
         ->where('i.family_id',$family->id)
@@ -1169,43 +1326,26 @@ class BillingController {
         ->where('i.campus_id',$student->campus_id)
         ->where('i.currency',$student->currency)
         ->where('b.frequency','!=','opening_balance')
+        ->where('b.frequency',$targetFrequency)
         ->where('b.period_start',$periodStart)
-        ->whereNotIn('i.status',['void','voided','paid'])
         ->select('i.*')
         ->lockForUpdate()
         ->first();
 
        if(!$invoice){
-        $existingPaidInvoice=DB::table('invoices as i')
-         ->join('billing_runs as b','b.id','=','i.billing_run_id')
-         ->where('i.family_id',$family->id)
-         ->where('i.department_id',$student->department_id)
-         ->where('i.campus_id',$student->campus_id)
-         ->where('i.currency',$student->currency)
-         ->where('b.frequency','!=','opening_balance')
-         ->where('b.period_start',$periodStart)
-         ->where('i.status','paid')
-         ->first();
-
-        if($existingPaidInvoice){
-         $paidDuplicatesCount++;
-         $skippedItems++;
-         continue;
-        }
-
         $billingRun=DB::table('billing_runs')
          ->where('campus_id',$student->campus_id)
          ->where('department_id',$student->department_id)
          ->where('period_start',$periodStart)
          ->where('frequency','!=','opening_balance')
-         ->where('frequency',$isOneTime?'one_time':'monthly')
+         ->where('frequency',$targetFrequency)
          ->first();
 
         if(!$billingRun){
          $runId=DB::table('billing_runs')->insertGetId([
           'campus_id'=>$student->campus_id,
           'department_id'=>$student->department_id,
-          'frequency'=>$isOneTime?'one_time':'monthly',
+          'frequency'=>$targetFrequency,
           'period_key'=>$periodKey,
           'period_start'=>$periodStart,
           'period_end'=>$periodEnd,
@@ -1219,67 +1359,83 @@ class BillingController {
          $runId=$billingRun->id;
         }
 
-        $existingRunInvoice=DB::table('invoices')
+        $invoice=DB::table('invoices')
          ->where('billing_run_id',$runId)
          ->where('family_id',$family->id)
          ->where('currency',$student->currency)
          ->lockForUpdate()
          ->first();
 
-        if($existingRunInvoice){
-         if($existingRunInvoice->status==='paid' || ((int)$existingRunInvoice->total_minor > 0 && (int)$existingRunInvoice->paid_minor >= (int)$existingRunInvoice->total_minor)){
-          $paidDuplicatesCount++;
-         }else{
-          $unpaidDuplicatesCount++;
-         }
-         $skippedItems++;
-         continue;
+        if(!$invoice){
+         $deptCode=DB::table('departments')->where('id',$student->department_id)->value('code')?:'SCH';
+         $invoiceId=DB::table('invoices')->insertGetId([
+          'billing_run_id'=>$runId,
+          'family_id'=>$family->id,
+          'campus_id'=>$student->campus_id,
+          'department_id'=>$student->department_id,
+          'currency'=>$student->currency,
+          'invoice_number'=>'PENDING-'.\Illuminate\Support\Str::uuid(),
+          'issued_on'=>now()->toDateString(),
+          'due_date'=>$dueDate,
+          'total_minor'=>0,
+          'paid_minor'=>0,
+          'previous_dues_snapshot_minor'=>0,
+          'status'=>'generated',
+          'created_at'=>now(),
+          'updated_at'=>now(),
+         ]);
+         DB::table('invoices')->where('id',$invoiceId)->update([
+          'invoice_number'=>strtoupper(substr($deptCode,0,3)).'-'.date('Y').'-'.str_pad((string)$invoiceId,7,'0',STR_PAD_LEFT),
+         ]);
+         $invoice=DB::table('invoices')->where('id',$invoiceId)->first();
         }
-
-        $deptCode=DB::table('departments')->where('id',$student->department_id)->value('code')?:'SCH';
-        $invoiceId=DB::table('invoices')->insertGetId([
-         'billing_run_id'=>$runId,
-         'family_id'=>$family->id,
-         'campus_id'=>$student->campus_id,
-         'department_id'=>$student->department_id,
-         'currency'=>$student->currency,
-         'invoice_number'=>'PENDING-'.\Illuminate\Support\Str::uuid(),
-         'issued_on'=>now()->toDateString(),
-         'due_date'=>$dueDate,
-         'total_minor'=>0,
-         'paid_minor'=>0,
-         'previous_dues_snapshot_minor'=>0,
-         'status'=>'generated',
-         'created_at'=>now(),
-         'updated_at'=>now(),
-        ]);
-        DB::table('invoices')->where('id',$invoiceId)->update([
-         'invoice_number'=>strtoupper(substr($deptCode,0,3)).'-'.date('Y').'-'.str_pad((string)$invoiceId,7,'0',STR_PAD_LEFT),
-        ]);
-        $invoice=DB::table('invoices')->where('id',$invoiceId)->first();
        }
 
        $netMinor=max(0,$amountMinor-$discountMinor);
 
-       DB::table('invoice_items')->insert([
-        'invoice_id'=>$invoice->id,
-        'student_id'=>$student->id,
-        'enrollment_id'=>$student->enrollment_id,
-        'fee_plan_item_id'=>$planItem?->id,
-        'fee_type_id'=>$feeType->id,
-        'description'=>$feeType->name,
-        'period_key'=>$periodKey,
-        'period_start'=>$periodStart,
-        'period_end'=>$periodEnd,
-        'currency'=>$student->currency,
-        'amount_minor'=>$amountMinor,
-        'discount_minor'=>$discountMinor,
-        'net_minor'=>$netMinor,
-        'paid_minor'=>0,
-        'status'=>'active',
-        'created_at'=>now(),
-        'updated_at'=>now(),
-       ]);
+       if($voidedItem){
+        app(\App\Services\FeeAdjustmentService::class)->recreateVoidedFee(
+         (int)$voidedItem->id,
+         [
+          'invoice_id'=>(int)$invoice->id,
+          'student_id'=>(int)$student->id,
+          'enrollment_id'=>$student->enrollment_id,
+          'fee_plan_item_id'=>$planItem?->id ? (int)$planItem->id : null,
+          'fee_type_id'=>(int)$feeType->id,
+          'description'=>(string)$feeType->name,
+          'period_key'=>$periodKey,
+          'period_start'=>$periodStart,
+          'period_end'=>$periodEnd,
+          'currency'=>(string)$student->currency,
+          'amount_minor'=>$amountMinor,
+          'discount_minor'=>$discountMinor,
+          'exemption_minor'=>0,
+          'net_minor'=>$netMinor,
+         ],
+         (int)$r->user()->id,
+         'Fee recreated via manual challan fee creation'
+        );
+       }else{
+        DB::table('invoice_items')->insert([
+         'invoice_id'=>$invoice->id,
+         'student_id'=>$student->id,
+         'enrollment_id'=>$student->enrollment_id,
+         'fee_plan_item_id'=>$planItem?->id,
+         'fee_type_id'=>$feeType->id,
+         'description'=>$feeType->name,
+         'period_key'=>$periodKey,
+         'period_start'=>$periodStart,
+         'period_end'=>$periodEnd,
+         'currency'=>$student->currency,
+         'amount_minor'=>$amountMinor,
+         'discount_minor'=>$discountMinor,
+         'net_minor'=>$netMinor,
+         'paid_minor'=>0,
+         'status'=>'active',
+         'created_at'=>now(),
+         'updated_at'=>now(),
+        ]);
+       }
 
        $createdItems++;
        $affectedInvoices[$invoice->id]=[
@@ -1294,9 +1450,13 @@ class BillingController {
     }
 
     if($createdItems===0){
-     $friendlyMsg=($paidDuplicatesCount>0)
-      ?'Payment has already been received for this fee and period.'
-      :'An invoice has already been generated for this fee and period.';
+     if($crossCurrencyConflictCount>0){
+      $friendlyMsg=$crossCurrencyConflictMessages[0];
+     }elseif($paidDuplicatesCount>0){
+      $friendlyMsg='Payment has already been received for this fee and period.';
+     }else{
+      $friendlyMsg='An invoice has already been generated for this fee and period.';
+     }
      $ve=\Illuminate\Validation\ValidationException::withMessages([
       'fee_type_ids'=>$friendlyMsg,
      ]);
@@ -1383,17 +1543,17 @@ class BillingController {
   $items = $itemsQuery->where(function($q) use ($periodStarts) {
    $q->whereIn('ii.period_start', $periodStarts)
      ->orWhere('ii.period_key', 'LIKE', 'one_time:%');
-  })->select('ii.paid_minor', 'ii.net_minor', 'inv.status as invoice_status', 'inv.paid_minor as inv_paid', 'inv.total_minor as inv_total')->get();
+  })->select('ii.status', 'ii.paid_minor', 'ii.net_minor', 'inv.status as invoice_status', 'inv.paid_minor as inv_paid', 'inv.total_minor as inv_total')->get();
 
   foreach ($items as $item) {
-   if ((int)$item->paid_minor > 0 || $item->invoice_status === 'paid' || ((int)$item->inv_total > 0 && (int)$item->inv_paid >= (int)$item->inv_total)) {
+   if ((int)$item->paid_minor > 0 || $item->status === 'paid' || ((int)$item->net_minor > 0 && (int)$item->inv_total > 0 && (int)$item->inv_paid >= (int)$item->inv_total)) {
     $isPaid = true;
     break;
    }
   }
 
-  // 2. Check if regular family invoice for this billing run period is marked paid
-  if (!$isPaid) {
+  // 2. Check if regular family invoice for this billing run period is marked paid (only if no matching items were found above)
+  if (!$isPaid && $items->isEmpty()) {
    $invoices = DB::table('invoices as inv')
     ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
     ->where('inv.family_id', $familyId)
@@ -1404,7 +1564,7 @@ class BillingController {
     ->get();
 
    foreach ($invoices as $inv) {
-    if ($inv->status === 'paid' || ((int)$inv->total_minor > 0 && (int)$inv->paid_minor >= (int)$inv->total_minor)) {
+    if ((int)$inv->paid_minor > 0 && (int)$inv->total_minor > 0 && (int)$inv->paid_minor >= (int)$inv->total_minor) {
      $isPaid = true;
      break;
     }
@@ -1425,11 +1585,11 @@ class BillingController {
      $q->whereIn('ii.period_start', $periodStarts)
        ->orWhere('ii.period_key', 'LIKE', 'one_time:%');
     })
-    ->select('ii.paid_minor', 'inv.status as invoice_status')
+    ->select('ii.status', 'ii.paid_minor', 'ii.net_minor', 'inv.status as invoice_status')
     ->get();
 
    foreach ($obItems as $ob) {
-    if ((int)$ob->paid_minor > 0 || $ob->invoice_status === 'paid') {
+    if ((int)$ob->paid_minor > 0 || $ob->status === 'paid' || ((int)$ob->net_minor > 0 && $ob->invoice_status === 'paid')) {
      $isPaid = true;
      break;
     }

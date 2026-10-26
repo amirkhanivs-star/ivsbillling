@@ -16,6 +16,7 @@ final class InvoiceService {
             $items = DB::table('fee_plan_items as p')
                 ->join('enrollments as e', 'e.id', '=', 'p.enrollment_id')
                 ->join('students as s', 's.id', '=', 'e.student_id')
+                ->leftJoin('fee_types as ft', 'ft.id', '=', 'p.fee_type_id')
                 ->where('e.campus_id', $run->campus_id)->where('e.department_id', $run->department_id)
                 ->where('e.status', 'active')->where('p.is_active', true)->where('p.frequency', $run->frequency)
                 ->whereNotIn('s.status', ['review_hold', 'historical_hold', 'suspended', 'left'])
@@ -27,7 +28,12 @@ final class InvoiceService {
                 ->where(fn ($q) => $q->whereNull('p.effective_from')->orWhere('p.effective_from', '<=', $run->period_end))
                 ->where(fn ($q) => $q->whereNull('p.effective_to')->orWhere('p.effective_to', '>=', $run->period_start))
                 ->when(count($allowed) > 0, fn ($q) => $q->whereIn('p.fee_type_id', $allowed))
-                ->select('p.*', 'e.student_id', 'e.campus_id', 'e.department_id', 's.family_id')->get();
+                ->select('p.*', 'e.student_id', 'e.campus_id', 'e.department_id', 's.family_id', 's.gr_number', 'ft.code as fee_type_code')->get();
+
+            $historicalMap = app(\App\Services\Migration\HistoricalOpeningBalanceService::class)
+                ->buildHistoricalObligationMap(
+                    $items->pluck('gr_number')->filter()->unique()->values()->all()
+                );
 
             $created = 0; $skipped = 0; $invoices = [];
             foreach ($items->groupBy(fn ($p) => $p->family_id.'|'.$p->currency) as $group) {
@@ -48,12 +54,13 @@ final class InvoiceService {
 
                 foreach ($group as $plan) {
                     // 1. Regular billing check: Has THIS specific fee plan item already been invoiced for this period?
-                    $alreadyBilledInRecurring = DB::table('invoice_items')
+                    $existingRecurring = DB::table('invoice_items')
                         ->where('fee_plan_item_id', $plan->id)
                         ->where('period_key', $run->period_key)
-                        ->exists();
+                        ->lockForUpdate()
+                        ->first();
 
-                    if ($alreadyBilledInRecurring) {
+                    if ($existingRecurring && $existingRecurring->status !== 'voided') {
                         $skipped++;
                         continue;
                     }
@@ -66,7 +73,9 @@ final class InvoiceService {
                         ->where('br.frequency', 'opening_balance')
                         ->where('ii.enrollment_id', $plan->enrollment_id)
                         ->where('ii.period_key', $run->period_key)
-                        ->where('ii.fee_type_id', $plan->fee_type_id);
+                        ->where('ii.fee_type_id', $plan->fee_type_id)
+                        ->where('ii.status', '!=', 'voided')
+                        ->whereNotIn('inv.status', ['void', 'voided']);
 
                     // If plan item has a specific subject, require the opening balance description to match that subject
                     if (!empty($plan->subject_name)) {
@@ -77,7 +86,24 @@ final class InvoiceService {
                         $skipped++;
                         continue;
                     }
-                    if ($invoice && $invoice->approved_to_send) {
+
+                    // 3. Staged historical settlement & currency-aware conflict check:
+                    // Block recurring fee generation when the exact (GR, fee_type, period_start, subject_tag, currency)
+                    // is historically settled, has staged dues, is a verified currency transition, or is a cross-currency conflict.
+                    $histCheck = \App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
+                        $historicalMap,
+                        (string) ($plan->gr_number ?? ''),
+                        (string) ($plan->fee_type_code ?? 'monthly'),
+                        (string) $run->period_start,
+                        (string) $plan->currency,
+                        $plan->subject_name ?? null
+                    );
+
+                    if ($histCheck !== null && ($histCheck['blocks_billing'] ?? true)) {
+                        $skipped++;
+                        continue;
+                    }
+                    if ($invoice && $invoice->approved_to_send && !in_array($invoice->status, ['void', 'voided'], true)) {
                         throw ValidationException::withMessages([
                             'run' => 'This period has an invoice already approved for sending. Review a correction rather than silently changing the sent amount.',
                         ]);
@@ -88,6 +114,7 @@ final class InvoiceService {
                             ->where('i.family_id', $first->family_id)
                             ->where('i.department_id', $run->department_id)->where('i.campus_id', $run->campus_id)
                             ->where('i.currency', $first->currency)->where('br.period_start', '<', $run->period_start)
+                            ->whereNotIn('i.status', ['void', 'voided'])
                             ->selectRaw('COALESCE(SUM(i.total_minor-i.paid_minor),0) AS outstanding')->value('outstanding');
                         $invoiceId = DB::table('invoices')->insertGetId([
                             'billing_run_id' => $runId, 'family_id' => $first->family_id,
@@ -106,16 +133,46 @@ final class InvoiceService {
                         $invoices[] = $invoiceId;
                     }
                     $discount = Money::discount((int) $plan->amount_minor, $plan->discount_kind, (int) $plan->discount_value);
-                    DB::table('invoice_items')->insert([
-                        'invoice_id' => $invoice->id, 'student_id' => $plan->student_id,
-                        'enrollment_id' => $plan->enrollment_id, 'fee_plan_item_id' => $plan->id,
-                        'fee_type_id' => $plan->fee_type_id, 'description' => $plan->description,
-                        'period_key' => $run->period_key, 'period_start' => $run->period_start,
-                        'period_end' => $run->period_end, 'currency' => $plan->currency,
-                        'amount_minor' => $plan->amount_minor, 'discount_minor' => $discount,
-                        'net_minor' => $plan->amount_minor - $discount,
-                        'created_at' => now(), 'updated_at' => now(),
-                    ]);
+                    if ($existingRecurring && $existingRecurring->status === 'voided') {
+                        $wasVoidedInvoice = in_array($invoice->status ?? '', ['void', 'voided'], true);
+                        app(FeeAdjustmentService::class)->recreateVoidedFee(
+                            (int) $existingRecurring->id,
+                            [
+                                'invoice_id' => (int) $invoice->id,
+                                'student_id' => (int) $plan->student_id,
+                                'enrollment_id' => $plan->enrollment_id,
+                                'fee_plan_item_id' => (int) $plan->id,
+                                'fee_type_id' => $plan->fee_type_id,
+                                'description' => (string) $plan->description,
+                                'period_key' => (string) $run->period_key,
+                                'period_start' => (string) $run->period_start,
+                                'period_end' => (string) $run->period_end,
+                                'currency' => (string) $plan->currency,
+                                'amount_minor' => (int) $plan->amount_minor,
+                                'discount_minor' => (int) $discount,
+                                'exemption_minor' => 0,
+                                'net_minor' => max(0, (int) $plan->amount_minor - (int) $discount),
+                            ],
+                            (int) (auth()->id() ?? ($run->created_by ?? 1)),
+                            'Fee recreated during recurring billing run generation'
+                        );
+                        $invoice = DB::table('invoices')->where('id', $invoice->id)->first();
+                        if ($wasVoidedInvoice && !in_array((int) $invoice->id, $invoices, true)) {
+                            $created++;
+                            $invoices[] = (int) $invoice->id;
+                        }
+                    } else {
+                        DB::table('invoice_items')->insert([
+                            'invoice_id' => $invoice->id, 'student_id' => $plan->student_id,
+                            'enrollment_id' => $plan->enrollment_id, 'fee_plan_item_id' => $plan->id,
+                            'fee_type_id' => $plan->fee_type_id, 'description' => $plan->description,
+                            'period_key' => $run->period_key, 'period_start' => $run->period_start,
+                            'period_end' => $run->period_end, 'currency' => $plan->currency,
+                            'amount_minor' => $plan->amount_minor, 'discount_minor' => $discount,
+                            'net_minor' => $plan->amount_minor - $discount,
+                            'created_at' => now(), 'updated_at' => now(),
+                        ]);
+                    }
                 }
                 if ($invoice) $this->refreshInvoice($invoice->id);
                 // The credit pool is shared across all invoices for the ledger. Never
@@ -129,13 +186,35 @@ final class InvoiceService {
 
     public function refreshInvoice(int $invoiceId): void {
         $totals = DB::table('invoice_items')->where('invoice_id', $invoiceId)
-            ->selectRaw('COALESCE(SUM(net_minor),0) AS total, COALESCE(SUM(paid_minor),0) AS paid')->first();
+            ->selectRaw("
+                COUNT(*) AS total_count,
+                SUM(CASE WHEN status = 'voided' THEN 1 ELSE 0 END) AS voided_count,
+                SUM(CASE WHEN status != 'voided' THEN 1 ELSE 0 END) AS valid_count,
+                COALESCE(SUM(CASE WHEN status != 'voided' THEN net_minor ELSE 0 END), 0) AS total,
+                COALESCE(SUM(paid_minor), 0) AS paid
+            ")->first();
         $invoice = DB::table('invoices')->where('id', $invoiceId)->first();
         if (!$invoice) return;
-        $status = $totals->total <= 0 || $totals->paid >= $totals->total
-            ? 'paid' : ($totals->paid > 0 ? 'partial' : 'generated');
+
+        $totalCount = (int) ($totals->total_count ?? 0);
+        $validCount = (int) ($totals->valid_count ?? 0);
+        $totalMinor = (int) ($totals->total ?? 0);
+        $paidMinor = (int) ($totals->paid ?? 0);
+
+        if ($totalCount > 0 && $validCount === 0 && $paidMinor <= 0) {
+            $status = 'voided';
+        } elseif ($totalCount === 0) {
+            $status = $paidMinor > 0 ? 'paid' : 'generated';
+        } elseif ($totalMinor <= 0 || $paidMinor >= $totalMinor) {
+            $status = 'paid';
+        } elseif ($paidMinor > 0) {
+            $status = 'partial';
+        } else {
+            $status = 'generated';
+        }
+
         DB::table('invoices')->where('id', $invoiceId)->update([
-            'total_minor' => $totals->total, 'paid_minor' => $totals->paid,
+            'total_minor' => $totalMinor, 'paid_minor' => $paidMinor,
             'status' => $status, 'updated_at' => now(),
         ]);
     }
@@ -150,6 +229,8 @@ final class InvoiceService {
             $items = DB::table('invoice_items as ii')->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
                 ->where('i.family_id', $familyId)->where('i.currency', $currency)
                 ->where('i.department_id', $deptId)->where('i.campus_id', $campusId)
+                ->where('ii.status', 'active')
+                ->whereNotIn('i.status', ['void', 'voided'])
                 ->whereRaw('ii.paid_minor < ii.net_minor')
                 ->when($credit->selected_period, fn ($q) => $q
                     ->where('ii.period_start', '>=', $credit->selected_period.'-01')

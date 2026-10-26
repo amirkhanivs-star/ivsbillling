@@ -1772,6 +1772,11 @@ class InvoiceDeliveryQueueService
             $primaryStudent = $uniqueStudents->first();
 
             $cleanGuardianName = GuardianNameResolver::forFamily($fam, $uniqueStudents);
+            $rawFatherName = $regDetails->get($famId)->father_name ?? null;
+            $fatherName = GuardianNameResolver::isValid($rawFatherName)
+                ? trim((string) $rawFatherName)
+                : ($cleanGuardianName !== GuardianNameResolver::NOT_PROVIDED ? $cleanGuardianName : null);
+            $isFormula = !GuardianNameResolver::isValid($fam->guardian_name ?? null);
 
             $problemTags = [];
             $problemDescriptions = [];

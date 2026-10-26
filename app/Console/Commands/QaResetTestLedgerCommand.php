@@ -14,7 +14,7 @@ class QaResetTestLedgerCommand extends Command
                             {--conn= : Database connection (defaults to qa)}
                             {--verify-only : Only verify backup and test fixture scope}';
 
-    protected $description = 'Safely reset the verified Phase 3C.0 test fixtures in iqra_billing_qa with backup verification';
+    protected $description = 'Safely reset the verified Phase 3C.0 test fixtures in iqra_billing with backup verification';
 
     public const BACKUP_PATH = 'backups/qa_test_ledger_fixture_oct20_21.sql';
     public const EXPECTED_SHA256 = '8b281db611e9f1b6e42bdb3273a0e9c04e445a0c2caa85142e6dab515e32084f';

@@ -62,7 +62,7 @@ class QaImportApprovedStudentsCommand extends Command
         }
 
         $this->line('');
-        $this->comment('Staging Source Summary (iqra_billing_clean):');
+        $this->comment('Staging Source Summary (iqra_billing):');
         $this->table(
             ['Metric', 'Count / Value'],
             [
@@ -100,7 +100,7 @@ class QaImportApprovedStudentsCommand extends Command
         if (!$commit) {
             $this->line('');
             $this->warn('DRY RUN ONLY. No changes written to database.');
-            $this->line('To execute the import against iqra_billing_qa, run with --commit:');
+            $this->line('To execute the import against iqra_billing, run with --commit:');
             $this->line('  php artisan qa:import-approved-students --commit');
             return self::SUCCESS;
         }

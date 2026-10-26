@@ -104,6 +104,11 @@ class StudentAdmissionController
             $targetFamily=$code?DB::table('families')->where('family_code',$code)->lockForUpdate()->first():null;
 
             if($targetFamily && $targetFamily->id !== $s->family_id){
+                abort_unless(
+                    in_array($request->user()->role, ['super_admin', 'finance_admin'], true),
+                    403,
+                    'Reassigning a student to an existing family requires Super Admin or Finance Admin privileges.'
+                );
                 $targetFamilyId=$targetFamily->id;
                 $oldFamilyId=$s->family_id;
 

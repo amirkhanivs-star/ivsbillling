@@ -234,7 +234,14 @@ final class FeeAdjustmentService
             if (!$item) {
                 throw ValidationException::withMessages(['item' => 'Invoice item not found.']);
             }
-            if ((int) $item->paid_minor > 0) {
+            if ($item->status === 'voided') {
+                throw ValidationException::withMessages(['item' => 'This fee obligation is already voided.']);
+            }
+            $hasAllocations = DB::table('payment_allocations')
+                ->where('invoice_item_id', $invoiceItemId)
+                ->where('amount_minor', '>', 0)
+                ->exists();
+            if ((int) $item->paid_minor > 0 || $hasAllocations) {
                 throw ValidationException::withMessages([
                     'item' => 'Cannot void an obligation that has already received payments. Reverse payment receipt(s) first.',
                 ]);
@@ -247,6 +254,14 @@ final class FeeAdjustmentService
                 'net_minor' => 0,
                 'updated_at' => now(),
             ]);
+
+            DB::table('fee_installments')
+                ->where('invoice_item_id', $invoiceItemId)
+                ->where('status', 'pending')
+                ->update([
+                    'status' => 'cancelled',
+                    'updated_at' => now(),
+                ]);
 
             DB::table('fee_adjustments')->insert([
                 'invoice_item_id' => $invoiceItemId,
@@ -270,6 +285,174 @@ final class FeeAdjustmentService
                 'metadata' => json_encode([
                     'voided_amount_minor' => $currentBalance,
                     'currency' => $item->currency,
+                    'reason' => $reason,
+                ]),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            return DB::table('invoice_items')->where('id', $invoiceItemId)->first();
+        }, 3);
+    }
+
+    /**
+     * Safely restore/recreate a previously voided, unpaid fee obligation in place,
+     * preserving the (fee_plan_item_id, period_key) uniqueness constraint and full audit history.
+     */
+    public function recreateVoidedFee(
+        int $invoiceItemId,
+        array $attributes = [],
+        ?int $userId = null,
+        string $reason = 'Recreated previously voided fee obligation'
+    ): object {
+        $reason = trim($reason);
+        if ($reason === '') {
+            $reason = 'Recreated previously voided fee obligation';
+        }
+
+        return DB::transaction(function () use ($invoiceItemId, $attributes, $userId, $reason) {
+            $item = DB::table('invoice_items')->where('id', $invoiceItemId)->lockForUpdate()->first();
+            if (!$item) {
+                throw ValidationException::withMessages(['item' => 'Invoice item not found.']);
+            }
+            if ($item->status !== 'voided') {
+                throw ValidationException::withMessages([
+                    'item' => 'Only a voided fee obligation can be recreated.',
+                ]);
+            }
+
+            $hasAllocations = DB::table('payment_allocations')
+                ->where('invoice_item_id', $invoiceItemId)
+                ->where('amount_minor', '>', 0)
+                ->exists();
+            if ((int) $item->paid_minor > 0 || $hasAllocations) {
+                throw ValidationException::withMessages([
+                    'item' => 'Cannot recreate or reactivate a fee obligation that has received payments or active payment allocations.',
+                ]);
+            }
+
+            $previousInvoiceId = (int) $item->invoice_id;
+            $targetInvoiceId = (int) ($attributes['invoice_id'] ?? $item->invoice_id);
+            $studentId = (int) ($attributes['student_id'] ?? $item->student_id);
+            $enrollmentId = array_key_exists('enrollment_id', $attributes) ? $attributes['enrollment_id'] : $item->enrollment_id;
+            $feePlanItemId = array_key_exists('fee_plan_item_id', $attributes) ? $attributes['fee_plan_item_id'] : $item->fee_plan_item_id;
+            $feeTypeId = array_key_exists('fee_type_id', $attributes) ? $attributes['fee_type_id'] : $item->fee_type_id;
+            $description = (string) ($attributes['description'] ?? $item->description);
+            $periodKey = (string) ($attributes['period_key'] ?? $item->period_key);
+            $periodStart = (string) ($attributes['period_start'] ?? $item->period_start);
+            $periodEnd = (string) ($attributes['period_end'] ?? $item->period_end);
+            $currency = strtoupper(trim((string) ($attributes['currency'] ?? $item->currency)));
+            $amountMinor = (int) ($attributes['amount_minor'] ?? $item->amount_minor);
+            $discountMinor = (int) ($attributes['discount_minor'] ?? 0);
+            $exemptionMinor = (int) ($attributes['exemption_minor'] ?? 0);
+            $netMinor = isset($attributes['net_minor'])
+                ? (int) $attributes['net_minor']
+                : max(0, $amountMinor - $discountMinor - $exemptionMinor);
+
+            // Historical settlement protection must be checked before restoring or recreating a fee.
+            $grNumber = (string) (DB::table('students')->where('id', $studentId)->value('gr_number') ?? '');
+            if ($grNumber !== '') {
+                $feeTypeCode = $feeTypeId
+                    ? (string) (DB::table('fee_types')->where('id', $feeTypeId)->value('code') ?? 'monthly')
+                    : 'monthly';
+                $subjectName = $feePlanItemId
+                    ? DB::table('fee_plan_items')->where('id', $feePlanItemId)->value('subject_name')
+                    : null;
+                $historicalMap = app(\App\Services\Migration\HistoricalOpeningBalanceService::class)
+                    ->buildHistoricalObligationMap([$grNumber]);
+                $histCheck = \App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
+                    $historicalMap,
+                    $grNumber,
+                    $feeTypeCode,
+                    $periodStart,
+                    $currency,
+                    $subjectName
+                );
+                if ($histCheck === null && !in_array($feeTypeCode, ['monthly', 'tuition'], true)) {
+                    $histCheck = \App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
+                        $historicalMap,
+                        $grNumber,
+                        $feeTypeCode,
+                        'ONE_TIME',
+                        $currency,
+                        $subjectName
+                    );
+                }
+                if ($histCheck !== null && ($histCheck['blocks_billing'] ?? true)) {
+                    $msg = !empty($histCheck['is_settled'])
+                        ? 'Payment has already been received for this fee and period.'
+                        : 'This fee period is already represented in historical MySkool records and cannot be recreated.';
+                    throw ValidationException::withMessages([
+                        'fee_type_ids' => $msg,
+                        'item' => $msg,
+                    ]);
+                }
+            }
+
+            DB::table('invoice_items')->where('id', $invoiceItemId)->update([
+                'invoice_id' => $targetInvoiceId,
+                'student_id' => $studentId,
+                'enrollment_id' => $enrollmentId,
+                'fee_plan_item_id' => $feePlanItemId,
+                'fee_type_id' => $feeTypeId,
+                'description' => $description,
+                'period_key' => $periodKey,
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
+                'currency' => $currency,
+                'amount_minor' => $amountMinor,
+                'discount_minor' => $discountMinor,
+                'exemption_minor' => $exemptionMinor,
+                'net_minor' => $netMinor,
+                'paid_minor' => 0,
+                'status' => 'active',
+                'updated_at' => now(),
+            ]);
+
+            DB::table('fee_installments')
+                ->where('invoice_item_id', $invoiceItemId)
+                ->where('status', 'pending')
+                ->update([
+                    'status' => 'cancelled',
+                    'updated_at' => now(),
+                ]);
+
+            $actorId = $userId ?: auth()->id();
+            $adjustmentUserId = $actorId ?: DB::table('users')->orderBy('id')->value('id');
+            if ($adjustmentUserId) {
+                DB::table('fee_adjustments')->insert([
+                    'invoice_item_id' => $invoiceItemId,
+                    'user_id' => (int) $adjustmentUserId,
+                    'kind' => 'recreated',
+                    'amount_minor' => $netMinor,
+                    'previous_amount_minor' => 0,
+                    'new_amount_minor' => $netMinor,
+                    'reason' => $reason,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+
+            $invoiceSvc = new InvoiceService();
+            if ($previousInvoiceId !== $targetInvoiceId) {
+                $invoiceSvc->refreshInvoice($previousInvoiceId);
+            }
+            $invoiceSvc->refreshInvoice($targetInvoiceId);
+
+            DB::table('audit_logs')->insert([
+                'actor_id' => $actorId,
+                'action' => 'fee_recreated',
+                'subject_type' => 'invoice_item',
+                'subject_id' => $invoiceItemId,
+                'metadata' => json_encode([
+                    'invoice_id' => $targetInvoiceId,
+                    'previous_invoice_id' => $previousInvoiceId,
+                    'fee_plan_item_id' => $feePlanItemId,
+                    'period_key' => $periodKey,
+                    'amount_minor' => $amountMinor,
+                    'discount_minor' => $discountMinor,
+                    'net_minor' => $netMinor,
+                    'currency' => $currency,
                     'reason' => $reason,
                 ]),
                 'created_at' => now(),

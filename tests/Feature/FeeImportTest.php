@@ -29,21 +29,26 @@ class FeeImportTest extends TestCase
         return User::find($id);
     }
 
-    public function test_fee_collection_shows_import_button_and_dialog_with_safety_locks(): void
+    public function test_fee_collection_obsolete_import_dialog_and_triggers_are_absent(): void
     {
         $admin = $this->setupAdmin();
 
         $res = $this->actingAs($admin)->get('/challan');
         $res->assertStatus(200);
-        $res->assertSee('Import Fees');
-        $res->assertSee('fee-import-dialog');
-        $res->assertSee('Outstanding Fees Report');
-        $res->assertSee('Fee Collection (Paid Receipts) Report');
-        // Verify safety lock notice is visible
-        $res->assertSee('Direct-to-ledger import disabled for Phase 1 Recovery Protection');
-        // Verify dangerous clear button and reset actions are completely removed
+
+        // Verify obsolete legacy import triggers and dialog are completely removed
+        $res->assertDontSee('Import Fees');
+        $res->assertDontSee('fee-import-dialog');
+        $res->assertDontSee('Outstanding Fees Report');
+        $res->assertDontSee('Fee Collection (Paid Receipts) Report');
+        $res->assertDontSee('Direct-to-ledger import disabled for Phase 1 Recovery Protection');
+
+        // Verify dangerous clear button and reset actions remain completely removed
         $res->assertDontSee('Clear Fee Dues');
         $res->assertDontSee('Reset / Clear Fee Records');
+
+        // Verify active receipt details dialog remains intact
+        $res->assertSee('receipt-details-dialog');
     }
 
     private function setupCashier(): User
@@ -291,6 +296,203 @@ class FeeImportTest extends TestCase
         $this->assertDatabaseHas('invoice_items', [
             'student_id' => $studentId,
             'paid_minor' => 30000,
+        ]);
+    }
+
+    public function test_normalize_currency_preserves_valid_currencies(): void
+    {
+        $this->seed();
+        $svc = new FeeImportService();
+
+        // Valid SAR aliases
+        $this->assertSame('SAR', $svc->normalizeCurrency('SAR'));
+        $this->assertSame('SAR', $svc->normalizeCurrency('sar'));
+        $this->assertSame('SAR', $svc->normalizeCurrency('SAFR'));
+        $this->assertSame('SAR', $svc->normalizeCurrency('SAT'));
+        $this->assertSame('SAR', $svc->normalizeCurrency('SR'));
+        $this->assertSame('SAR', $svc->normalizeCurrency('SAR`'));
+        $this->assertSame('SAR', $svc->normalizeCurrency(" SAR "));
+
+        // Valid PKR aliases
+        $this->assertSame('PKR', $svc->normalizeCurrency('PKR'));
+        $this->assertSame('PKR', $svc->normalizeCurrency('pkr'));
+        $this->assertSame('PKR', $svc->normalizeCurrency('RS'));
+        $this->assertSame('PKR', $svc->normalizeCurrency('rs'));
+        $this->assertSame('PKR', $svc->normalizeCurrency('RUPEES'));
+        $this->assertSame('PKR', $svc->normalizeCurrency('RS.'));
+        $this->assertSame('PKR', $svc->normalizeCurrency(" PKR "));
+
+        // Other valid currencies
+        $this->assertSame('AED', $svc->normalizeCurrency('AED'));
+        $this->assertSame('AED', $svc->normalizeCurrency('SAE'));
+        $this->assertSame('AED', $svc->normalizeCurrency('DHS'));
+        $this->assertSame('AED', $svc->normalizeCurrency('DIRHAM'));
+        $this->assertSame('QAR', $svc->normalizeCurrency('QAR'));
+        $this->assertSame('QAR', $svc->normalizeCurrency('QR'));
+        $this->assertSame('USD', $svc->normalizeCurrency('USD'));
+        $this->assertSame('USD', $svc->normalizeCurrency('$'));
+        $this->assertSame('OMR', $svc->normalizeCurrency('OMR'));
+        $this->assertSame('OMR', $svc->normalizeCurrency('RO'));
+        $this->assertSame('BHD', $svc->normalizeCurrency('BHD'));
+        $this->assertSame('BHD', $svc->normalizeCurrency('BD'));
+    }
+
+    public function test_normalize_currency_flags_missing_invalid_and_unknown_currencies_as_unresolved(): void
+    {
+        $this->seed();
+        $svc = new FeeImportService();
+
+        // Missing, null, whitespace, or punctuation-only must NEVER silently convert to SAR or PKR
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency(null));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency(''));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('   '));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('`'));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('"'));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency("'"));
+
+        // Unknown or invalid currency codes must NEVER silently default to SAR or PKR
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('XYZ'));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('UNKNOWN'));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('INVALID'));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('123'));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('FOO_BAR'));
+        $this->assertSame('UNRESOLVED', $svc->normalizeCurrency('EUR'));
+    }
+
+    public function test_historical_and_enrollment_currencies_can_differ_without_silent_conversion(): void
+    {
+        $admin = $this->setupAdmin();
+        $deptId = DB::table('departments')->first()->id;
+        $campusId = DB::table('campuses')->first()->id;
+        $feeTypeId = DB::table('fee_types')->where('code', 'monthly')->value('id');
+
+        $familyId = DB::table('families')->insertGetId([
+            'family_code' => 'FAM-MULTICURR-1',
+            'guardian_name' => 'Multi Currency Guardian',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $studentId = DB::table('students')->insertGetId([
+            'gr_number' => '8801',
+            'name' => 'Historical Student',
+            'family_id' => $familyId,
+            'status' => 'present',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Student's CURRENT enrollment is in SAR
+        $enrollId = DB::table('enrollments')->insertGetId([
+            'student_id' => $studentId,
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'grade_label' => 'Grade 2',
+            'currency' => 'SAR',
+            'monthly_fee_minor' => 25000,
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $runId = DB::table('billing_runs')->insertGetId([
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'frequency' => 'monthly',
+            'period_key' => 'monthly:2026-08-01..2026-08-31',
+            'period_start' => '2026-08-01',
+            'period_end' => '2026-08-31',
+            'due_date' => '2026-08-25',
+            'created_by' => $admin->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Historical invoice exists in PKR (e.g. before relocation or branch transition)
+        $historicalInvId = DB::table('invoices')->insertGetId([
+            'billing_run_id' => $runId,
+            'family_id' => $familyId,
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'invoice_number' => 'INV-HIST-PKR-001',
+            'currency' => 'PKR',
+            'total_minor' => 1500000,
+            'paid_minor' => 0,
+            'status' => 'generated',
+            'issued_on' => '2026-08-01',
+            'due_date' => '2026-08-25',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('invoice_items')->insert([
+            'invoice_id' => $historicalInvId,
+            'student_id' => $studentId,
+            'enrollment_id' => $enrollId,
+            'fee_type_id' => $feeTypeId,
+            'description' => 'Historical Session Dues',
+            'period_key' => '2026-08',
+            'period_start' => '2026-08-01',
+            'period_end' => '2026-08-31',
+            'currency' => 'PKR',
+            'amount_minor' => 1500000,
+            'discount_minor' => 0,
+            'net_minor' => 1500000,
+            'paid_minor' => 0,
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Historical PKR invoice and item remain explicitly PKR
+        $this->assertDatabaseHas('invoices', [
+            'id' => $historicalInvId,
+            'currency' => 'PKR',
+        ]);
+        $this->assertDatabaseHas('invoice_items', [
+            'invoice_id' => $historicalInvId,
+            'currency' => 'PKR',
+        ]);
+
+        // Student's active enrollment remains SAR
+        $this->assertDatabaseHas('enrollments', [
+            'id' => $enrollId,
+            'currency' => 'SAR',
+        ]);
+
+        // Receive payment in PKR for historical invoice
+        $res = $this->actingAs($admin)->post('/challan/receive', [
+            'family_id' => $familyId,
+            'campus_id' => $campusId,
+            'department_id' => $deptId,
+            'currency' => 'PKR',
+            'receiving_amount' => '15000.00',
+            'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
+        ]);
+
+        $res->assertRedirect();
+
+        // Payment recorded with PKR, never silently converted to SAR
+        $this->assertDatabaseHas('payments', [
+            'family_id' => $familyId,
+            'amount_minor' => 1500000,
+            'currency' => 'PKR',
+        ]);
+
+        // Historical invoice item settled in PKR with active domain status
+        $this->assertDatabaseHas('invoice_items', [
+            'id' => DB::table('invoice_items')->where('invoice_id', $historicalInvId)->value('id'),
+            'currency' => 'PKR',
+            'paid_minor' => 1500000,
+            'status' => 'active',
+        ]);
+
+        // Parent historical invoice marked paid in PKR
+        $this->assertDatabaseHas('invoices', [
+            'id' => $historicalInvId,
+            'currency' => 'PKR',
+            'paid_minor' => 1500000,
+            'status' => 'paid',
         ]);
     }
 }

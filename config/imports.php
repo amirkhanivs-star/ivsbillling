@@ -8,9 +8,11 @@ return [
     | Explicitly identifies the currently authorized import source version.
     | Future imports never silently fall back or select an old CSV or ZIP.
     */
-    'active_version' => env('ACTIVE_IMPORT_VERSION', 'v3_final_myskool_20261023'),
-    'active_batch_id' => env('ACTIVE_IMPORT_BATCH_ID', 'BATCH-20261023-FINAL-MYSKOOL'),
+    'active_version' => env('ACTIVE_IMPORT_VERSION', 'v4_final_myskool_20261025'),
+    'active_batch_id' => env('ACTIVE_IMPORT_BATCH_ID', 'BATCH-20261025-FINAL-MYSKOOL'),
     'allow_opening_balance_posting' => env('ALLOW_OPENING_BALANCE_POSTING', false),
+    'hold_tuition_opening_balances' => env('HOLD_TUITION_OPENING_BALANCES', true),
+    'hold_urdu_subject_opening_balances' => env('HOLD_URDU_SUBJECT_OPENING_BALANCES', true),
 
     /*
     |--------------------------------------------------------------------------
@@ -57,6 +59,23 @@ return [
             'relative_path' => 'storage/app/imports/My skool fully updated (1).xlsx',
             'expected_sha256' => '77d8e10f84726cc7b9708bfdb749948a7dbe717d60dab15b91361d5f2e4c4f4b',
             'batch_id' => 'BATCH-20261023-FINAL-MYSKOOL',
+            'sheets' => [
+                'students' => 'Students',
+                'paid_details' => 'Paid details',
+                'outstanding' => 'Outstanding (Compiled Valid)',
+            ],
+            'target_database' => 'iqra_billing',
+            'is_historical' => true,
+            'is_active' => false,
+        ],
+        'v4_final_myskool_20261025' => [
+            'label' => 'Final Authoritative MySkool Workbook (October 25)',
+            'date' => '2026-10-25',
+            'type' => 'xlsx',
+            'filename' => 'My skool paid (1).xlsx',
+            'relative_path' => 'storage/app/imports/My skool paid (1).xlsx',
+            'expected_sha256' => 'ac83e8d71b89c992eb3a35ed2cd154929dd522432bb5c5c05742bdd0255622ae',
+            'batch_id' => 'BATCH-20261025-FINAL-MYSKOOL',
             'sheets' => [
                 'students' => 'Students',
                 'paid_details' => 'Paid details',

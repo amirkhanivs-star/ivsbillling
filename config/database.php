@@ -65,21 +65,6 @@ return [
             'engine' => null,
         ],
 
-        'staging' => [
-            'driver' => env('DB_CONNECTION') === 'sqlite' ? 'sqlite' : 'mysql',
-            'database' => env('DB_CONNECTION') === 'sqlite' ? ':memory:' : 'iqra_billing_clean',
-            'host' => env('DB_HOST', '127.0.0.1'),
-            'port' => env('DB_PORT', '3306'),
-            'username' => env('DB_USERNAME', 'root'),
-            'password' => env('DB_PASSWORD', ''),
-            'charset' => 'utf8mb4',
-            'collation' => 'utf8mb4_unicode_ci',
-            'prefix' => '',
-            'prefix_indexes' => true,
-            'strict' => true,
-            'engine' => null,
-        ],
-
         'quarantine' => [
             'driver' => env('DB_CONNECTION') === 'sqlite' ? 'sqlite' : 'mysql',
             'database' => env('DB_CONNECTION') === 'sqlite' ? ':memory:' : 'mysql',

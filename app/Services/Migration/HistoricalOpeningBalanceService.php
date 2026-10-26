@@ -54,6 +54,8 @@ class HistoricalOpeningBalanceService
                     'unknown_period_count' => 0,
                     'ambiguous_department_count' => 0,
                     'unmatched_enrollment_count' => 0,
+                    'tuition_policy_hold_count' => 0,
+                    'urdu_subject_policy_hold_count' => 0,
                     'samples' => [],
                 ],
                 'sample_invoices' => [],
@@ -81,6 +83,8 @@ class HistoricalOpeningBalanceService
             'unknown_period' => [],
             'ambiguous_department' => [],
             'unmatched_enrollment' => [],
+            'tuition_policy_hold' => [],
+            'urdu_subject_policy_hold' => [],
         ];
 
         $totalsByCurrency = [];
@@ -225,6 +229,21 @@ class HistoricalOpeningBalanceService
                 continue;
             }
 
+            // Check 10: Policy Hold for Tuition Department or School Urdu Subject Fee (retained in staging pending owner decision)
+            $policyHold = self::isHeldPendingPolicyDecision($batchId, $deptId, $tuitionDeptId, $p);
+            if ($policyHold !== null) {
+                $excludedRows[$policyHold['category']][] = [
+                    'source_row' => $due->source_row,
+                    'gr_number' => $due->gr_number,
+                    'class' => $cls,
+                    'particular' => $p,
+                    'currency' => $curr,
+                    'reason' => $policyHold['reason'],
+                    'amount_minor' => $amtMinor,
+                ];
+                continue;
+            }
+
             $groupKey = "{$familyId}|{$deptId}|{$campusId}|{$curr}|{$period['period_key']}";
 
             if (!isset($invoicesGrouped[$groupKey])) {
@@ -327,6 +346,8 @@ class HistoricalOpeningBalanceService
                 'unknown_period_count' => count($excludedRows['unknown_period']),
                 'ambiguous_department_count' => count($excludedRows['ambiguous_department']),
                 'unmatched_enrollment_count' => count($excludedRows['unmatched_enrollment']),
+                'tuition_policy_hold_count' => count($excludedRows['tuition_policy_hold']),
+                'urdu_subject_policy_hold_count' => count($excludedRows['urdu_subject_policy_hold']),
                 'samples' => array_map(fn($arr) => array_slice($arr, 0, 5), $excludedRows),
             ],
             'sample_invoices' => array_slice(array_values($invoicesGrouped), 0, 5),
@@ -867,6 +888,14 @@ class HistoricalOpeningBalanceService
             $campusId = (int) $matchedEnrollment->campus_id;
             $familyId = (int) $student->family_id;
 
+            if ($deptId <= 0 || $campusId <= 0 || $familyId <= 0) {
+                continue;
+            }
+
+            if (self::isHeldPendingPolicyDecision($batchId, $deptId, $tuitionDeptId, $p) !== null) {
+                continue;
+            }
+
             $groupKey = "{$familyId}|{$deptId}|{$campusId}|{$curr}|{$period['period_key']}";
 
             if (!isset($invoicesGrouped[$groupKey])) {
@@ -903,26 +932,91 @@ class HistoricalOpeningBalanceService
     }
 
     /**
+     * Deterministically map a fee particular string to a canonical fee_types.code value.
+     */
+    public static function resolveFeeTypeCode(string $particular): string
+    {
+        $p = strtolower(trim($particular));
+        if (str_contains($p, 'admission') || str_contains($p, 'admisson')) {
+            return 'admission';
+        }
+        if (str_contains($p, 'registration')) {
+            return 'registration';
+        }
+        if (str_contains($p, 'books')) {
+            return 'books';
+        }
+        if (str_contains($p, 'slc')) {
+            return 'slc_charges';
+        }
+        if (str_contains($p, 're-exam') || str_contains($p, 're_exam')) {
+            return 're_exam';
+        }
+        if (str_contains($p, 'exam') || str_contains($p, 'federal')) {
+            return 'exam';
+        }
+
+        return 'monthly';
+    }
+
+    /**
+     * Normalize a fee type code for historical obligation identity matching.
+     */
+    public static function normalizeFeeTypeCode(string $feeTypeCode): string
+    {
+        $code = strtolower(trim($feeTypeCode));
+        if ($code === '' || $code === 'tuition') {
+            return 'monthly';
+        }
+
+        return $code;
+    }
+
+    /**
+     * Extract a lowercase subject tag (e.g. 'urdu', 'english', 'mathematics') from subject-specific
+     * fee particulars while returning '' for standard monthly/tuition fees and one-time fees.
+     */
+    public static function extractSubjectTag(string $particular): string
+    {
+        $p = trim($particular);
+        if ($p === '' || preg_match('/^(?:monthly\s*(?:school\s*)?fee|tuition\s*fee|tution\s*fee)\b/i', $p)) {
+            return '';
+        }
+        if (self::resolveFeeTypeCode($p) !== 'monthly') {
+            return '';
+        }
+        if (preg_match('/\(([^)]+)\)/', $p, $m)) {
+            return strtolower(trim($m[1]));
+        }
+
+        return '';
+    }
+
+    /**
+     * Normalize an explicit subject name or particular into a canonical subject_tag.
+     */
+    public static function normalizeSubjectTag(?string $subjectTag): string
+    {
+        $tag = trim((string) $subjectTag);
+        if ($tag === '') {
+            return '';
+        }
+        if (preg_match('/^(?:monthly\s*(?:school\s*)?fee|tuition\s*fee|tution\s*fee)\b/i', $tag)) {
+            return '';
+        }
+        if (preg_match('/\(([^)]+)\)/', $tag, $m)) {
+            return strtolower(trim($m[1]));
+        }
+
+        return strtolower($tag);
+    }
+
+    /**
      * Map fee particular text to appropriate fee type without arbitrary default fallback.
      */
     public function resolveFeeTypeId(string $particular, array $feeTypesByCode): int
     {
-        $p = strtolower(trim($particular));
-        if (str_contains($p, 'admission')) {
-            $code = 'admission';
-        } elseif (str_contains($p, 'registration')) {
-            $code = 'registration';
-        } elseif (str_contains($p, 'books')) {
-            $code = 'books';
-        } elseif (str_contains($p, 'slc')) {
-            $code = 'slc_charges';
-        } elseif (str_contains($p, 're-exam') || str_contains($p, 're_exam')) {
-            $code = 're_exam';
-        } elseif (str_contains($p, 'exam')) {
-            $code = 'exam';
-        } else {
-            $code = 'monthly';
-        }
+        $code = self::resolveFeeTypeCode($particular);
 
         if (!isset($feeTypesByCode[$code])) {
             throw new RuntimeException("Fee type code '{$code}' not found in fee_types catalog for particular: '{$particular}'");
@@ -1074,9 +1168,57 @@ class HistoricalOpeningBalanceService
                 $heldRecords[] = $heldItem;
                 continue;
             }
+
+            // 10. Policy Hold (Tuition Department or School Urdu Subject Fee pending owner policy decision)
+            $deptId = (int) $matchedEnrollment->department_id;
+            $policyHold = self::isHeldPendingPolicyDecision($batchId, $deptId, $tuitionDeptId, $p);
+            if ($policyHold !== null) {
+                $heldItem['category'] = $policyHold['category'];
+                $heldItem['category_label'] = $policyHold['category_label'];
+                $heldItem['reason'] = $policyHold['reason'];
+                $heldItem['required_correction'] = $policyHold['required_correction'];
+                $heldRecords[] = $heldItem;
+                continue;
+            }
         }
 
         return $heldRecords;
+    }
+
+    /**
+     * Evaluate whether a valid staged due row should be held from automated opening-balance
+     * posting pending the owner's policy decision (specifically the 66 Tuition rows and 6 Urdu subject-fee cases).
+     */
+    public static function isHeldPendingPolicyDecision(
+        string $batchId,
+        int $deptId,
+        int $tuitionDeptId,
+        string $particular
+    ): ?array {
+        if ($batchId !== ReviewedWorkbookImportService::V4_APPROVED_BATCH_ID) {
+            return null;
+        }
+
+        if ($deptId === $tuitionDeptId && (bool) config('imports.hold_tuition_opening_balances', true)) {
+            return [
+                'category' => 'tuition_policy_hold',
+                'category_label' => 'Tuition Opening Balance (Held Pending Policy Decision)',
+                'reason' => 'Tuition department opening-balance row held from automated financial posting pending owner policy decision.',
+                'required_correction' => 'Awaiting owner policy decision on Tuition opening-balance posting.',
+            ];
+        }
+
+        $subjectTag = self::extractSubjectTag($particular);
+        if ($subjectTag === 'urdu' && (bool) config('imports.hold_urdu_subject_opening_balances', true)) {
+            return [
+                'category' => 'urdu_subject_policy_hold',
+                'category_label' => 'Urdu Subject Fee (Held Pending Policy Decision)',
+                'reason' => "School Urdu subject-fee row ('{$particular}') held from automated financial posting pending owner policy decision.",
+                'required_correction' => 'Awaiting owner policy decision on School Urdu subject-fee opening-balance posting.',
+            ];
+        }
+
+        return null;
     }
 
     /**
@@ -1152,6 +1294,644 @@ class HistoricalOpeningBalanceService
         }
 
         return false;
+    }
+
+    /**
+     * Build the 6-part currency-aware primary historical obligation key:
+     * (batch_id, gr_number, fee_type_code, period_start, subject_tag, currency)
+     */
+    public static function makePrimaryObligationKey(
+        string $batchId,
+        string $grNumber,
+        string $feeTypeCode,
+        string $periodStart,
+        ?string $subjectTag,
+        string $currency
+    ): string {
+        return trim($batchId) . '|'
+            . trim($grNumber) . '|'
+            . self::normalizeFeeTypeCode($feeTypeCode) . '|'
+            . trim($periodStart) . '|'
+            . self::normalizeSubjectTag($subjectTag) . '|'
+            . strtoupper(trim($currency));
+    }
+
+    /**
+     * Build the 5-part period-scope historical lookup key (excluding currency):
+     * (batch_id, gr_number, fee_type_code, period_start, subject_tag)
+     *
+     * Used exclusively to detect historical currency transitions and conflicts,
+     * never to transfer or combine monetary amounts across currencies.
+     */
+    public static function makePeriodScopeKey(
+        string $batchId,
+        string $grNumber,
+        string $feeTypeCode,
+        string $periodStart,
+        ?string $subjectTag = null
+    ): string {
+        return trim($batchId) . '|'
+            . trim($grNumber) . '|'
+            . self::normalizeFeeTypeCode($feeTypeCode) . '|'
+            . trim($periodStart) . '|'
+            . self::normalizeSubjectTag($subjectTag);
+    }
+
+    /**
+     * Resolve and validate the active historical import batch ID from configuration.
+     * Ensures historical lookups use the exact same batch identity as the approved workbook staging import.
+     */
+    public static function resolveActiveBatchId(?string $batchId = null): string
+    {
+        if ($batchId !== null) {
+            $trimmed = trim($batchId);
+            if ($trimmed === '') {
+                throw new RuntimeException('CRITICAL SAFETY STOP: Historical import batch ID cannot be empty.');
+            }
+            return $trimmed;
+        }
+
+        $configuredBatch = trim((string) config('imports.active_batch_id', 'BATCH-20261023-FINAL-MYSKOOL'));
+        if ($configuredBatch === '') {
+            throw new RuntimeException('CRITICAL SAFETY STOP: Configured imports.active_batch_id cannot be empty.');
+        }
+
+        $activeVersion = trim((string) config('imports.active_version', ''));
+        if ($activeVersion !== '') {
+            $versionBatch = trim((string) config("imports.versions.{$activeVersion}.batch_id", ''));
+            if ($versionBatch !== '' && $versionBatch !== $configuredBatch) {
+                throw new RuntimeException(
+                    "CRITICAL SAFETY STOP: Configured imports.active_batch_id ('{$configuredBatch}') conflicts with active version '{$activeVersion}' batch_id ('{$versionBatch}')."
+                );
+            }
+        }
+
+        return $configuredBatch;
+    }
+
+    /**
+     * Preload currency-aware historical obligations from qa_staged_collections and qa_staged_dues
+     * for a batch of student GR numbers in at most two batched queries.
+     *
+     * Never subtracts historical collections from residual outstanding dues, never converts or
+     * mixes currencies, and never deduplicates separate genuine same-currency due lines (e.g. GR 6562).
+     */
+    public function buildHistoricalObligationMap(
+        array $grNumbers,
+        ?string $batchId = null,
+        ?string $conn = null
+    ): array {
+        $conn = $conn ?: config('database.default', 'mysql');
+        $this->validateQaConnection($conn);
+        $db = DB::connection($conn);
+
+        $batchId = self::resolveActiveBatchId($batchId);
+
+        $grList = array_values(array_unique(array_filter(
+            array_map(fn($g) => trim((string) $g), $grNumbers),
+            fn($g) => $g !== ''
+        )));
+
+        $map = [
+            'batch_id' => $batchId,
+            'by_primary' => [],
+            'by_period_scope' => [],
+            'student_collection_currencies' => [],
+            'student_period_currencies' => [],
+        ];
+
+        if (empty($grList)) {
+            return $map;
+        }
+
+        $schema = $db->getSchemaBuilder();
+        $hasCollectionsTable = $schema->hasTable('qa_staged_collections');
+        $hasDuesTable = $schema->hasTable('qa_staged_dues');
+
+        $collections = collect();
+        $dues = collect();
+
+        // 1. Query historical paid collections (qa_staged_collections)
+        if ($hasCollectionsTable) {
+            $collections = $db->table('qa_staged_collections')
+                ->where('batch_id', $batchId)
+                ->whereIn('gr_number', $grList)
+                ->orderBy('source_row')
+                ->get();
+        }
+
+        // 2. Query historical residual outstanding obligations (qa_staged_dues)
+        if ($hasDuesTable) {
+            $dues = $db->table('qa_staged_dues')
+                ->where('batch_id', $batchId)
+                ->whereIn('gr_number', $grList)
+                ->orderBy('source_row')
+                ->get();
+        }
+
+        // Guard against a missing or incorrect staging batch silently making historical fees appear safe to regenerate:
+        // If zero rows were matched for the requested GRs in $batchId, verify that $batchId itself is not mismatched
+        // against existing staging rows or already-posted opening balance lineage.
+        if ($collections->isEmpty() && $dues->isEmpty()) {
+            $batchExistsInStaging = ($hasCollectionsTable && $db->table('qa_staged_collections')->where('batch_id', $batchId)->exists())
+                || ($hasDuesTable && $db->table('qa_staged_dues')->where('batch_id', $batchId)->exists());
+
+            if (!$batchExistsInStaging) {
+                $anyStagingDataExists = ($hasCollectionsTable && $db->table('qa_staged_collections')->exists())
+                    || ($hasDuesTable && $db->table('qa_staged_dues')->exists());
+
+                if ($anyStagingDataExists) {
+                    throw new RuntimeException(
+                        "CRITICAL SAFETY STOP: Historical import batch '{$batchId}' was not found in staging tables while other staged batch records exist. " .
+                        "Refusing to silently bypass historical fee protection."
+                    );
+                }
+
+                if ($schema->hasTable('qa_opening_balance_lineage') && $db->table('qa_opening_balance_lineage')->where('batch_id', $batchId)->exists()) {
+                    throw new RuntimeException(
+                        "CRITICAL SAFETY STOP: Opening balance lineage exists for batch '{$batchId}', but staging tables contain zero rows for this batch. " .
+                        "Refusing to silently bypass historical fee protection."
+                    );
+                }
+            }
+        }
+
+        // 3. Index historical paid collections (qa_staged_collections)
+        foreach ($collections as $col) {
+            $gr = trim((string) ($col->gr_number ?? ''));
+            $particular = trim((string) ($col->fee_particular ?? ''));
+            $amtMinor = (int) ($col->amount_minor ?? 0);
+
+            if ($gr === '' || $amtMinor <= 0) {
+                continue;
+            }
+
+            $feeTypeCode = self::resolveFeeTypeCode($particular);
+            $subjectTag = self::extractSubjectTag($particular);
+            $period = self::parseParticularPeriod($particular);
+
+            if (!$period) {
+                if ($feeTypeCode === 'monthly') {
+                    continue;
+                }
+                $period = [
+                    'period_key' => "one_time:{$feeTypeCode}:ONE_TIME",
+                    'period_start' => 'ONE_TIME',
+                ];
+            }
+
+            $periodStartsToIndex = [$period['period_start']];
+            if (in_array($feeTypeCode, ['admission', 'registration'], true) && $period['period_start'] !== 'ONE_TIME') {
+                $periodStartsToIndex[] = 'ONE_TIME';
+            }
+
+            $rawCurr = strtoupper(trim((string) ($col->currency ?? '')));
+            $isUnresolved = (bool) ($col->is_currency_unresolved ?? false)
+                || $rawCurr === ''
+                || $rawCurr === 'UNRESOLVED';
+            $currKey = $isUnresolved ? 'UNRESOLVED' : $rawCurr;
+            $regCurr = strtoupper(trim((string) ($col->registration_currency ?? '')));
+
+            foreach ($periodStartsToIndex as $periodStart) {
+                $primaryKey = self::makePrimaryObligationKey($batchId, $gr, $feeTypeCode, $periodStart, $subjectTag, $currKey);
+                $scopeKey = self::makePeriodScopeKey($batchId, $gr, $feeTypeCode, $periodStart, $subjectTag);
+
+                if (!isset($map['by_primary'][$primaryKey])) {
+                    $map['by_primary'][$primaryKey] = [
+                        'batch_id' => $batchId,
+                        'gr_number' => $gr,
+                        'fee_type_code' => $feeTypeCode,
+                        'period_start' => $periodStart,
+                        'period_key' => $periodStart === 'ONE_TIME' ? "one_time:{$feeTypeCode}:ONE_TIME" : $period['period_key'],
+                        'subject_tag' => $subjectTag,
+                        'currency' => $currKey,
+                        'paid_minor' => 0,
+                        'outstanding_minor' => 0,
+                        'collection_rows_count' => 0,
+                        'due_rows_count' => 0,
+                        'collection_source_rows' => [],
+                        'due_source_rows' => [],
+                        'due_rows' => [],
+                        'staged_collection_ids' => [],
+                        'staged_due_ids' => [],
+                        'slips' => [],
+                        'registration_currencies' => [],
+                        'has_unresolved_currency' => false,
+                    ];
+                }
+
+                $map['by_primary'][$primaryKey]['paid_minor'] += $amtMinor;
+                $map['by_primary'][$primaryKey]['collection_rows_count']++;
+                if (isset($col->source_row)) {
+                    $map['by_primary'][$primaryKey]['collection_source_rows'][] = (int) $col->source_row;
+                }
+                if (isset($col->id)) {
+                    $map['by_primary'][$primaryKey]['staged_collection_ids'][] = (int) $col->id;
+                }
+                $slip = trim((string) ($col->slip_number ?? ''));
+                if ($slip !== '' && !in_array($slip, $map['by_primary'][$primaryKey]['slips'], true)) {
+                    $map['by_primary'][$primaryKey]['slips'][] = $slip;
+                }
+                if ($regCurr !== '' && $regCurr !== 'UNRESOLVED' && !in_array($regCurr, $map['by_primary'][$primaryKey]['registration_currencies'], true)) {
+                    $map['by_primary'][$primaryKey]['registration_currencies'][] = $regCurr;
+                }
+                if ($isUnresolved) {
+                    $map['by_primary'][$primaryKey]['has_unresolved_currency'] = true;
+                }
+
+                $map['by_period_scope'][$scopeKey][$currKey] = $map['by_primary'][$primaryKey];
+
+                if (!$isUnresolved && $periodStart !== 'ONE_TIME') {
+                    $map['student_period_currencies'][$gr][$feeTypeCode . '|' . $subjectTag][$periodStart][$currKey] = true;
+                }
+            }
+
+            if (!$isUnresolved) {
+                $map['student_collection_currencies'][$gr][$currKey] = ($map['student_collection_currencies'][$gr][$currKey] ?? 0) + 1;
+            }
+        }
+
+        // 4. Index historical residual outstanding obligations (qa_staged_dues)
+        foreach ($dues as $due) {
+            $gr = trim((string) ($due->gr_number ?? ''));
+            $particular = trim((string) ($due->fee_particular ?? ''));
+            $amtMinor = (int) ($due->outstanding_amount_minor ?? 0);
+
+            if ($gr === '' || $amtMinor <= 0) {
+                continue;
+            }
+
+            $feeTypeCode = self::resolveFeeTypeCode($particular);
+            $subjectTag = self::extractSubjectTag($particular);
+            $period = self::parseParticularPeriod($particular);
+
+            if (!$period) {
+                if ($feeTypeCode === 'monthly') {
+                    continue;
+                }
+                $period = [
+                    'period_key' => "one_time:{$feeTypeCode}:ONE_TIME",
+                    'period_start' => 'ONE_TIME',
+                ];
+            }
+
+            $periodStartsToIndex = [$period['period_start']];
+            if (in_array($feeTypeCode, ['admission', 'registration'], true) && $period['period_start'] !== 'ONE_TIME') {
+                $periodStartsToIndex[] = 'ONE_TIME';
+            }
+
+            $rawCurr = strtoupper(trim((string) ($due->currency ?? '')));
+            $isUnresolved = (bool) ($due->is_currency_unresolved ?? false)
+                || $rawCurr === ''
+                || $rawCurr === 'UNRESOLVED';
+            $currKey = $isUnresolved ? 'UNRESOLVED' : $rawCurr;
+            $regCurr = strtoupper(trim((string) ($due->registration_currency ?? '')));
+
+            foreach ($periodStartsToIndex as $periodStart) {
+                $primaryKey = self::makePrimaryObligationKey($batchId, $gr, $feeTypeCode, $periodStart, $subjectTag, $currKey);
+                $scopeKey = self::makePeriodScopeKey($batchId, $gr, $feeTypeCode, $periodStart, $subjectTag);
+
+                if (!isset($map['by_primary'][$primaryKey])) {
+                    $map['by_primary'][$primaryKey] = [
+                        'batch_id' => $batchId,
+                        'gr_number' => $gr,
+                        'fee_type_code' => $feeTypeCode,
+                        'period_start' => $periodStart,
+                        'period_key' => $periodStart === 'ONE_TIME' ? "one_time:{$feeTypeCode}:ONE_TIME" : $period['period_key'],
+                        'subject_tag' => $subjectTag,
+                        'currency' => $currKey,
+                        'paid_minor' => 0,
+                        'outstanding_minor' => 0,
+                        'collection_rows_count' => 0,
+                        'due_rows_count' => 0,
+                        'collection_source_rows' => [],
+                        'due_source_rows' => [],
+                        'due_rows' => [],
+                        'staged_collection_ids' => [],
+                        'staged_due_ids' => [],
+                        'slips' => [],
+                        'registration_currencies' => [],
+                        'has_unresolved_currency' => false,
+                    ];
+                }
+
+                // Preserve every residual due row without deduplication (e.g. GR 6562 rows 3496 & 3497 = AED 400)
+                // and never deduct paid_minor from outstanding_amount_minor again.
+                $map['by_primary'][$primaryKey]['outstanding_minor'] += $amtMinor;
+                $map['by_primary'][$primaryKey]['due_rows_count']++;
+                if (isset($due->source_row)) {
+                    $map['by_primary'][$primaryKey]['due_source_rows'][] = (int) $due->source_row;
+                }
+                $map['by_primary'][$primaryKey]['due_rows'][] = [
+                    'source_row' => isset($due->source_row) ? (int) $due->source_row : null,
+                    'staged_due_id' => isset($due->id) ? (int) $due->id : null,
+                    'amount_minor' => $amtMinor,
+                    'currency' => $currKey,
+                    'fee_particular' => $particular,
+                ];
+                if (isset($due->id)) {
+                    $map['by_primary'][$primaryKey]['staged_due_ids'][] = (int) $due->id;
+                }
+                if ($regCurr !== '' && $regCurr !== 'UNRESOLVED' && !in_array($regCurr, $map['by_primary'][$primaryKey]['registration_currencies'], true)) {
+                    $map['by_primary'][$primaryKey]['registration_currencies'][] = $regCurr;
+                }
+                if ($isUnresolved) {
+                    $map['by_primary'][$primaryKey]['has_unresolved_currency'] = true;
+                }
+
+                $map['by_period_scope'][$scopeKey][$currKey] = $map['by_primary'][$primaryKey];
+
+                if (!$isUnresolved && $periodStart !== 'ONE_TIME') {
+                    $map['student_period_currencies'][$gr][$feeTypeCode . '|' . $subjectTag][$periodStart][$currKey] = true;
+                }
+            }
+        }
+
+        return $map;
+    }
+
+    /**
+     * Classify a candidate fee obligation into one of six currency-aware settlement states:
+     * - 'settled_same_currency'        (A. Fully settled in requested currency)
+     * - 'partial_same_currency'        (B. Partially paid in requested currency with positive residual)
+     * - 'unpaid_same_currency'         (C. Unpaid historical obligation in requested currency)
+     * - 'verified_currency_transition' (D. Verified historical obligation in prior currency before transition)
+     * - 'cross_currency_conflict'      (E. Multi-currency or ambiguous cross-currency period requiring review)
+     * - 'new_obligation'               (F. No matching historical obligation; ordinary billing permitted)
+     */
+    public static function classifyHistoricalObligation(
+        array $map,
+        string $grNumber,
+        string $feeTypeCode,
+        string $periodStart,
+        string $targetCurrency,
+        ?string $subjectTag = null
+    ): array {
+        if (
+            !array_key_exists('batch_id', $map)
+            || !array_key_exists('by_primary', $map)
+            || !array_key_exists('by_period_scope', $map)
+            || trim((string) $map['batch_id']) === ''
+        ) {
+            throw new RuntimeException(
+                'CRITICAL SAFETY STOP: Historical obligation map is missing required batch_id or index structures. ' .
+                'Use buildHistoricalObligationMap() before classifying obligations.'
+            );
+        }
+
+        $batchId = trim((string) $map['batch_id']);
+        $gr = trim($grNumber);
+        $normFeeType = self::normalizeFeeTypeCode($feeTypeCode);
+        $normPeriodStart = trim($periodStart);
+        $normSubject = self::normalizeSubjectTag($subjectTag);
+        $normCurrency = strtoupper(trim($targetCurrency));
+
+        $primaryKey = self::makePrimaryObligationKey($batchId, $gr, $normFeeType, $normPeriodStart, $normSubject, $normCurrency);
+        $scopeKey = self::makePeriodScopeKey($batchId, $gr, $normFeeType, $normPeriodStart, $normSubject);
+        $scopeEntries = $map['by_period_scope'][$scopeKey] ?? [];
+
+        // F. New legitimate obligation: no historical payment or due exists for this period/type/subject
+        if (empty($scopeEntries)) {
+            return [
+                'status' => 'new_obligation',
+                'primary_key' => $primaryKey,
+                'period_scope_key' => $scopeKey,
+                'currency' => $normCurrency,
+                'paid_minor' => 0,
+                'outstanding_minor' => 0,
+                'blocks_billing' => false,
+                'review_required' => false,
+                'is_settled' => false,
+            ];
+        }
+
+        // E (Part 1). Cross-currency conflict: multiple currencies exist in the same period, or currency is unresolved
+        if (count($scopeEntries) > 1 || isset($scopeEntries['UNRESOLVED']) || $normCurrency === '' || $normCurrency === 'UNRESOLVED') {
+            $allCurrencies = array_keys($scopeEntries);
+            $conflicting = array_values(array_filter($allCurrencies, fn($c) => $c !== $normCurrency));
+            if (empty($conflicting)) {
+                $conflicting = $allCurrencies;
+            }
+
+            return [
+                'status' => 'cross_currency_conflict',
+                'reason' => count($scopeEntries) > 1
+                    ? 'Multiple currencies exist for the same student, fee type, and historical billing period.'
+                    : 'Historical obligation has an unresolved or missing currency.',
+                'primary_key' => $primaryKey,
+                'period_scope_key' => $scopeKey,
+                'target_currency' => $normCurrency,
+                'currencies' => $allCurrencies,
+                'conflicting_currencies' => $conflicting,
+                'by_currency' => $scopeEntries,
+                'blocks_billing' => true,
+                'review_required' => true,
+                'is_settled' => false,
+            ];
+        }
+
+        // Exact 6-part primary key match in the same currency (A, B, or C)
+        if (isset($scopeEntries[$normCurrency])) {
+            $entry = $map['by_primary'][$primaryKey] ?? $scopeEntries[$normCurrency];
+            $paidMinor = (int) ($entry['paid_minor'] ?? 0);
+            $outMinor = (int) ($entry['outstanding_minor'] ?? 0);
+
+            if (!empty($entry['has_unresolved_currency'])) {
+                return [
+                    'status' => 'cross_currency_conflict',
+                    'reason' => 'Historical obligation has an unresolved currency flag.',
+                    'primary_key' => $primaryKey,
+                    'period_scope_key' => $scopeKey,
+                    'target_currency' => $normCurrency,
+                    'currencies' => [$normCurrency],
+                    'conflicting_currencies' => [$normCurrency],
+                    'by_currency' => $scopeEntries,
+                    'blocks_billing' => true,
+                    'review_required' => true,
+                    'is_settled' => false,
+                ];
+            }
+
+            if ($paidMinor > 0 && $outMinor === 0) {
+                // A. Fully settled — same currency
+                return [
+                    'status' => 'settled_same_currency',
+                    'primary_key' => $primaryKey,
+                    'period_scope_key' => $scopeKey,
+                    'currency' => $normCurrency,
+                    'paid_minor' => $paidMinor,
+                    'outstanding_minor' => 0,
+                    'collection_rows_count' => (int) ($entry['collection_rows_count'] ?? 0),
+                    'due_rows_count' => 0,
+                    'collection_source_rows' => $entry['collection_source_rows'] ?? [],
+                    'due_source_rows' => [],
+                    'due_rows' => [],
+                    'staged_collection_ids' => $entry['staged_collection_ids'] ?? [],
+                    'staged_due_ids' => [],
+                    'slips' => $entry['slips'] ?? [],
+                    'blocks_billing' => true,
+                    'review_required' => false,
+                    'is_settled' => true,
+                ];
+            }
+
+            if ($paidMinor > 0 && $outMinor > 0) {
+                // B. Partially paid — same currency (preserve residual without double deduction)
+                return [
+                    'status' => 'partial_same_currency',
+                    'primary_key' => $primaryKey,
+                    'period_scope_key' => $scopeKey,
+                    'currency' => $normCurrency,
+                    'paid_minor' => $paidMinor,
+                    'outstanding_minor' => $outMinor,
+                    'collection_rows_count' => (int) ($entry['collection_rows_count'] ?? 0),
+                    'due_rows_count' => (int) ($entry['due_rows_count'] ?? 0),
+                    'collection_source_rows' => $entry['collection_source_rows'] ?? [],
+                    'due_source_rows' => $entry['due_source_rows'] ?? [],
+                    'due_rows' => $entry['due_rows'] ?? [],
+                    'staged_collection_ids' => $entry['staged_collection_ids'] ?? [],
+                    'staged_due_ids' => $entry['staged_due_ids'] ?? [],
+                    'slips' => $entry['slips'] ?? [],
+                    'blocks_billing' => true,
+                    'review_required' => false,
+                    'is_settled' => false,
+                ];
+            }
+
+            // C. Unpaid historical obligation — same currency
+            return [
+                'status' => 'unpaid_same_currency',
+                'primary_key' => $primaryKey,
+                'period_scope_key' => $scopeKey,
+                'currency' => $normCurrency,
+                'paid_minor' => 0,
+                'outstanding_minor' => $outMinor,
+                'collection_rows_count' => 0,
+                'due_rows_count' => (int) ($entry['due_rows_count'] ?? 0),
+                'collection_source_rows' => [],
+                'due_source_rows' => $entry['due_source_rows'] ?? [],
+                'due_rows' => $entry['due_rows'] ?? [],
+                'staged_collection_ids' => [],
+                'staged_due_ids' => $entry['staged_due_ids'] ?? [],
+                'slips' => [],
+                'blocks_billing' => true,
+                'review_required' => false,
+                'is_settled' => false,
+            ];
+        }
+
+        // Single foreign currency exists in PeriodScopeKey ($histCurrency !== $normCurrency):
+        // Evaluate D (Verified historical currency transition) vs E (Cross-currency conflict).
+        $histCurrency = (string) array_key_first($scopeEntries);
+        $entry = $scopeEntries[$histCurrency];
+        $paidMinor = (int) ($entry['paid_minor'] ?? 0);
+        $outMinor = (int) ($entry['outstanding_minor'] ?? 0);
+
+        // Require sufficient historical period/currency evidence before classifying as a verified transition:
+        // 1. Do not treat current enrollment currency alone as proof that an unpaid row in $histCurrency is valid:
+        //    require historical payment evidence in $histCurrency for this student.
+        $hasHistoricalPaymentEvidence = ($paidMinor > 0)
+            || !empty($map['student_collection_currencies'][$gr][$histCurrency]);
+
+        // 2. Chronological consistency across periods for this student/feeType/subject:
+        //    - $normCurrency must not appear in an earlier period (< $normPeriodStart).
+        //    - Check whether $normCurrency appears in a subsequent historical period (> $normPeriodStart).
+        $hasTargetCurrencyInEarlierPeriod = false;
+        $hasTargetCurrencyInLaterPeriod = false;
+        $periodTimeline = $map['student_period_currencies'][$gr][$normFeeType . '|' . $normSubject] ?? [];
+        foreach ($periodTimeline as $pStart => $currsInP) {
+            if ($pStart < $normPeriodStart && isset($currsInP[$normCurrency])) {
+                $hasTargetCurrencyInEarlierPeriod = true;
+            }
+            if ($pStart > $normPeriodStart && isset($currsInP[$normCurrency])) {
+                $hasTargetCurrencyInLaterPeriod = true;
+            }
+        }
+
+        // 3. Positive transition evidence linking $histCurrency -> $normCurrency:
+        //    Either the staged record explicitly attests registration_currency == $normCurrency (and not $histCurrency),
+        //    or (when registration_currency is absent on the staged row) the student's multi-period history shows
+        //    $histCurrency in earlier periods followed by $normCurrency in later periods.
+        $regCurrs = $entry['registration_currencies'] ?? [];
+        $hasExplicitRegCurrTransition = !empty($regCurrs)
+            && in_array($normCurrency, $regCurrs, true)
+            && !in_array($histCurrency, $regCurrs, true);
+        $hasChronologicalTransition = empty($regCurrs) && $hasTargetCurrencyInLaterPeriod;
+        $hasPositiveTransitionEvidence = $hasExplicitRegCurrTransition || $hasChronologicalTransition;
+
+        if (
+            empty($entry['has_unresolved_currency'])
+            && $hasHistoricalPaymentEvidence
+            && !$hasTargetCurrencyInEarlierPeriod
+            && $hasPositiveTransitionEvidence
+        ) {
+            // D. Verified historical currency transition:
+            // Preserve the historical obligation in $histCurrency without currency conversion,
+            // block re-billing the transitioned month in $normCurrency, and never mark $normCurrency itself as paid.
+            $histState = ($outMinor > 0 && $paidMinor > 0)
+                ? 'partial_due'
+                : ($outMinor > 0 ? 'unpaid_due' : 'settled');
+
+            return [
+                'status' => 'verified_currency_transition',
+                'historical_state' => $histState,
+                'primary_key' => self::makePrimaryObligationKey($batchId, $gr, $normFeeType, $normPeriodStart, $normSubject, $histCurrency),
+                'requested_primary_key' => $primaryKey,
+                'period_scope_key' => $scopeKey,
+                'historical_currency' => $histCurrency,
+                'target_currency' => $normCurrency,
+                'paid_minor' => $paidMinor,
+                'outstanding_minor' => $outMinor,
+                'collection_rows_count' => (int) ($entry['collection_rows_count'] ?? 0),
+                'due_rows_count' => (int) ($entry['due_rows_count'] ?? 0),
+                'collection_source_rows' => $entry['collection_source_rows'] ?? [],
+                'due_source_rows' => $entry['due_source_rows'] ?? [],
+                'due_rows' => $entry['due_rows'] ?? [],
+                'staged_collection_ids' => $entry['staged_collection_ids'] ?? [],
+                'staged_due_ids' => $entry['staged_due_ids'] ?? [],
+                'slips' => $entry['slips'] ?? [],
+                'blocks_billing' => true,
+                'review_required' => false,
+                'is_settled' => false,
+            ];
+        }
+
+        // E (Part 2). Ambiguous cross-currency relationship held for review
+        return [
+            'status' => 'cross_currency_conflict',
+            'reason' => !$hasHistoricalPaymentEvidence
+                ? "Unpaid historical obligation in '{$histCurrency}' lacks corroborating historical payment evidence for transition to '{$normCurrency}'."
+                : "Historical obligation in '{$histCurrency}' for period '{$normPeriodStart}' cannot settle or auto-transition to '{$normCurrency}' without verified transition evidence.",
+            'primary_key' => $primaryKey,
+            'period_scope_key' => $scopeKey,
+            'target_currency' => $normCurrency,
+            'currencies' => [$histCurrency],
+            'conflicting_currencies' => [$histCurrency],
+            'by_currency' => $scopeEntries,
+            'blocks_billing' => true,
+            'review_required' => true,
+            'is_settled' => false,
+        ];
+    }
+
+    /**
+     * Convenience guard returning null when the obligation is a new legitimate charge ('new_obligation')
+     * and returning the classification array when historical protection applies.
+     */
+    public static function checkHistoricalObligation(
+        array $map,
+        string $grNumber,
+        string $feeTypeCode,
+        string $periodStart,
+        string $targetCurrency,
+        ?string $subjectTag = null
+    ): ?array {
+        $result = self::classifyHistoricalObligation($map, $grNumber, $feeTypeCode, $periodStart, $targetCurrency, $subjectTag);
+        if (($result['status'] ?? 'new_obligation') === 'new_obligation') {
+            return null;
+        }
+
+        return $result;
     }
 
     private function validateQaConnection(string $conn): void
