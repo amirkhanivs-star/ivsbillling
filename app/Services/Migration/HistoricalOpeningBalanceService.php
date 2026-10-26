@@ -1381,6 +1381,8 @@ class HistoricalOpeningBalanceService
         ?string $batchId = null,
         ?string $conn = null
     ): array {
+        @ini_set('memory_limit', '1024M');
+        @set_time_limit(600);
         $conn = $conn ?: config('database.default', 'mysql');
         $this->validateQaConnection($conn);
         $db = DB::connection($conn);

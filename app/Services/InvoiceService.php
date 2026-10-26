@@ -8,6 +8,8 @@ use Illuminate\Validation\ValidationException;
 final class InvoiceService {
     /** An obligation is charged at most once per fee plan item and period. */
     public function generate(int $runId): array {
+        @ini_set('memory_limit', '1024M');
+        @set_time_limit(600);
         return DB::transaction(function () use ($runId) {
             $run = DB::table('billing_runs')->where('id', $runId)->lockForUpdate()->first();
             if (!$run) throw ValidationException::withMessages(['run' => 'Billing run not found']);

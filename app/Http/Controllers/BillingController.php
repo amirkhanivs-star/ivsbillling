@@ -155,6 +155,8 @@ class BillingController {
  }
  public function generate(Request $r,InvoiceService $svc){
   abort_if($r->user()->role==='auditor',403);
+  @ini_set('memory_limit', '1024M');
+  @set_time_limit(600);
   $monthlySelection=$r->input('frequency')==='monthly' && ($r->boolean('monthly_selection') || $r->has('months'));
   $rules=[
    'campus_id'=>'required|integer|exists:campuses,id',
