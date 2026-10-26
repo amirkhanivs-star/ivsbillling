@@ -1773,12 +1773,16 @@ class BillingController {
   }
   return back()->with('notice',$notice);
  }
-  public function receipt(int $payment, Request $r){
+  public function receipt(Request $r, int $payment, ?string $token = null){
    $p=DB::table('payments')->where('id',$payment)->first();
    abort_unless($p,404);
-   if ($r->hasValidSignature()) {
-    $pdfService = app(\App\Services\PdfAccessService::class);
-    abort_if(!$pdfService->isAccessValid('receipt', $p->id, $r->query('k')), 403, 'This receipt PDF link is invalid or has been revoked.');
+   $pdfService = app(\App\Services\PdfAccessService::class);
+   $hasValidToken = $token && $pdfService->isPathTokenValid('receipt', $p->id, $token);
+   $isSigned = $r->hasValidSignature() && $pdfService->isAccessValid('receipt', $p->id, $r->query('k'));
+   if ($token !== null) {
+    abort_if(!$hasValidToken, 403, 'This receipt PDF link is invalid or has been revoked.');
+   } elseif ($isSigned) {
+    // Valid legacy signed route
    } else {
     abort_unless($r->user(), 401);
     $this->assertAccess($r,$p->department_id,$p->campus_id);
@@ -1828,12 +1832,16 @@ class BillingController {
     ->setPaper('a4')
     ->stream('historical-slip-' . $receipt->slip_number . '.pdf');
   }
-  public function invoicePdf(int $invoice, Request $r){
+  public function invoicePdf(Request $r, int $invoice, ?string $token = null){
    $i=DB::table('invoices')->where('id',$invoice)->first();
    abort_unless($i,404);
-   if ($r->hasValidSignature()) {
-    $pdfService = app(\App\Services\PdfAccessService::class);
-    abort_if(!$pdfService->isAccessValid('invoice', $i->id, $r->query('k')), 403, 'This invoice PDF link is invalid or has been revoked.');
+   $pdfService = app(\App\Services\PdfAccessService::class);
+   $hasValidToken = $token && $pdfService->isPathTokenValid('invoice', $i->id, $token);
+   $isSigned = $r->hasValidSignature() && $pdfService->isAccessValid('invoice', $i->id, $r->query('k'));
+   if ($token !== null) {
+    abort_if(!$hasValidToken, 403, 'This invoice PDF link is invalid or has been revoked.');
+   } elseif ($isSigned) {
+    // Valid legacy signed route
    } else {
     abort_unless($r->user(), 401);
     $this->assertAccess($r,$i->department_id,$i->campus_id);
@@ -1954,14 +1962,19 @@ class BillingController {
   ])->setPaper('a4')->stream('Monthly-Fee-Invoice.pdf');
  }
 
- public function familyConsolidatedChallanPdf(int $family, Request $r){
+ public function familyConsolidatedChallanPdf(Request $r, int $family, ?string $token = null){
   $f = DB::table('families')->where('id', $family)->first();
   abort_unless($f, 404);
 
-  $isSigned = $r->hasValidSignature();
-  if ($isSigned) {
-   $pdfService = app(\App\Services\PdfAccessService::class);
-   abort_if(!$pdfService->isAccessValid('family', $f->id, $r->query('k')), 403, 'This challan PDF link is invalid or has been revoked.');
+  $pdfService = app(\App\Services\PdfAccessService::class);
+  $hasValidToken = $token && $pdfService->isPathTokenValid('family', $f->id, $token);
+  $isSigned = $r->hasValidSignature() && $pdfService->isAccessValid('family', $f->id, $r->query('k'));
+  $isPublic = $hasValidToken || $isSigned;
+
+  if ($token !== null) {
+   abort_if(!$hasValidToken, 403, 'This challan PDF link is invalid or has been revoked.');
+  } elseif ($isSigned) {
+   // Valid legacy signed route
   } elseif (!in_array($r->user()?->role, ['super_admin', 'finance_admin'], true)) {
    abort_unless($r->user(), 401);
    $hasAccess = DB::table('enrollments as e')
@@ -1983,7 +1996,7 @@ class BillingController {
    ->whereRaw('ii.net_minor > ii.paid_minor')
    ->whereNotIn('ii.status', ['voided', 'exempted', 'paid'])
    ->whereNotIn('i.status', ['void', 'voided', 'paid'])
-   ->when(!$isSigned && !in_array($r->user()?->role, ['super_admin', 'finance_admin'], true), function($q) use ($r) {
+   ->when(!$isPublic && !in_array($r->user()?->role, ['super_admin', 'finance_admin'], true), function($q) use ($r) {
     if ($r->user()) {
      $q->where('i.campus_id', $r->user()->campus_id)
        ->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id));

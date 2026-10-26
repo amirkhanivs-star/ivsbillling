@@ -56,38 +56,52 @@ class PdfAccessService
     }
 
     /**
-     * Generate permanent public signed URL for an invoice PDF.
+     * Generate secure HMAC path token for clean URL routing (no query parameters).
+     */
+    public function getSecurePathToken(string $type, int $id): string
+    {
+        $key = $this->getAccessKey($type, $id);
+        return substr(hash_hmac('sha256', "clean-pdf:{$type}:{$id}:{$key}", (string)config('app.key')), 0, 32);
+    }
+
+    /**
+     * Check if a given path token is valid and not revoked.
+     */
+    public function isPathTokenValid(string $type, int $id, ?string $token): bool
+    {
+        if (empty($token) || Cache::get("pdf_revoked:{$type}:{$id}", false)) {
+            return false;
+        }
+
+        $expected = $this->getSecurePathToken($type, $id);
+        return hash_equals($expected, $token);
+    }
+
+    /**
+     * Generate permanent public URL for an invoice PDF.
      */
     public function getInvoicePdfUrl(int $invoiceId): string
     {
-        $key = $this->getAccessKey('invoice', $invoiceId);
-        return URL::signedRoute('invoices.signed_pdf', [
-            'invoice' => $invoiceId,
-            'k' => $key,
-        ]);
+        $token = $this->getSecurePathToken('invoice', $invoiceId);
+        return url("/public/invoices/{$invoiceId}/{$token}/Monthly-Fee-Invoice.pdf");
     }
 
     /**
-     * Generate permanent public signed URL for a family consolidated challan PDF.
+     * Generate permanent public URL for a family consolidated challan PDF.
      */
     public function getFamilyChallanPdfUrl(int $familyId): string
     {
-        $key = $this->getAccessKey('family', $familyId);
-        return URL::signedRoute('families.signed_challan_pdf', [
-            'family' => $familyId,
-            'k' => $key,
-        ]);
+        $token = $this->getSecurePathToken('family', $familyId);
+        return url("/public/challans/{$familyId}/{$token}/Monthly-Fee-Invoice.pdf");
     }
 
     /**
-     * Generate permanent public signed URL for a payment receipt PDF.
+     * Generate permanent public URL for a payment receipt PDF.
      */
     public function getReceiptPdfUrl(int $paymentId): string
     {
-        $key = $this->getAccessKey('receipt', $paymentId);
-        return URL::signedRoute('receipts.signed_pdf', [
-            'payment' => $paymentId,
-            'k' => $key,
-        ]);
+        $token = $this->getSecurePathToken('receipt', $paymentId);
+        return url("/public/receipts/{$paymentId}/{$token}/Paid-Receipt.pdf");
     }
 }
+

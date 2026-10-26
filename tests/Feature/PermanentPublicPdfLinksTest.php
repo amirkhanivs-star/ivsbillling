@@ -145,9 +145,9 @@ class PermanentPublicPdfLinksTest extends TestCase
 
         $url = $pdfService->getInvoicePdfUrl($data['invId']);
 
-        // Assert URL contains signature and token k, but NO expires param
-        $this->assertStringContainsString('signature=', $url);
-        $this->assertStringContainsString('k=', $url);
+        // Assert URL ends cleanly in .pdf, has no query string, and no expires param
+        $this->assertStringEndsWith('/Monthly-Fee-Invoice.pdf', $url);
+        $this->assertStringNotContainsString('?', $url);
         $this->assertStringNotContainsString('expires=', $url);
 
         // Access as unauthenticated guest
@@ -167,9 +167,9 @@ class PermanentPublicPdfLinksTest extends TestCase
 
         $url = $pdfService->getReceiptPdfUrl($data['paymentId']);
 
-        // Assert URL contains signature and token k, but NO expires param
-        $this->assertStringContainsString('signature=', $url);
-        $this->assertStringContainsString('k=', $url);
+        // Assert URL ends cleanly in .pdf, has no query string, and no expires param
+        $this->assertStringEndsWith('/Paid-Receipt.pdf', $url);
+        $this->assertStringNotContainsString('?', $url);
         $this->assertStringNotContainsString('expires=', $url);
 
         // Access as unauthenticated guest
@@ -190,14 +190,14 @@ class PermanentPublicPdfLinksTest extends TestCase
         $invoiceUrl = $pdfService->getInvoicePdfUrl($data['invId']);
         $receiptUrl = $pdfService->getReceiptPdfUrl($data['paymentId']);
 
-        // Tampered signature
-        $tamperedInvoiceUrl = $invoiceUrl . 'tampered';
+        // Tampered token in clean path URL
+        $tamperedInvoiceUrl = str_replace('/Monthly-Fee-Invoice.pdf', 'bad/Monthly-Fee-Invoice.pdf', $invoiceUrl);
         $this->get($tamperedInvoiceUrl)->assertStatus(403);
 
-        $tamperedReceiptUrl = $receiptUrl . 'tampered';
+        $tamperedReceiptUrl = str_replace('/Paid-Receipt.pdf', 'bad/Paid-Receipt.pdf', $receiptUrl);
         $this->get($tamperedReceiptUrl)->assertStatus(403);
 
-        // Guest directly guessing an ID without signature
+        // Guest directly guessing an ID without token or signature
         $this->get("/public/invoices/{$data['invId']}/pdf")->assertStatus(403);
         $this->get("/public/receipts/{$data['paymentId']}/pdf")->assertStatus(403);
 
@@ -219,6 +219,13 @@ class PermanentPublicPdfLinksTest extends TestCase
         $oldReceiptUrl = $pdfService->getReceiptPdfUrl($data['paymentId']);
         $pdfService->revokeAccess('receipt', $data['paymentId']);
         $this->get($oldReceiptUrl)->assertStatus(403);
+
+        // Backward compatibility: Old signed routes with valid signature still work
+        $legacySignedChallan = URL::signedRoute('families.signed_challan_pdf', [
+            'family' => $data['famId'],
+            'k' => $pdfService->getAccessKey('family', $data['famId']),
+        ]);
+        $this->get($legacySignedChallan)->assertStatus(200);
     }
 
     /**
@@ -244,10 +251,10 @@ class PermanentPublicPdfLinksTest extends TestCase
 
         $this->assertArrayHasKey('pdf_attachment', $monthlyPayload);
         $this->assertArrayNotHasKey('expires_at', $monthlyPayload['pdf_attachment'], 'Permanent monthly links must not have expires_at');
-        $this->assertStringContainsString('signature=', $monthlyPayload['pdf_attachment']['pdf_url']);
-        $this->assertStringNotContainsString('expires=', $monthlyPayload['pdf_attachment']['pdf_url']);
-        $this->assertStringContainsString('signature=', $monthlyPayload['pdf_attachment']['consolidated_challan_url']);
-        $this->assertStringNotContainsString('expires=', $monthlyPayload['pdf_attachment']['consolidated_challan_url']);
+        $this->assertStringEndsWith('/Monthly-Fee-Invoice.pdf', $monthlyPayload['pdf_attachment']['pdf_url']);
+        $this->assertStringNotContainsString('?', $monthlyPayload['pdf_attachment']['pdf_url']);
+        $this->assertStringEndsWith('/Monthly-Fee-Invoice.pdf', $monthlyPayload['pdf_attachment']['consolidated_challan_url']);
+        $this->assertStringNotContainsString('?', $monthlyPayload['pdf_attachment']['consolidated_challan_url']);
 
         // 2. Paid Webhook Payload
         $paidNotif = (object)[
@@ -263,22 +270,22 @@ class PermanentPublicPdfLinksTest extends TestCase
 
         $this->assertArrayHasKey('pdf_attachment', $paidPayload);
         $this->assertArrayNotHasKey('expires_at', $paidPayload['pdf_attachment'], 'Permanent paid links must not have expires_at');
-        $this->assertStringContainsString('signature=', $paidPayload['pdf_attachment']['pdf_url']);
-        $this->assertStringNotContainsString('expires=', $paidPayload['pdf_attachment']['pdf_url']);
+        $this->assertStringEndsWith('/Monthly-Fee-Invoice.pdf', $paidPayload['pdf_attachment']['pdf_url']);
+        $this->assertStringNotContainsString('?', $paidPayload['pdf_attachment']['pdf_url']);
 
         // Paid payload must include the permanent paid receipt PDF URL
         $this->assertArrayHasKey('receipt_pdf_url', $paidPayload['pdf_attachment']);
-        $this->assertStringContainsString('signature=', $paidPayload['pdf_attachment']['receipt_pdf_url']);
-        $this->assertStringNotContainsString('expires=', $paidPayload['pdf_attachment']['receipt_pdf_url']);
+        $this->assertStringEndsWith('/Paid-Receipt.pdf', $paidPayload['pdf_attachment']['receipt_pdf_url']);
+        $this->assertStringNotContainsString('?', $paidPayload['pdf_attachment']['receipt_pdf_url']);
 
         $this->assertArrayHasKey('payment_details', $paidPayload);
         $this->assertArrayHasKey('receipt_pdf_url', $paidPayload['payment_details']);
-        $this->assertStringContainsString('signature=', $paidPayload['payment_details']['receipt_pdf_url']);
-        $this->assertStringNotContainsString('expires=', $paidPayload['payment_details']['receipt_pdf_url']);
+        $this->assertStringEndsWith('/Paid-Receipt.pdf', $paidPayload['payment_details']['receipt_pdf_url']);
+        $this->assertStringNotContainsString('?', $paidPayload['payment_details']['receipt_pdf_url']);
 
         $this->assertNotEmpty($paidPayload['payment_details']['related_receipt_pdf_links']);
         $related = $paidPayload['payment_details']['related_receipt_pdf_links'][0];
-        $this->assertStringContainsString('signature=', $related['receipt_pdf_url']);
-        $this->assertStringNotContainsString('expires=', $related['receipt_pdf_url']);
+        $this->assertStringEndsWith('/Paid-Receipt.pdf', $related['receipt_pdf_url']);
+        $this->assertStringNotContainsString('?', $related['receipt_pdf_url']);
     }
 }

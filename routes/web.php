@@ -11,10 +11,13 @@ Route::post('/logout',[AuthController::class,'logout'])->middleware('auth');
 Route::post('/webhook/n8n/callback',[B::class,'callback'])->name('n8n.callback')->middleware('throttle:120,1');
 Route::get('/public/invoices/{invoice}/pdf',[B::class,'invoicePdf'])->name('invoices.signed_pdf')->middleware('signed');
 Route::get('/public/invoices/{invoice}/Monthly-Fee-Invoice.pdf',[B::class,'invoicePdf'])->name('invoices.signed_pdf_named')->middleware('signed');
+Route::get('/public/invoices/{invoice}/{token}/Monthly-Fee-Invoice.pdf',[B::class,'invoicePdf'])->name('invoices.clean_invoice_pdf');
 Route::get('/public/families/{family}/challan/pdf',[B::class,'familyConsolidatedChallanPdf'])->name('families.signed_challan_pdf')->middleware('signed');
 Route::get('/public/families/{family}/challan/Monthly-Fee-Invoice.pdf',[B::class,'familyConsolidatedChallanPdf'])->name('families.signed_challan_pdf_named')->middleware('signed');
+Route::get('/public/challans/{family}/{token}/Monthly-Fee-Invoice.pdf',[B::class,'familyConsolidatedChallanPdf'])->name('families.clean_challan_pdf');
 Route::get('/public/receipts/{payment}/pdf',[B::class,'receipt'])->name('receipts.signed_pdf')->middleware('signed');
 Route::get('/public/receipts/{payment}/Paid-Receipt.pdf',[B::class,'receipt'])->name('receipts.signed_pdf_named')->middleware('signed');
+Route::get('/public/receipts/{payment}/{token}/Paid-Receipt.pdf',[B::class,'receipt'])->name('receipts.clean_receipt_pdf');
 Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/dashboard',[B::class,'dashboard']);Route::get('/settings/branding',[B::class,'branding']);Route::post('/settings/branding',[B::class,'saveBranding']);
  Route::get('/settings/webhooks',[\App\Http\Controllers\WebhookSettingsController::class,'index'])->name('settings.webhooks');

@@ -279,8 +279,8 @@ class WebhookNotificationTest extends TestCase
         $this->assertArrayHasKey('pdf_url', $capturedPayload['pdf_attachment']);
 
         $pdfUrl = $capturedPayload['pdf_attachment']['pdf_url'];
-        $this->assertStringContainsString('/public/invoices/' . $data['invoice']->id . '/pdf', $pdfUrl);
-        $this->assertStringContainsString('signature=', $pdfUrl);
+        $this->assertStringEndsWith('/Monthly-Fee-Invoice.pdf', $pdfUrl);
+        $this->assertStringNotContainsString('?', $pdfUrl);
 
         // Verify the signed URL resolves without login (public signed route)
         $response = $this->get($pdfUrl);
