@@ -957,7 +957,6 @@
                     </div>
                 </div>
             @endif
-        @endif
 
         {{-- BATCH PIPELINE PROGRESS TABLE --}}
         @if(!empty($recentBatches) && $recentBatches->isNotEmpty())
