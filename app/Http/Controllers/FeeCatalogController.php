@@ -18,47 +18,169 @@ class FeeCatalogController
     public function index(Request $request)
     {
         $types = DB::table('fee_types')->orderBy('name')->get();
-        $classes = DB::table('programs')->select('name')->union(DB::table('enrollments')->whereNotNull('grade_label')->selectRaw('grade_label as name'))->orderBy('name')->pluck('name')->filter()->unique()->values();
+        $classes = DB::table('programs')->select('name')
+            ->union(DB::table('enrollments')->whereNotNull('grade_label')->selectRaw('grade_label as name'))
+            ->union(DB::table('fee_catalog_rates')->selectRaw('class_label as name'))
+            ->orderBy('name')->pluck('name')->filter()->unique()->values();
         if ($classes->isEmpty()) {
             $classes = collect(['FS 1', 'FS 2', 'FS 3', 'Grade 1', 'Grade 2', 'Grade 3', 'Grade 4', 'Grade 5']);
         }
         $departments = DB::table('departments')->orderBy('id')->get();
-        $selectedType = $request->integer('type') ?: optional($types->firstWhere('code', 'monthly'))->id;
-        // Phase 1 Recovery: Safe idempotent GET display without side-effect DB writes
+        $selectedType = $request->integer('type') ?: optional($types->firstWhere('code', 'monthly'))->id ?: optional($types->first())->id;
+        $currentType = $types->firstWhere('id', $selectedType) ?? $types->first();
+        if (!$selectedType && $currentType) {
+            $selectedType = $currentType->id;
+        }
 
         $query = DB::table('fee_catalog_rates as c')->join('fee_types as t', 't.id', '=', 'c.fee_type_id')
             ->join('departments as d', 'd.id', '=', 'c.department_id')
             ->select('c.*', 't.name as type_name', 'd.name as department_name');
         if ($selectedType) $query->where('c.fee_type_id', $selectedType);
         if ($request->filled('search')) $query->where('c.class_label', 'like', '%'.addcslashes($request->input('search'), '%_').'%');
-        $rates = $query->orderBy('c.class_label')->paginate(30)->withQueryString();
+        $rates = $query->orderBy('c.class_label')->paginate(50)->withQueryString();
         $plans = DB::table('fee_plan_items as p')->join('enrollments as e', 'e.id', '=', 'p.enrollment_id')
             ->join('students as s', 's.id', '=', 'e.student_id')->select('p.id', 'p.fee_type_id', 'p.amount_minor', 'p.currency', 'e.grade_label', 'e.department_id', 'e.campus_id', 's.name', 's.gr_number')
             ->where('p.is_active', true)->orderBy('s.name')->limit(300)->get();
-        return view('fee-structure', compact('types', 'classes', 'departments', 'rates', 'selectedType', 'plans'));
+        return view('fee-structure', compact('types', 'classes', 'departments', 'rates', 'selectedType', 'currentType', 'plans'));
     }
 
     public function store(Request $request)
     {
         $this->authorizeWrite($request);
         $data = $request->validate([
-            'title' => 'required|string|max:180',
+            'fee_type_id' => 'nullable',
+            'title' => 'nullable|string|max:180',
             'amount' => ['required', 'regex:/^\d{1,13}(?:\.\d{1,2})?$/'],
-            'frequency' => Rule::in(['monthly', 'one_time', 'annual', 'quarterly', 'weekly', 'custom']),
-            'department_id' => 'required|exists:departments,id',
-            'class_label' => 'required|string|max:120',
-            'currency' => ['required', 'regex:/^[A-Z]{3}$/'],
+            'frequency' => ['nullable', Rule::in(['monthly', 'one_time', 'annual', 'quarterly', 'weekly', 'custom'])],
+            'department_id' => 'nullable|exists:departments,id',
+            'class_label' => 'nullable|string|max:120',
+            'class_labels' => 'nullable|array',
+            'class_labels.*' => 'string|max:120',
+            'currency' => ['nullable', 'regex:/^[A-Z]{3}$/'],
         ]);
-        return DB::transaction(function () use ($data) {
-            $code = Str::slug($data['title'], '_');
-            $type = DB::table('fee_types')->whereNull('department_id')->where('code', $code)->first();
-            if (!$type) {
-                $id = DB::table('fee_types')->insertGetId(['name' => $data['title'], 'code' => substr($code, 0, 48), 'department_id' => null, 'created_at' => now(), 'updated_at' => now()]);
-            } else $id = $type->id;
-            $key = ['fee_type_id' => $id, 'department_id' => $data['department_id'], 'class_label' => $data['class_label'], 'currency' => $data['currency']];
-            if (DB::table('fee_catalog_rates')->where($key)->exists()) return back()->withErrors(['class_label' => 'A fee for this class, type and currency already exists. Use Edit instead.']);
-            DB::table('fee_catalog_rates')->insert($key + ['amount_minor' => Money::minor($data['amount']), 'frequency' => $data['frequency'], 'created_at' => now(), 'updated_at' => now()]);
-            return redirect('/manage-fee?type='.$id)->with('notice', 'Class fee added. Existing student plans and invoices were not changed.');
+
+        return DB::transaction(function () use ($request, $data) {
+            // 1. Resolve fee type
+            $typeId = null;
+            $typeName = '';
+            if (!empty($data['fee_type_id']) && $data['fee_type_id'] !== 'new') {
+                $type = DB::table('fee_types')->where('id', (int)$data['fee_type_id'])->first();
+                if ($type) {
+                    $typeId = $type->id;
+                    $typeName = $type->name;
+                }
+            }
+
+            if (!$typeId) {
+                $title = trim($data['title'] ?? '');
+                if ($title === '') {
+                    return back()->withErrors(['title' => 'Please select a fee type or enter a fee title.']);
+                }
+                $code = Str::slug($title, '_');
+                $type = DB::table('fee_types')->where('code', $code)->orWhere('name', $title)->first();
+                if (!$type) {
+                    $typeId = DB::table('fee_types')->insertGetId([
+                        'name' => $title,
+                        'code' => substr($code, 0, 48),
+                        'department_id' => null,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                    $typeName = $title;
+                } else {
+                    $typeId = $type->id;
+                    $typeName = $type->name;
+                }
+            }
+
+            // 2. Resolve target classes
+            $classes = [];
+            if (!empty($data['class_labels']) && is_array($data['class_labels'])) {
+                foreach ($data['class_labels'] as $c) {
+                    $trimmed = trim((string)$c);
+                    if ($trimmed !== '') {
+                        $classes[] = $trimmed;
+                    }
+                }
+            }
+            if (!empty($data['class_label'])) {
+                $trimmed = trim((string)$data['class_label']);
+                if ($trimmed !== '' && !in_array($trimmed, $classes, true)) {
+                    $classes[] = $trimmed;
+                }
+            }
+            $classes = array_values(array_unique($classes));
+            if (empty($classes)) {
+                return back()->withErrors(['class_label' => 'Please select or enter at least one grade / class.']);
+            }
+
+            // 3. Resolve department, currency, frequency
+            $departmentId = !empty($data['department_id']) ? (int)$data['department_id'] : (DB::table('departments')->value('id') ?? 1);
+            $currency = !empty($data['currency']) ? strtoupper(trim($data['currency'])) : 'SAR';
+            $frequency = $data['frequency'] ?? null;
+            if (!$frequency) {
+                $code = DB::table('fee_types')->where('id', $typeId)->value('code');
+                $frequency = ($code === 'monthly') ? 'monthly' : 'one_time';
+            }
+
+            $amountMinor = Money::minor($data['amount']);
+            $count = 0;
+
+            foreach ($classes as $classLabel) {
+                $key = [
+                    'fee_type_id' => $typeId,
+                    'department_id' => $departmentId,
+                    'class_label' => $classLabel,
+                    'currency' => $currency,
+                ];
+
+                $existing = DB::table('fee_catalog_rates')->where($key)->lockForUpdate()->first();
+                if ($existing) {
+                    DB::table('fee_rate_changes')->insert([
+                        'fee_type_id' => $typeId,
+                        'user_id' => $request->user()->id,
+                        'target_kind' => 'catalog',
+                        'target_id' => $existing->id,
+                        'currency' => $currency,
+                        'before_minor' => $existing->amount_minor,
+                        'after_minor' => $amountMinor,
+                        'reason' => 'Catalog rate updated',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                    DB::table('fee_catalog_rates')->where('id', $existing->id)->update([
+                        'amount_minor' => $amountMinor,
+                        'frequency' => $frequency,
+                        'updated_at' => now(),
+                    ]);
+                } else {
+                    $rateId = DB::table('fee_catalog_rates')->insertGetId($key + [
+                        'amount_minor' => $amountMinor,
+                        'frequency' => $frequency,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                    DB::table('fee_rate_changes')->insert([
+                        'fee_type_id' => $typeId,
+                        'user_id' => $request->user()->id,
+                        'target_kind' => 'catalog',
+                        'target_id' => $rateId,
+                        'currency' => $currency,
+                        'before_minor' => 0,
+                        'after_minor' => $amountMinor,
+                        'reason' => 'Catalog rate created',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+                $count++;
+            }
+
+            $msg = $count === 1
+                ? "Fee rate for {$classes[0]} saved under {$typeName}."
+                : "Fee rates for {$count} classes saved under {$typeName}.";
+
+            return redirect('/manage-fee?type=' . $typeId)->with('notice', $msg);
         });
     }
 
