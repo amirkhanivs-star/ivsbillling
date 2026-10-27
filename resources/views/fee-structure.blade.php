@@ -2,6 +2,102 @@
 @section('title', 'Fee Structure')
 @section('content')
 <link rel="stylesheet" href="{{ asset('assets/iqra-fee-catalog.css') }}">
+<style>
+  .fc-drawer input[type="checkbox"],
+  .fc-modal input[type="checkbox"] {
+    width: 15px !important;
+    height: 15px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    flex-shrink: 0;
+    accent-color: #7e6ae1;
+    cursor: pointer;
+  }
+  .fc-grade-card {
+    background: #f8f7fd;
+    border: 1px solid #e2def5;
+    border-radius: 6px;
+    padding: 12px;
+  }
+  .fc-grade-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .fc-grade-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #4b4668;
+  }
+  .fc-multi-switch {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 6px !important;
+    font-size: 12px !important;
+    font-weight: 600;
+    color: #7e6ae1 !important;
+    cursor: pointer;
+    margin: 0 !important;
+    white-space: nowrap;
+  }
+  .fc-multi-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .fc-multi-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .fc-multi-actions button {
+    font-size: 11px;
+    font-weight: 600;
+    background: #eeebfb;
+    border: 1px solid #d5cef6;
+    border-radius: 4px;
+    color: #6b59d3;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .fc-multi-actions button:hover {
+    background: #e0dbf9;
+  }
+  .fc-multi-list {
+    max-height: 210px;
+    overflow-y: auto;
+    background: #ffffff;
+    border: 1px solid #dcd7ee;
+    border-radius: 5px;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .fc-multi-item {
+    display: flex !important;
+    align-items: center;
+    gap: 9px !important;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px !important;
+    color: #39364f !important;
+    cursor: pointer;
+    margin: 0 !important;
+    transition: background 0.12s ease;
+  }
+  .fc-multi-item:hover {
+    background: #f4f2fc;
+  }
+  .fc-multi-item span {
+    line-height: 1.3;
+    word-break: break-word;
+  }
+</style>
 <div class="fc-shell">
   @if(session('notice'))<div class="fc-notice">{{session('notice')}}</div>@endif
   @if($errors->any())<div class="fc-error" role="alert">@foreach($errors->all() as $error)<div>{{ $error }}</div>@endforeach</div>@endif
@@ -106,19 +202,18 @@
     </div>
 
     <!-- Grade / Class selection -->
-    <div style="background:#f7f6fd;border:1px solid #e1ddf6;border-radius:6px;padding:12px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <span style="font-size:12px;font-weight:600;color:#5a5477;">Grade / Class</span>
-        <label style="font-size:11px;font-weight:600;color:#7e6ae1;cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
-          <input type="checkbox" id="fc-multi-toggle" name="multi_mode" value="1"> Apply to Multiple Grades
+    <div class="fc-grade-card">
+      <div class="fc-grade-header">
+        <span class="fc-grade-title">Grade / Class *</span>
+        <label class="fc-multi-switch">
+          <input type="checkbox" id="fc-multi-toggle" name="multi_mode" value="1">
+          <span>Apply to Multiple Grades</span>
         </label>
       </div>
 
       <!-- Single Class Input with Autocomplete / Datalist -->
       <div id="fc-single-class-wrap">
-        <label style="margin:0;font-size:11px;color:#6d6787;">Select or Type Grade *
-          <input type="text" name="class_label" id="fc-class-input" list="fc-classes-datalist" placeholder="e.g. FS - 1, FS - 1 - A, 2 A, GED..." style="margin-top:4px;" required>
-        </label>
+        <input type="text" name="class_label" id="fc-class-input" list="fc-classes-datalist" placeholder="Select or type grade (e.g. FS - 1, 2 A, GED)..." required>
         <datalist id="fc-classes-datalist">
           @foreach($classes as $c)
             <option value="{{ $c }}">{{ $c }}</option>
@@ -127,19 +222,19 @@
       </div>
 
       <!-- Multi Class Checkbox List -->
-      <div id="fc-multi-class-wrap" style="display:none;margin-top:6px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <span style="font-size:11px;color:#777;">Check grades to apply:</span>
-          <div>
-            <button type="button" id="fc-btn-select-all" style="font-size:11px;background:none;border:none;color:#7e6ae1;cursor:pointer;text-decoration:underline;">Select All</button>
-            <span style="color:#ccc;">|</span>
-            <button type="button" id="fc-btn-deselect-all" style="font-size:11px;background:none;border:none;color:#7e6ae1;cursor:pointer;text-decoration:underline;">Deselect</button>
+      <div id="fc-multi-class-wrap" style="display:none;">
+        <div class="fc-multi-toolbar">
+          <span style="font-size:11px;color:#6e6a85;">Select grades to apply:</span>
+          <div class="fc-multi-actions">
+            <button type="button" id="fc-btn-select-all">Select All</button>
+            <button type="button" id="fc-btn-deselect-all">Clear</button>
           </div>
         </div>
-        <div style="max-height:160px;overflow-y:auto;background:#fff;border:1px solid #dcd7ee;border-radius:4px;padding:8px;display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+        <div class="fc-multi-list">
           @foreach($classes as $c)
-            <label style="font-size:11px;display:flex;align-items:center;gap:5px;cursor:pointer;margin:0;">
-              <input type="checkbox" name="class_labels[]" value="{{ $c }}" class="fc-class-chk"> {{ $c }}
+            <label class="fc-multi-item">
+              <input type="checkbox" name="class_labels[]" value="{{ $c }}" class="fc-class-chk">
+              <span>{{ $c }}</span>
             </label>
           @endforeach
         </div>
