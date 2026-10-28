@@ -49,6 +49,20 @@ class StudentAdmissionController
         $family=DB::table('families')->where('id',$s->family_id)->first();
         $resolvedGuardian = GuardianNameResolver::resolveStudent($s, $family, $details);
         $hasSiblings = DB::table('students')->where('family_id', $s->family_id)->where('id', '!=', $student)->exists();
+        $monthlyFeeType = DB::table('fee_types')->where('code', 'monthly')->first();
+        $latestPlan = null;
+        if ($en && $monthlyFeeType) {
+            $latestPlan = DB::table('fee_plan_items')
+                ->where('enrollment_id', $en->id)
+                ->where('fee_type_id', $monthlyFeeType->id)
+                ->where('is_active', true)
+                ->orderByDesc('effective_from')
+                ->orderByDesc('id')
+                ->first();
+        }
+        $currentMonthlyMinor = $latestPlan ? (int)$latestPlan->amount_minor : (int)($en?->monthly_fee_minor ?? 0);
+        $monthlyFeeFormatted = $currentMonthlyMinor > 0 ? number_format($currentMonthlyMinor / 100, 2, '.', '') : '';
+
         $initial=array_merge((array)$details,(array)$s,[
             'registration_number'=>$s->gr_number,'family_code'=>$family?->family_code,
             'family_email'=>$family?->email,'family_whatsapp'=>$family?->whatsapp,
@@ -60,8 +74,8 @@ class StudentAdmissionController
             'campus_id'=>$en?->campus_id,
             'department_id'=>$en?->department_id,'grade_label'=>$en?->grade_label,
             'subject_name'=>$en?->subject_name,'class_days_per_week'=>$en?->class_days_per_week,
-            'currency'=>$en?->currency,
-            'monthly_fee'=>$en?->monthly_fee_minor===null?'':number_format($en->monthly_fee_minor/100,2,'.',''),
+            'currency'=>$en?->currency ?? 'SAR',
+            'monthly_fee'=>$monthlyFeeFormatted,
             'contact_verified'=>(bool)($family?->contact_verified ?? false),
             'messaging_opt_in'=>(bool)($family?->messaging_opt_in ?? false),
         ]);
@@ -97,8 +111,44 @@ class StudentAdmissionController
             'phone_number'=>'nullable|string|max:30','readmission_date'=>'nullable|date',
             'last_class'=>'nullable|string|max:120','last_session'=>'nullable|string|max:40',
             'last_result'=>'nullable|string|max:120',
+            'monthly_fee'=>['nullable','regex:/^\d{1,13}(?:\.\d{1,2})?$/'],
+            'currency'=>['nullable','string','max:10'],
         ]);
-        DB::transaction(function() use($s,$student,$d,$request){
+
+        $en = DB::table('enrollments')->where('student_id', $student)->where('status', 'active')->orderBy('id')->first()
+            ?? DB::table('enrollments')->where('student_id', $student)->orderBy('id')->first();
+        $monthlyFeeType = DB::table('fee_types')->where('code', 'monthly')->first();
+        $latestPlan = null;
+        if ($en && $monthlyFeeType) {
+            $latestPlan = DB::table('fee_plan_items')
+                ->where('enrollment_id', $en->id)
+                ->where('fee_type_id', $monthlyFeeType->id)
+                ->where('is_active', true)
+                ->orderByDesc('effective_from')
+                ->orderByDesc('id')
+                ->first();
+        }
+        $oldMonthlyFeeMinor = $latestPlan ? (int)$latestPlan->amount_minor : (int)($en?->monthly_fee_minor ?? 0);
+        $hasFeeInput = $request->has('monthly_fee') && $request->input('monthly_fee') !== null && trim((string)$request->input('monthly_fee')) !== '';
+        $newMonthlyFeeMinor = $hasFeeInput ? Money::minor((string)$request->input('monthly_fee')) : $oldMonthlyFeeMinor;
+        $feeChanged = ($hasFeeInput && $newMonthlyFeeMinor !== $oldMonthlyFeeMinor);
+
+        $oldCurrency = $latestPlan ? (string)$latestPlan->currency : (string)($en?->currency ?? 'SAR');
+        $hasCurrencyInput = $request->filled('currency');
+        $newCurrency = $hasCurrencyInput ? strtoupper(trim((string)$request->input('currency'))) : $oldCurrency;
+        $currencyChanged = ($hasCurrencyInput && $newCurrency !== $oldCurrency);
+        $feePlanChanged = ($feeChanged || $currencyChanged);
+
+        if ($feePlanChanged) {
+            abort_unless(
+                in_array($request->user()->role, ['super_admin', 'finance_admin'], true),
+                403,
+                'Changing student monthly fee or currency requires Super Admin or Finance Admin privileges.'
+            );
+        }
+
+        $notice = null;
+        DB::transaction(function() use($s,$student,$d,$request,$en,$monthlyFeeType,$latestPlan,$oldMonthlyFeeMinor,$newMonthlyFeeMinor,$feeChanged,$oldCurrency,$newCurrency,$currencyChanged,$feePlanChanged,&$notice){
             $curFamily=DB::table('families')->where('id',$s->family_id)->lockForUpdate()->first();
             $code=trim($d['family_code']??'')?:null;
             $targetFamily=$code?DB::table('families')->where('family_code',$code)->lockForUpdate()->first():null;
@@ -275,9 +325,145 @@ class StudentAdmissionController
             $details['registration_number']=$d['registration_number'];$details['updated_at']=now();
             DB::table('student_registration_details')->where('student_id',$student)->update($details);
 
+            if ($feePlanChanged && $en) {
+                $latestItem = $monthlyFeeType ? DB::table('invoice_items as ii')
+                    ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+                    ->where('ii.student_id', $student)
+                    ->where('ii.fee_type_id', $monthlyFeeType->id)
+                    ->where('ii.status', '!=', 'voided')
+                    ->whereNotIn('inv.status', ['void', 'voided'])
+                    ->orderByDesc('ii.period_end')
+                    ->first() : null;
+
+                if ($latestItem && $latestItem->period_end) {
+                    $effectiveFrom = \Carbon\Carbon::parse($latestItem->period_end)->addDay()->startOfMonth();
+                } else {
+                    $effectiveFrom = now()->startOfMonth();
+                }
+                $effectivePeriodLabel = $effectiveFrom->format('F Y');
+                $effectiveFromDate = $effectiveFrom->toDateString();
+                $priorDay = $effectiveFrom->copy()->subDay()->toDateString();
+
+                $targetPlanId = null;
+                if ($latestPlan) {
+                    if ($latestPlan->effective_from && $latestPlan->effective_from >= $effectiveFromDate) {
+                        DB::table('fee_plan_items')->where('id', $latestPlan->id)->update([
+                            'amount_minor' => $newMonthlyFeeMinor,
+                            'currency' => $newCurrency,
+                            'updated_at' => now(),
+                        ]);
+                        $targetPlanId = $latestPlan->id;
+                    } else {
+                        DB::table('fee_plan_items')->where('id', $latestPlan->id)->update([
+                            'effective_to' => $priorDay,
+                            'updated_at' => now(),
+                        ]);
+                        $targetPlanId = DB::table('fee_plan_items')->insertGetId([
+                            'enrollment_id' => $en->id,
+                            'fee_type_id' => $monthlyFeeType->id,
+                            'description' => $latestPlan->description ?: 'Monthly Fee',
+                            'frequency' => 'monthly',
+                            'subject_name' => $latestPlan->subject_name,
+                            'class_days_per_week' => $latestPlan->class_days_per_week,
+                            'currency' => $newCurrency,
+                            'amount_minor' => $newMonthlyFeeMinor,
+                            'discount_kind' => $latestPlan->discount_kind,
+                            'discount_value' => $latestPlan->discount_value,
+                            'effective_from' => $effectiveFromDate,
+                            'effective_to' => null,
+                            'is_active' => true,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    }
+                } else {
+                    $targetPlanId = DB::table('fee_plan_items')->insertGetId([
+                        'enrollment_id' => $en->id,
+                        'fee_type_id' => $monthlyFeeType ? $monthlyFeeType->id : 1,
+                        'description' => 'Monthly Fee',
+                        'frequency' => 'monthly',
+                        'subject_name' => null,
+                        'class_days_per_week' => null,
+                        'currency' => $newCurrency,
+                        'amount_minor' => $newMonthlyFeeMinor,
+                        'discount_kind' => null,
+                        'discount_value' => 0,
+                        'effective_from' => $effectiveFromDate,
+                        'effective_to' => null,
+                        'is_active' => true,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+
+                $history = json_decode($en->fee_history ?: '[]', true) ?: [];
+                $history[] = [
+                    'previous_minor' => $oldMonthlyFeeMinor,
+                    'new_minor' => $newMonthlyFeeMinor,
+                    'previous_currency' => $oldCurrency,
+                    'new_currency' => $newCurrency,
+                    'currency' => $newCurrency,
+                    'effective_period' => $effectivePeriodLabel,
+                    'effective_from' => $effectiveFromDate,
+                    'user_id' => $request->user()->id,
+                    'administrator' => $request->user()->name,
+                    'reason' => "Monthly fee and currency updated via registration edit form. Effective from {$effectivePeriodLabel}.",
+                    'timestamp' => now()->toDateTimeString(),
+                ];
+
+                DB::table('enrollments')->where('id', $en->id)->update([
+                    'monthly_fee_minor' => $newMonthlyFeeMinor,
+                    'currency' => $newCurrency,
+                    'fee_history' => json_encode($history),
+                    'updated_at' => now(),
+                ]);
+
+                if ($monthlyFeeType) {
+                    DB::table('fee_rate_changes')->insert([
+                        'fee_type_id' => $monthlyFeeType->id,
+                        'user_id' => $request->user()->id,
+                        'target_kind' => 'student_plan',
+                        'target_id' => $targetPlanId,
+                        'currency' => $newCurrency,
+                        'before_minor' => $oldMonthlyFeeMinor,
+                        'after_minor' => $newMonthlyFeeMinor,
+                        'reason' => "Monthly fee updated from {$oldCurrency} " . ($oldMonthlyFeeMinor / 100) . " to {$newCurrency} " . ($newMonthlyFeeMinor / 100) . " via registration edit form. Effective from {$effectivePeriodLabel}.",
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+
+                DB::table('audit_logs')->insert([
+                    'actor_id' => $request->user()->id,
+                    'action' => 'student_monthly_fee_updated',
+                    'subject_type' => 'student',
+                    'subject_id' => $student,
+                    'metadata' => json_encode([
+                        'previous_minor' => $oldMonthlyFeeMinor,
+                        'new_minor' => $newMonthlyFeeMinor,
+                        'previous_currency' => $oldCurrency,
+                        'new_currency' => $newCurrency,
+                        'currency' => $newCurrency,
+                        'effective_period' => $effectivePeriodLabel,
+                        'effective_from' => $effectiveFromDate,
+                        'administrator' => $request->user()->name,
+                        'administrator_id' => $request->user()->id,
+                        'reason' => "Monthly fee and currency updated via registration edit form. Effective from {$effectivePeriodLabel}.",
+                        'enrollment_id' => $en->id,
+                        'fee_plan_item_id' => $targetPlanId,
+                    ]),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+                $oldFmt = ($oldMonthlyFeeMinor % 100 === 0) ? (string)($oldMonthlyFeeMinor / 100) : Money::format($oldMonthlyFeeMinor);
+                $newFmt = ($newMonthlyFeeMinor % 100 === 0) ? (string)($newMonthlyFeeMinor / 100) : Money::format($newMonthlyFeeMinor);
+                $notice = "Previous monthly fee: {$oldCurrency} {$oldFmt}. New monthly fee: {$newCurrency} {$newFmt}. Applies from {$effectivePeriodLabel}. Existing invoices remain unchanged.";
+            }
+
             DB::table('audit_logs')->insert(['actor_id'=>$request->user()->id,'action'=>'student_updated','subject_type'=>'student','subject_id'=>$student,'metadata'=>json_encode(['gr_number'=>$d['registration_number'],'family_code'=>$code]),'created_at'=>now(),'updated_at'=>now()]);
         });
-        return redirect('/manage-student/'.$student)->with('notice','Student details and family assignment updated successfully.');
+        return redirect('/manage-student/'.$student)->with('notice', $notice ?: 'Student details and family assignment updated successfully.');
     }
 
     public function checkRegistrationNumber(Request $request)

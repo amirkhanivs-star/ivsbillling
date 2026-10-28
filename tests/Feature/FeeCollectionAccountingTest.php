@@ -1252,21 +1252,21 @@ class FeeCollectionAccountingTest extends TestCase
             'fee_type_ids' => 'An invoice has already been generated for this fee and period.',
         ]);
 
-        // 5. Void again and verify recurring InvoiceService::generate() also safely recreates the voided row
+        // 5. Void again and verify recurring InvoiceService::generate() does NOT automatically restore voided fees (Requirement 5)
         $adjService->voidFee($item->id, 'Second void to test recurring path', $d['user']);
         $this->assertSame('voided', DB::table('invoices')->where('id', $recreatedItem->invoice_id)->value('status'));
 
         $runId = DB::table('invoices')->where('id', $recreatedItem->invoice_id)->value('billing_run_id');
         $genResult = $invoiceService->generate((int) $runId);
-        $this->assertSame(1, $genResult['created']);
-        $this->assertSame(0, $genResult['skipped']);
+        $this->assertSame(0, $genResult['created']);
+        $this->assertSame(1, $genResult['skipped']);
 
         $afterGenItem = DB::table('invoice_items')->where('id', $item->id)->first();
         $afterGenInvoice = DB::table('invoices')->where('id', $recreatedItem->invoice_id)->first();
-        $this->assertSame('active', $afterGenItem->status);
-        $this->assertSame(30000, (int) $afterGenItem->net_minor);
-        $this->assertSame('generated', $afterGenInvoice->status);
-        $this->assertSame(30000, (int) $afterGenInvoice->total_minor);
+        $this->assertSame('voided', $afterGenItem->status);
+        $this->assertSame(0, (int) $afterGenItem->net_minor);
+        $this->assertSame('voided', $afterGenInvoice->status);
+        $this->assertSame(0, (int) $afterGenInvoice->total_minor);
     }
 
     /**

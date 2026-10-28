@@ -56,13 +56,14 @@ final class InvoiceService {
 
                 foreach ($group as $plan) {
                     // 1. Regular billing check: Has THIS specific fee plan item already been invoiced for this period?
+                    // Requirement 5: Do not automatically restore deleted or voided fees.
                     $existingRecurring = DB::table('invoice_items')
                         ->where('fee_plan_item_id', $plan->id)
                         ->where('period_key', $run->period_key)
                         ->lockForUpdate()
                         ->first();
 
-                    if ($existingRecurring && $existingRecurring->status !== 'voided') {
+                    if ($existingRecurring) {
                         $skipped++;
                         continue;
                     }
@@ -135,46 +136,16 @@ final class InvoiceService {
                         $invoices[] = $invoiceId;
                     }
                     $discount = Money::discount((int) $plan->amount_minor, $plan->discount_kind, (int) $plan->discount_value);
-                    if ($existingRecurring && $existingRecurring->status === 'voided') {
-                        $wasVoidedInvoice = in_array($invoice->status ?? '', ['void', 'voided'], true);
-                        app(FeeAdjustmentService::class)->recreateVoidedFee(
-                            (int) $existingRecurring->id,
-                            [
-                                'invoice_id' => (int) $invoice->id,
-                                'student_id' => (int) $plan->student_id,
-                                'enrollment_id' => $plan->enrollment_id,
-                                'fee_plan_item_id' => (int) $plan->id,
-                                'fee_type_id' => $plan->fee_type_id,
-                                'description' => (string) $plan->description,
-                                'period_key' => (string) $run->period_key,
-                                'period_start' => (string) $run->period_start,
-                                'period_end' => (string) $run->period_end,
-                                'currency' => (string) $plan->currency,
-                                'amount_minor' => (int) $plan->amount_minor,
-                                'discount_minor' => (int) $discount,
-                                'exemption_minor' => 0,
-                                'net_minor' => max(0, (int) $plan->amount_minor - (int) $discount),
-                            ],
-                            (int) (auth()->id() ?? ($run->created_by ?? 1)),
-                            'Fee recreated during recurring billing run generation'
-                        );
-                        $invoice = DB::table('invoices')->where('id', $invoice->id)->first();
-                        if ($wasVoidedInvoice && !in_array((int) $invoice->id, $invoices, true)) {
-                            $created++;
-                            $invoices[] = (int) $invoice->id;
-                        }
-                    } else {
-                        DB::table('invoice_items')->insert([
-                            'invoice_id' => $invoice->id, 'student_id' => $plan->student_id,
-                            'enrollment_id' => $plan->enrollment_id, 'fee_plan_item_id' => $plan->id,
-                            'fee_type_id' => $plan->fee_type_id, 'description' => $plan->description,
-                            'period_key' => $run->period_key, 'period_start' => $run->period_start,
-                            'period_end' => $run->period_end, 'currency' => $plan->currency,
-                            'amount_minor' => $plan->amount_minor, 'discount_minor' => $discount,
-                            'net_minor' => $plan->amount_minor - $discount,
-                            'created_at' => now(), 'updated_at' => now(),
-                        ]);
-                    }
+                    DB::table('invoice_items')->insert([
+                        'invoice_id' => $invoice->id, 'student_id' => $plan->student_id,
+                        'enrollment_id' => $plan->enrollment_id, 'fee_plan_item_id' => $plan->id,
+                        'fee_type_id' => $plan->fee_type_id, 'description' => $plan->description,
+                        'period_key' => $run->period_key, 'period_start' => $run->period_start,
+                        'period_end' => $run->period_end, 'currency' => $plan->currency,
+                        'amount_minor' => $plan->amount_minor, 'discount_minor' => $discount,
+                        'net_minor' => $plan->amount_minor - $discount,
+                        'created_at' => now(), 'updated_at' => now(),
+                    ]);
                 }
                 if ($invoice) $this->refreshInvoice($invoice->id);
                 // The credit pool is shared across all invoices for the ledger. Never

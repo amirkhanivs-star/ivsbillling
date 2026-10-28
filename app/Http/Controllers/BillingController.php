@@ -1037,6 +1037,8 @@ class BillingController {
    ->join('fee_types as ft', 'ft.id', '=', 'fpi.fee_type_id')
    ->where('s.family_id', $family->id)
    ->where('fpi.is_active', true)
+   ->orderByDesc('fpi.effective_from')
+   ->orderByDesc('fpi.id')
    ->select('fpi.*', 's.name as student_name', 's.gr_number', 'e.grade_label', 'ft.name as fee_type_name', 'ft.code as fee_type_code')
    ->get() : collect();
   $advanceCredits = $family ? DB::table('payments')
@@ -1174,44 +1176,6 @@ class BillingController {
       // Rule 4: One-time fee vs recurring monthly fee
       $isOneTime=!in_array($feeType->code,['monthly','tuition'],true);
 
-      // Rule 1, 2, 3, 6: Rate resolution
-      $amountMinor=0;
-      $discountMinor=0;
-
-      // Priority 1: Check student-specific active plan in fee_plan_items
-      $planItem=DB::table('fee_plan_items')
-       ->where('enrollment_id',$student->enrollment_id)
-       ->where('fee_type_id',$feeType->id)
-       ->where('is_active',true)
-       ->where('currency',$student->currency)
-       ->first();
-
-      if($planItem){
-       $amountMinor=(int)$planItem->amount_minor;
-       $discountMinor=\App\Services\Money::discount($amountMinor,$planItem->discount_kind,(int)$planItem->discount_value);
-      }elseif($feeType->code==='monthly' && !empty($student->monthly_fee_minor)){
-       $amountMinor=(int)$student->monthly_fee_minor;
-      }else{
-       // Priority 2: Check approved class catalog rate
-       $rate=DB::table('fee_catalog_rates')
-        ->where('fee_type_id',$feeType->id)
-        ->where('department_id',$student->department_id)
-        ->where('class_label',$student->grade_label)
-        ->where('currency',$student->currency)
-        ->first();
-
-       if($rate){
-        $amountMinor=(int)$rate->amount_minor;
-       }
-      }
-
-      // Rule 2 & 3: Never fall back to unrelated class/currency. Missing rate = clear error.
-      if($amountMinor<=0){
-       throw \Illuminate\Validation\ValidationException::withMessages([
-        'fee_type_ids'=>"No approved rate found for fee '{$feeType->name}' for student {$student->name} (GR {$student->gr_number}, Class: '{$student->grade_label}', Dept: {$deptName}, Currency: {$student->currency}). Configure this class rate in Fee Structure before generating fees."
-       ]);
-      }
-
       // Determine target periods: one-time fee only bills once, monthly bills each selected month
       $monthsToBill=$isOneTime?[ (int)reset($d['months']) ]:$d['months'];
 
@@ -1221,6 +1185,49 @@ class BillingController {
        $periodEnd=date('Y-m-t',strtotime($periodStart));
        $dueDate=sprintf('%04d-%02d-25',$year,$month);
        $periodKey=$isOneTime?"one_time:{$feeType->code}:{$periodStart}":"monthly:{$periodStart}..{$periodEnd}";
+
+       // Rule 1, 2, 3, 6: Rate resolution for target period
+       $amountMinor=0;
+       $discountMinor=0;
+
+       // Priority 1: Check student-specific active plan in fee_plan_items for target period
+       $planItem=DB::table('fee_plan_items')
+        ->where('enrollment_id',$student->enrollment_id)
+        ->where('fee_type_id',$feeType->id)
+        ->where('is_active',true)
+        ->where(fn($q)=>$q->whereNull('effective_from')->orWhere('effective_from','<=',$periodEnd))
+        ->where(fn($q)=>$q->whereNull('effective_to')->orWhere('effective_to','>=',$periodStart))
+        ->orderByDesc('effective_from')
+        ->orderByDesc('id')
+        ->first();
+
+       $periodCurrency=$planItem ? (string)$planItem->currency : (string)($student->currency ?? 'SAR');
+
+       if($planItem){
+        $amountMinor=(int)$planItem->amount_minor;
+        $discountMinor=\App\Services\Money::discount($amountMinor,$planItem->discount_kind,(int)$planItem->discount_value);
+       }elseif($feeType->code==='monthly' && !empty($student->monthly_fee_minor)){
+        $amountMinor=(int)$student->monthly_fee_minor;
+       }else{
+        // Priority 2: Check approved class catalog rate
+        $rate=DB::table('fee_catalog_rates')
+         ->where('fee_type_id',$feeType->id)
+         ->where('department_id',$student->department_id)
+         ->where('class_label',$student->grade_label)
+         ->where('currency',$periodCurrency)
+         ->first();
+
+        if($rate){
+         $amountMinor=(int)$rate->amount_minor;
+        }
+       }
+
+       // Rule 2 & 3: Never fall back to unrelated class/currency. Missing rate = clear error.
+       if($amountMinor<=0){
+        throw \Illuminate\Validation\ValidationException::withMessages([
+         'fee_type_ids'=>"No approved rate found for fee '{$feeType->name}' for student {$student->name} (GR {$student->gr_number}, Class: '{$student->grade_label}', Dept: {$deptName}, Currency: {$periodCurrency}). Configure this class rate in Fee Structure before generating fees."
+        ]);
+       }
 
        // Rule 7: Prevent duplicate fee obligations in regular billing
        $existsQuery=DB::table('invoice_items as ii')
@@ -1378,6 +1385,47 @@ class BillingController {
         $voidedItem=$voidedQuery->orderByDesc('id')->lockForUpdate()->first();
        }
 
+       if($voidedItem){
+        $newerPlan = DB::table('fee_plan_items')
+         ->where('enrollment_id', $student->enrollment_id)
+         ->where('fee_type_id', $feeType->id)
+         ->where('is_active', true)
+         ->where('effective_from', '>', $periodEnd)
+         ->orderBy('effective_from')
+         ->first();
+
+        $isRateOrCurrencyChanged = (
+         (int)$amountMinor !== (int)$voidedItem->amount_minor ||
+         (string)$periodCurrency !== (string)$voidedItem->currency ||
+         $newerPlan !== null ||
+         $r->boolean('reissue_approved') ||
+         $r->boolean('reissue_approval')
+        );
+
+        if ($isRateOrCurrencyChanged) {
+         abort_unless(
+          in_array($r->user()->role, ['super_admin', 'finance_admin'], true),
+          403,
+          'Recreating a voided fee obligation with an updated rate or currency requires Super Admin or Finance Admin privileges.'
+         );
+        }
+
+        if ($newerPlan) {
+         $isApproved = $r->boolean('reissue_approved') || $r->boolean('reissue_approval');
+         if (!$isApproved) {
+          $periodLabel = date('F Y', strtotime($periodStart));
+          throw \Illuminate\Validation\ValidationException::withMessages([
+           'fee_type_ids' => "Reissuing a fee for an older billing period ({$periodLabel}) requires explicit authorized reissue approval before using the new rate or currency."
+          ]);
+         }
+         // When reissue is approved, apply the newly approved rate and currency
+         $amountMinor = (int)$newerPlan->amount_minor;
+         $periodCurrency = (string)$newerPlan->currency;
+         $discountMinor = \App\Services\Money::discount($amountMinor, $newerPlan->discount_kind, (int)$newerPlan->discount_value);
+         $planItem = $newerPlan;
+        }
+       }
+
        // Rule 8 & 9: Find existing regular family invoice for this period. NEVER attach to opening balance invoices!
        $runPeriodKey="monthly:{$periodStart}..{$periodEnd}";
        $invoice=DB::table('invoices as i')
@@ -1385,7 +1433,7 @@ class BillingController {
         ->where('i.family_id',$family->id)
         ->where('i.department_id',$student->department_id)
         ->where('i.campus_id',$student->campus_id)
-        ->where('i.currency',$student->currency)
+        ->where('i.currency',$periodCurrency)
         ->where('b.frequency','!=','opening_balance')
         ->where('b.period_start',$periodStart)
         ->select('i.*')
@@ -1421,7 +1469,7 @@ class BillingController {
         $invoice=DB::table('invoices')
          ->where('billing_run_id',$runId)
          ->where('family_id',$family->id)
-         ->where('currency',$student->currency)
+         ->where('currency',$periodCurrency)
          ->lockForUpdate()
          ->first();
 
@@ -1432,7 +1480,7 @@ class BillingController {
           'family_id'=>$family->id,
           'campus_id'=>$student->campus_id,
           'department_id'=>$student->department_id,
-          'currency'=>$student->currency,
+          'currency'=>$periodCurrency,
           'invoice_number'=>'PENDING-'.\Illuminate\Support\Str::uuid(),
           'issued_on'=>now()->toDateString(),
           'due_date'=>$dueDate,
@@ -1465,7 +1513,7 @@ class BillingController {
           'period_key'=>$periodKey,
           'period_start'=>$periodStart,
           'period_end'=>$periodEnd,
-          'currency'=>(string)$student->currency,
+          'currency'=>(string)$periodCurrency,
           'amount_minor'=>$amountMinor,
           'discount_minor'=>$discountMinor,
           'exemption_minor'=>0,
@@ -1485,7 +1533,7 @@ class BillingController {
          'period_key'=>$periodKey,
          'period_start'=>$periodStart,
          'period_end'=>$periodEnd,
-         'currency'=>$student->currency,
+         'currency'=>$periodCurrency,
          'amount_minor'=>$amountMinor,
          'discount_minor'=>$discountMinor,
          'net_minor'=>$netMinor,
@@ -1500,7 +1548,7 @@ class BillingController {
        $affectedInvoices[$invoice->id]=[
         'invoice_id'=>$invoice->id,
         'family_id'=>$family->id,
-        'currency'=>$student->currency,
+        'currency'=>$periodCurrency,
         'department_id'=>$student->department_id,
         'campus_id'=>$student->campus_id,
        ];
@@ -1813,6 +1861,9 @@ class BillingController {
 
  public function voidFee(Request $r,FeeAdjustmentService $svc){
   abort_if($r->user()->role==='auditor',403);
+  if(!$r->has('invoice_item_id') && $r->has('item_id')){
+   $r->merge(['invoice_item_id'=>$r->input('item_id')]);
+  }
   $d=$r->validate([
    'invoice_item_id'=>'required|integer|exists:invoice_items,id',
    'reason'=>'required|string|max:1000',

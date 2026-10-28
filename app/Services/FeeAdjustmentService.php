@@ -360,6 +360,22 @@ final class FeeAdjustmentService
                 ? (int) $attributes['net_minor']
                 : max(0, $amountMinor - $discountMinor - $exemptionMinor);
 
+            // Prevent duplicate active obligations
+            $hasActiveDuplicate = DB::table('invoice_items as ii')
+                ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+                ->where('ii.student_id', $studentId)
+                ->where('ii.fee_type_id', $feeTypeId)
+                ->where('ii.period_start', $periodStart)
+                ->where('ii.id', '!=', $invoiceItemId)
+                ->where('ii.status', '!=', 'voided')
+                ->whereNotIn('inv.status', ['void', 'voided'])
+                ->exists();
+            if ($hasActiveDuplicate) {
+                throw ValidationException::withMessages([
+                    'item' => 'Cannot recreate fee obligation: an active invoice item already exists for this period.',
+                ]);
+            }
+
             // Historical settlement protection must be checked before restoring or recreating a fee.
             $grNumber = (string) (DB::table('students')->where('id', $studentId)->value('gr_number') ?? '');
             if ($grNumber !== '') {

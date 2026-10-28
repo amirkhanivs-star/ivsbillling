@@ -7,7 +7,7 @@
   <nav class="adm-steps" aria-label="Student registration sections"><span class="on">▣ Student</span><span>♧ Family</span><span>▣ Info</span><span>◉ Admission</span><span>♢ Documents</span><span>▤ WhatsApp</span><span>▣ Custom Fees</span><span>▤ Subjects</span></nav>
   @if($errors->any())<div class="adm-errors" role="alert"><strong>Please correct these fields:</strong><ul>@foreach($errors->all() as $message)<li>{{ $message }}</li>@endforeach</ul></div>@endif
   <form method="post" action="{{ isset($editingStudent) ? route('student.admission.update',$editingStudent) : route('student.admission.store') }}">@csrf
-    @if(isset($editingStudent)) @method('PUT')<div class="adm-errors" style="background:#f5f3ff;color:#4d467c;border-color:#e4dfff">Editing saved registration. Fees, departments and currency are read-only here to protect existing invoices. Manage fee plan changes separately.</div>@endif
+    @if(isset($editingStudent)) @method('PUT')<div class="adm-errors" style="background:#f5f3ff;color:#4d467c;border-color:#e4dfff">Editing saved registration. Monthly fee and currency changes apply to future uninvoiced billing periods only; all existing invoices remain protected. Department assignments remain read-only.</div>@endif
     <div class="adm-columns">
       <section class="adm-panel"><div class="adm-upload" aria-label="Student photo upload is not yet enabled">▧<small>Photo upload in a later phase</small></div><h3>Student Information</h3><div class="adm-fields"><div class="adm-field"><label for="name">Name *</label><input id="name" name="name" type="text" value="{{ old('name', $initial['name'] ?? null) }}" placeholder="Enter name" required></div>
 <div class="adm-field"><label for="father_name">Father name *</label><input id="father_name" name="father_name" type="text" value="{{ old('father_name', $initial['father_name'] ?? null) }}" placeholder="Enter father name" required></div>
@@ -68,7 +68,20 @@
 <div class="adm-field"><label for="section_admitted">Section (admitted)</label><select id="section_admitted" name="section_admitted"><option value="">Select section</option>@foreach($sectionOptions as $section)<option value="{{ $section }}" @selected(old('section_admitted', $initial['section_admitted'] ?? null)===$section)>{{ $section }}</option>@endforeach</select></div>
 <div class="adm-field"><label for="grade_label">Class (current) *</label><select id="grade_label" name="grade_label" required><option value="">Select class</option>@foreach($classOptions as $cls)<option value="{{ $cls }}" @selected(old('grade_label', $initial['grade_label'] ?? null)===$cls)>{{ $cls }}</option>@endforeach</select></div>
 <div class="adm-field"><label for="section_current">Section (current)</label><select id="section_current" name="section_current"><option value="">Select section</option>@foreach($sectionOptions as $section)<option value="{{ $section }}" @selected(old('section_current', $initial['section_current'] ?? null)===$section)>{{ $section }}</option>@endforeach</select></div>
-<div class="adm-field adm-wide"><label for="monthly_fee">Monthly Fees</label><div class="adm-fee-input"><div class="adm-field"><label for="currency">Currency *</label><select id="currency" name="currency" required>@foreach(['SAR','PKR','USD','AED','GBP','EUR'] as $currency)<option value="{{ $currency }}" @selected(old('currency', $initial['currency'] ?? 'SAR')===$currency)>{{ $currency }}</option>@endforeach<option value="__other__">+ Add currency…</option></select><input id="custom_currency" class="adm-custom-currency" type="text" maxlength="3" pattern="[A-Za-z]{3}" placeholder="3-letter code" aria-label="Custom currency code" hidden></div><input id="monthly_fee" name="monthly_fee" type="text" inputmode="decimal" value="{{ old('monthly_fee', $initial['monthly_fee'] ?? null) }}" placeholder="0.00"></div></div>
+<div class="adm-field adm-wide"><label for="monthly_fee">Monthly Fees</label><div class="adm-fee-input">
+@php
+  $canEditFees = in_array(auth()->user()->role ?? '', ['super_admin', 'finance_admin'], true);
+@endphp
+@if(!isset($editingStudent) || $canEditFees)
+<div class="adm-field"><label for="currency">Currency *</label><select id="currency" name="currency" required>@foreach(['SAR','PKR','USD','AED','GBP','EUR'] as $currency)<option value="{{ $currency }}" @selected(old('currency', $initial['currency'] ?? 'SAR')===$currency)>{{ $currency }}</option>@endforeach<option value="__other__">+ Add currency…</option></select><input id="custom_currency" class="adm-custom-currency" type="text" maxlength="3" pattern="[A-Za-z]{3}" placeholder="3-letter code" aria-label="Custom currency code" hidden></div>
+@else
+<div class="adm-field"><label for="currency">Currency *</label><input id="currency" type="text" value="{{ old('currency', $initial['currency'] ?? 'SAR') }}" readonly style="background:#f1f5f9;color:#64748b;cursor:not-allowed;" title="Currency is protected to prevent ledger corruption."><input type="hidden" name="currency" value="{{ old('currency', $initial['currency'] ?? 'SAR') }}"></div>
+@endif
+<input id="monthly_fee" name="monthly_fee" type="text" inputmode="decimal" value="{{ old('monthly_fee', $initial['monthly_fee'] ?? null) }}" placeholder="0.00" @if(isset($editingStudent) && !$canEditFees) readonly style="background:#f1f5f9;color:#64748b;cursor:not-allowed;" title="Only Super Admin and Finance Admin can update fee rates." @endif></div>
+@if(isset($editingStudent))
+<small class="adm-help" style="color:#6366f1;">Applies to future billing periods that have not yet been invoiced. Existing invoices remain unchanged.</small>
+@endif
+</div>
 <div class="adm-field"><label for="challan_due_date">Challan Due date</label><input id="challan_due_date" name="challan_due_date" type="date" value="{{ old('challan_due_date', $initial['challan_due_date'] ?? null) }}" placeholder=""></div>
 <div class="adm-field"><label for="b_form">B-Form</label><input id="b_form" name="b_form" type="text" value="{{ old('b_form', $initial['b_form'] ?? null) }}" placeholder=""></div>
 <div class="adm-field"><label for="phone_number">Phone number (optional)</label><input id="phone_number" name="phone_number" type="tel" value="{{ old('phone_number', $initial['phone_number'] ?? null) }}" placeholder="Enter phone number"></div>
@@ -100,6 +113,7 @@
   const currencySelect = document.getElementById('currency');
   const customCurrency = document.getElementById('custom_currency');
   function syncCurrency() {
+    if (!currencySelect || !customCurrency || currencySelect.tagName !== 'SELECT') return;
     const adding = currencySelect.value === '__other__';
     customCurrency.hidden = !adding;
     customCurrency.required = adding;
@@ -107,9 +121,11 @@
     currencySelect.name = adding ? '' : 'currency';
     if (adding) { customCurrency.focus(); }
   }
-  currencySelect.addEventListener('change', syncCurrency);
-  // If a custom code is chosen, leave its selector visible for correction.
-  customCurrency.addEventListener('input', () => { customCurrency.value = customCurrency.value.replace(/[^a-z]/gi, '').toUpperCase(); });
+  if (currencySelect && customCurrency && currencySelect.tagName === 'SELECT') {
+    currencySelect.addEventListener('change', syncCurrency);
+    // If a custom code is chosen, leave its selector visible for correction.
+    customCurrency.addEventListener('input', () => { customCurrency.value = customCurrency.value.replace(/[^a-z]/gi, '').toUpperCase(); });
+  }
   const whatsApp = document.getElementById('family_whatsapp');
   whatsApp.addEventListener('blur', () => {
     let number = whatsApp.value.trim().replace(/[\s()\-]/g, '');

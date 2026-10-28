@@ -118,41 +118,6 @@ class FeeEligibilityService
 
                 $isOneTime = !in_array($feeType->code, ['monthly', 'tuition'], true);
 
-                // Rate resolution
-                $amountMinor = 0;
-                $discountMinor = 0;
-                $rateSource = 'Unknown';
-
-                // Check student active fee plan
-                $planItem = $db->table('fee_plan_items')
-                    ->where('enrollment_id', $student->enrollment_id)
-                    ->where('fee_type_id', $feeType->id)
-                    ->where('is_active', true)
-                    ->where('currency', $student->currency)
-                    ->first();
-
-                if ($planItem) {
-                    $amountMinor = (int) $planItem->amount_minor;
-                    $discountMinor = \App\Services\Money::discount($amountMinor, $planItem->discount_kind, (int) $planItem->discount_value);
-                    $rateSource = 'Student Fee Plan';
-                } elseif ($feeType->code === 'monthly' && !empty($student->monthly_fee_minor)) {
-                    $amountMinor = (int) $student->monthly_fee_minor;
-                    $rateSource = 'Enrollment Rate';
-                } else {
-                    $rate = $db->table('fee_catalog_rates')
-                        ->where('fee_type_id', $feeType->id)
-                        ->where('department_id', $student->department_id)
-                        ->where('class_label', $student->grade_label)
-                        ->where('currency', $student->currency)
-                        ->first();
-                    if ($rate) {
-                        $amountMinor = (int) $rate->amount_minor;
-                        $rateSource = 'Class Catalog';
-                    }
-                }
-
-                $netMinor = max(0, $amountMinor - $discountMinor);
-
                 $monthsToEvaluate = $isOneTime ? [reset($months)] : $months;
 
                 foreach ($monthsToEvaluate as $m) {
@@ -162,12 +127,52 @@ class FeeEligibilityService
                     $periodKey = $isOneTime ? "one_time:{$feeType->code}:{$periodStart}" : "monthly:{$periodStart}..{$periodEnd}";
                     $periodLabel = $isOneTime ? "One-Time ({$monthNames[$month]} {$year})" : "{$monthNames[$month]} {$year}";
 
+                    // Rate resolution
+                    $amountMinor = 0;
+                    $discountMinor = 0;
+                    $rateSource = 'Unknown';
+
+                    // Check student active fee plan for target period
+                    $planItem = $db->table('fee_plan_items')
+                        ->where('enrollment_id', $student->enrollment_id)
+                        ->where('fee_type_id', $feeType->id)
+                        ->where('is_active', true)
+                        ->where(fn ($q) => $q->whereNull('effective_from')->orWhere('effective_from', '<=', $periodEnd))
+                        ->where(fn ($q) => $q->whereNull('effective_to')->orWhere('effective_to', '>=', $periodStart))
+                        ->orderByDesc('effective_from')
+                        ->orderByDesc('id')
+                        ->first();
+
+                    $periodCurrency = $planItem ? (string) $planItem->currency : (string) ($student->currency ?? 'SAR');
+
+                    if ($planItem) {
+                        $amountMinor = (int) $planItem->amount_minor;
+                        $discountMinor = \App\Services\Money::discount($amountMinor, $planItem->discount_kind, (int) $planItem->discount_value);
+                        $rateSource = 'Student Fee Plan';
+                    } elseif ($feeType->code === 'monthly' && !empty($student->monthly_fee_minor)) {
+                        $amountMinor = (int) $student->monthly_fee_minor;
+                        $rateSource = 'Enrollment Rate';
+                    } else {
+                        $rate = $db->table('fee_catalog_rates')
+                            ->where('fee_type_id', $feeType->id)
+                            ->where('department_id', $student->department_id)
+                            ->where('class_label', $student->grade_label)
+                            ->where('currency', $periodCurrency)
+                            ->first();
+                        if ($rate) {
+                            $amountMinor = (int) $rate->amount_minor;
+                            $rateSource = 'Class Catalog';
+                        }
+                    }
+
+                    $netMinor = max(0, $amountMinor - $discountMinor);
+
                     $itemResult = [
                         'student_id' => (int) $student->id,
                         'student_name' => (string) $student->name,
                         'student_gr' => (string) $student->gr_number,
                         'grade_label' => (string) ($student->grade_label ?? 'Standard'),
-                        'currency' => (string) $student->currency,
+                        'currency' => (string) $periodCurrency,
                         'fee_type_id' => (int) $feeType->id,
                         'fee_type_name' => (string) $feeType->name,
                         'fee_type_code' => (string) $feeType->code,
@@ -207,7 +212,7 @@ class FeeEligibilityService
                         $itemResult['status'] = self::STATUS_FINANCIAL_CONFLICT;
                         $itemResult['status_code'] = 'financial_conflict';
                         $itemResult['is_eligible'] = false;
-                        $itemResult['reason'] = "No approved catalog rate found for {$feeType->name} ({$student->grade_label}, {$student->currency}).";
+                        $itemResult['reason'] = "No approved catalog rate found for {$feeType->name} ({$student->grade_label}, {$periodCurrency}).";
                         $this->accumulateEvaluation($itemResult, $statusCounts, $totalEligible, $totalBlocked, $eligibleAmountMinor, $items);
                         continue;
                     }
@@ -319,7 +324,7 @@ class FeeEligibilityService
                             (string) ($student->gr_number ?? ''),
                             (string) $feeType->code,
                             $periodStart,
-                            (string) $student->currency,
+                            (string) $periodCurrency,
                             $planItem?->subject_name ?? null
                         );
                         if ($histCheck === null && $isOneTime) {
@@ -328,7 +333,7 @@ class FeeEligibilityService
                                 (string) ($student->gr_number ?? ''),
                                 (string) $feeType->code,
                                 'ONE_TIME',
-                                (string) $student->currency,
+                                (string) $periodCurrency,
                                 $planItem?->subject_name ?? null
                             );
                         }
@@ -340,7 +345,7 @@ class FeeEligibilityService
                     if (Schema::connection($conn)->hasTable('qa_historical_settlements')) {
                         $settleQuery = $db->table('qa_historical_settlements')
                             ->where('student_gr', (string) $student->gr_number)
-                            ->where('currency', (string) $student->currency)
+                            ->where('currency', (string) $periodCurrency)
                             ->where('status', 'applied');
                         if ($voidedItem) {
                             $settleQuery->where(function ($q) use ($voidedItem, $periodStart, $periodKey) {
@@ -374,7 +379,7 @@ class FeeEligibilityService
                             $itemResult['is_eligible'] = false;
                             $paidAmt = $historicalSettlementInfo ? ((int) $historicalSettlementInfo->settled_amount_minor) : (int) ($histCheck['paid_minor'] ?? 0);
                             $paidFmt = number_format($paidAmt / 100, 2, '.', '');
-                            $itemResult['reason'] = "This fee obligation was previously voided (Item #{$voidedItem->id} on {$voidedItem->invoice_number}) but possesses verified historical MySkool payment evidence ({$student->currency} {$paidFmt}). Requires administrative restoration review rather than recreation.";
+                            $itemResult['reason'] = "This fee obligation was previously voided (Item #{$voidedItem->id} on {$voidedItem->invoice_number}) but possesses verified historical MySkool payment evidence ({$periodCurrency} {$paidFmt}). Requires administrative restoration review rather than recreation.";
                         } else {
                             $itemResult['status'] = self::STATUS_PREVIOUSLY_VOIDED;
                             $itemResult['status_code'] = 'previously_voided';
