@@ -575,9 +575,11 @@ class FeeCollectionAccountingTest extends TestCase
             'monthly_fee_minor' => 32000,
         ]);
 
+        DB::table('fee_plan_items')->where('enrollment_id', $d['enrollment'])->delete();
         $planItemId = DB::table('fee_plan_items')->insertGetId([
             'enrollment_id' => $d['enrollment'],
             'fee_type_id' => $d['feeType'],
+            'description' => 'Monthly Fee',
             'frequency' => 'monthly',
             'currency' => 'SAR',
             'amount_minor' => 32000,
@@ -1832,7 +1834,78 @@ class FeeCollectionAccountingTest extends TestCase
         $response->assertSee('Pending (Due) 0.00');
         $response->assertSee('value="0"', false);
     }
+
+    /**
+     * Phase 3 — Task 5 Regression:
+     * Dashboard financial totals and Cashier collection reports must exclude reversed receipts,
+     * exclude voided invoices, and never inflate new cashier collections with historical MySkool settlements.
+     */
+    public function test_dashboard_and_cashier_reports_exclude_reversed_receipts_voided_invoices_and_historical_myskool_settlements(): void
+    {
+        $d = $this->setupAccountsData();
+        $user = User::findOrFail($d['user']);
+        $thisMonth = now()->format('Y-m');
+
+        // 1. Create an active November invoice for SAR 300.00
+        $this->actingAs($user)->post('/challan/create-fee', [
+            'family_id' => $d['family'],
+            'student_ids' => [$d['student']],
+            'fee_type_ids' => [$d['feeType']],
+            'months' => [11],
+            'year' => 2026,
+        ]);
+
+        // 2. Receive a cashier payment of SAR 300.00 today, then reverse it
+        $receiveSvc = app(ReceivePaymentService::class);
+        $payment1 = $receiveSvc->receive([
+            'family_id' => $d['family'],
+            'campus_id' => $d['campus'],
+            'department_id' => $d['dept'],
+            'currency' => 'SAR',
+            'monthly_amount' => '300.00',
+            'idempotency_key' => 'IDEMP-DASH-REV-1',
+        ], $d['user']);
+        $this->assertGreaterThan(0, (int) $payment1->id);
+
+        app(ReceiptReversalService::class)->reverseReceipt((int) $payment1->id, 'Reversed cashier test receipt', $d['user']);
+
+        // 3. Receive a second valid cashier payment of SAR 100.00 today
+        $payment2 = $receiveSvc->receive([
+            'family_id' => $d['family'],
+            'campus_id' => $d['campus'],
+            'department_id' => $d['dept'],
+            'currency' => 'SAR',
+            'monthly_amount' => '100.00',
+            'idempotency_key' => 'IDEMP-DASH-VALID-2',
+        ], $d['user']);
+        $this->assertGreaterThan(0, (int) $payment2->id);
+
+        // 4. Create a December fee and void it so its invoice is voided
+        $this->actingAs($user)->post('/challan/create-fee', [
+            'family_id' => $d['family'],
+            'student_ids' => [$d['student']],
+            'fee_type_ids' => [$d['feeType']],
+            'months' => [12],
+            'year' => 2026,
+        ]);
+        $decItemId = (int) DB::table('invoice_items')->where('period_start', '2026-12-01')->value('id');
+        app(FeeAdjustmentService::class)->voidFee($decItemId, 'Voided December fee', $d['user']);
+
+        // 5. Verify Dashboard view data excludes the reversed SAR 300.00 receipt and voided December invoice
+        $dashRes = $this->actingAs($user)->get('/dashboard');
+        $dashRes->assertOk();
+        $todayCollections = collect($dashRes->viewData('todayCollections'))->keyBy('currency');
+        $this->assertSame(10000, (int) ($todayCollections['SAR']->amount ?? 0));
+        $this->assertSame(1, (int) ($dashRes->viewData('stats')['receipts_today'] ?? 0));
+        $this->assertSame(1, (int) ($dashRes->viewData('stats')['invoices'] ?? 0));
+
+        // 6. Verify Reports view data excludes the reversed SAR 300.00 receipt and voided December invoice
+        $repRes = $this->actingAs($user)->get('/reports?month=' . $thisMonth);
+        $repRes->assertOk();
+        $collections = collect($repRes->viewData('collections'));
+        $sarCol = $collections->firstWhere('currency', 'SAR');
+        $this->assertNotNull($sarCol);
+        $this->assertSame(10000, (int) $sarCol->collected);
+    }
 }
-
-
 

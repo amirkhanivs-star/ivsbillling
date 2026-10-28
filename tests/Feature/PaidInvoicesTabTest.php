@@ -173,8 +173,8 @@ class PaidInvoicesTabTest extends TestCase
         $response->assertSee('RCP-2026-999');
         $response->assertSee('Student Paid 101');
         $response->assertSee('SAR 250.00');
-        $response->assertSee("/receipts/{$paid['paymentId']}/pdf");
-        $response->assertSee("/invoices/{$paid['invId']}/pdf");
+        $response->assertSee("/public/receipts/{$paid['paymentId']}/");
+        $response->assertSee("/public/invoices/{$paid['invId']}/");
         $response->assertSee('Queue Approved Paid Batch to Webhook');
     }
 

@@ -232,18 +232,22 @@ final class FeeAdjustmentService
         return DB::transaction(function () use ($invoiceItemId, $reason, $userId) {
             $item = DB::table('invoice_items')->where('id', $invoiceItemId)->lockForUpdate()->first();
             if (!$item) {
-                throw ValidationException::withMessages(['item' => 'Invoice item not found.']);
+                $msg = 'Invoice item not found.';
+                throw ValidationException::withMessages(['item' => $msg, 'void' => $msg]);
             }
             if ($item->status === 'voided') {
-                throw ValidationException::withMessages(['item' => 'This fee obligation is already voided.']);
+                $msg = 'This fee obligation is already voided.';
+                throw ValidationException::withMessages(['item' => $msg, 'void' => $msg]);
             }
             $hasAllocations = DB::table('payment_allocations')
                 ->where('invoice_item_id', $invoiceItemId)
                 ->where('amount_minor', '>', 0)
                 ->exists();
             if ((int) $item->paid_minor > 0 || $hasAllocations) {
+                $msg = 'Cannot void an obligation that has already received payments. Reverse payment receipt(s) first.';
                 throw ValidationException::withMessages([
-                    'item' => 'Cannot void an obligation that has already received payments. Reverse payment receipt(s) first.',
+                    'item' => $msg,
+                    'void' => $msg,
                 ]);
             }
 
@@ -325,9 +329,14 @@ final class FeeAdjustmentService
                 ->where('invoice_item_id', $invoiceItemId)
                 ->where('amount_minor', '>', 0)
                 ->exists();
-            if ((int) $item->paid_minor > 0 || $hasAllocations) {
+            $hasHistoricalSettlement = \Illuminate\Support\Facades\Schema::hasTable('qa_historical_settlements')
+                && DB::table('qa_historical_settlements')
+                    ->where('invoice_item_id', $invoiceItemId)
+                    ->where('status', 'applied')
+                    ->exists();
+            if ((int) $item->paid_minor > 0 || $hasAllocations || $hasHistoricalSettlement) {
                 throw ValidationException::withMessages([
-                    'item' => 'Cannot recreate or reactivate a fee obligation that has received payments or active payment allocations.',
+                    'item' => 'Cannot recreate or reactivate a fee obligation that has received payments, active payment allocations, or historical settlements.',
                 ]);
             }
 
@@ -389,6 +398,13 @@ final class FeeAdjustmentService
                 }
             }
 
+            $actorId = $userId ?: auth()->id();
+            if (!$actorId || !DB::table('users')->where('id', (int) $actorId)->exists()) {
+                throw ValidationException::withMessages([
+                    'user_id' => 'An explicit, authenticated user is required to recreate a voided fee obligation.',
+                ]);
+            }
+
             DB::table('invoice_items')->where('id', $invoiceItemId)->update([
                 'invoice_id' => $targetInvoiceId,
                 'student_id' => $studentId,
@@ -417,21 +433,17 @@ final class FeeAdjustmentService
                     'updated_at' => now(),
                 ]);
 
-            $actorId = $userId ?: auth()->id();
-            $adjustmentUserId = $actorId ?: DB::table('users')->orderBy('id')->value('id');
-            if ($adjustmentUserId) {
-                DB::table('fee_adjustments')->insert([
-                    'invoice_item_id' => $invoiceItemId,
-                    'user_id' => (int) $adjustmentUserId,
-                    'kind' => 'recreated',
-                    'amount_minor' => $netMinor,
-                    'previous_amount_minor' => 0,
-                    'new_amount_minor' => $netMinor,
-                    'reason' => $reason,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
+            DB::table('fee_adjustments')->insert([
+                'invoice_item_id' => $invoiceItemId,
+                'user_id' => (int) $actorId,
+                'kind' => 'recreated',
+                'amount_minor' => $netMinor,
+                'previous_amount_minor' => 0,
+                'new_amount_minor' => $netMinor,
+                'reason' => $reason,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
 
             $invoiceSvc = new InvoiceService();
             if ($previousInvoiceId !== $targetInvoiceId) {

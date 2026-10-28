@@ -48,7 +48,7 @@
   $signPath=public_path('assets/receipt-sign.jpg');
   $stampSrc=is_file($stampPath)?'data:image/png;base64,'.base64_encode(file_get_contents($stampPath)):null;
   $signSrc=is_file($signPath)?'data:image/jpeg;base64,'.base64_encode(file_get_contents($signPath)):null;
-  $footerPhone=trim((string)($branding?->footer_phone ?? '')) ?: '+92 335 524 5551';
+  $footerPhone=trim((string)($branding?->footer_phone ?? '')) ?: '+92 325 524 5551';
   $footerEmail=trim((string)($branding?->footer_email ?? '')) ?: 'acivs2021@gmail.com';
 @endphp
 @if(!empty($banner))<img class="banner" src="{{ $banner }}" alt="IQRA Virtual School">@endif

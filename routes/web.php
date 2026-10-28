@@ -50,7 +50,10 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::get('/students/{student}/challan/pdf',[B::class,'studentConsolidatedChallanPdf'])->name('students.challan.pdf');
  Route::get('/families/{family}/challan/pdf',[B::class,'familyConsolidatedChallanPdf'])->name('families.challan.pdf');
  Route::get('/challan',[B::class,'collection'])->name('challan.index');
+ Route::post('/challan/preview-fee',[B::class,'previewChallanFee'])->name('challan.preview_fee');
  Route::post('/challan/create-fee',[B::class,'createChallanFee'])->name('challan.create_fee');
+ Route::get('/challan/inspect-voided-fee/{id}',[B::class,'inspectVoidedFee'])->name('challan.inspect_voided_fee');
+ Route::post('/challan/restore-voided-fee',[B::class,'restoreVoidedFee'])->name('challan.restore_voided_fee');
  Route::post('/challan/receive',[B::class,'receive'])->name('challan.receive');
  Route::post('/challan/discount',[B::class,'discount'])->name('challan.discount');
  Route::post('/challan/exempt',[B::class,'exempt'])->name('challan.exempt');

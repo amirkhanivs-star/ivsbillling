@@ -342,6 +342,8 @@
                                             <th style="padding: 4px 6px;">Fee Type</th>
                                             <th style="padding: 4px 6px;">Period</th>
                                             <th style="padding: 4px 6px; text-align: right;">Rate</th>
+                                            <th style="padding: 4px 6px; text-align: center;">Status</th>
+                                            <th style="padding: 4px 6px; text-align: right;">Action</th>
                                         </tr>
                                     </thead>
                                     <tbody id="cf-preview-tbody">
@@ -998,6 +1000,62 @@
     </div>
 </div>
 
+{{-- SAFE VOIDED FEE RESTORATION DRAWER --}}
+<div class="myskool-drawer-overlay" id="myskoolRestorationDrawer" hidden>
+    <div class="myskool-drawer" style="max-width: 440px;">
+        <div class="myskool-drawer-header">
+            <div class="myskool-drawer-title" id="restorationHeading">Safe Fee Restoration</div>
+            <button type="button" class="myskool-drawer-close" id="restorationCloseBtn">&times;</button>
+        </div>
+
+        <form method="post" id="form-restore-voided-fee" action="{{ route('challan.restore_voided_fee') }}">
+            @csrf
+            <input type="hidden" name="invoice_item_id" id="restore_item_id">
+
+            <div id="restoration_loading_spinner" style="display: none; padding: 25px 10px; text-align: center; color: #64748b; font-size: 12px;">
+                Checking obligation forensics and historical evidence...
+            </div>
+
+            <div id="restoration_content_block">
+                {{-- Forensic summary box --}}
+                <div id="restore_summary_box" style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; margin-bottom: 12px; font-size: 11px;">
+                    <div style="font-weight: 700; color: #334155; margin-bottom: 4px;" id="restore_student_info">Student: GR 0000</div>
+                    <div style="color: #64748b;" id="restore_invoice_info">Parent Invoice: SCH-...</div>
+                    <div style="color: #64748b;" id="restore_period_info">Period: ...</div>
+                    <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #cbd5e1; display: flex; justify-content: space-between;">
+                        <span>Original Net Value:</span>
+                        <strong id="restore_original_net">0.00</strong>
+                    </div>
+                </div>
+
+                {{-- Historical settlement badge / notice --}}
+                <div id="restore_settlement_box" style="display: none; background: #fdf4ff; border: 1px solid #f0abfc; border-radius: 6px; padding: 10px; margin-bottom: 12px; font-size: 11px; color: #86198f;">
+                    <div style="font-weight: 700; display: flex; align-items: center; gap: 6px;">
+                        <span>🛡️</span>
+                        <span>Verified Historical MySkool Settlement</span>
+                    </div>
+                    <div style="margin-top: 4px; font-size: 10px;" id="restore_settlement_details"></div>
+                </div>
+
+                <div class="myskool-drawer-field">
+                    <label>Action Classification</label>
+                    <div id="restore_safety_badge" style="padding: 6px 10px; border-radius: 4px; font-size: 11px; font-weight: 600;"></div>
+                    <div id="restore_action_desc" style="font-size: 10px; color: #64748b; margin-top: 4px;"></div>
+                </div>
+
+                <div class="myskool-drawer-field">
+                    <label>Administrative Justification / Reason *</label>
+                    <textarea class="myskool-input" id="restore_reason" name="reason" rows="3" placeholder="Enter mandatory reason for restoring this voided obligation" style="height: 70px; resize: vertical;" required></textarea>
+                </div>
+
+                <button type="submit" class="btn-ms-save" id="btn-submit-restoration" style="background: #7367f0;">
+                    Confirm Safe Restoration
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <div id="msToastContainer"></div>
 
 {{-- Pass Server Catalog Data to JS for Client-Side Rate Calculations --}}
@@ -1008,6 +1066,9 @@ window.IQRA_STUDENT_FEE_PLANS = @json($studentFeePlans ?? []);
 window.IQRA_CURRENCY_DUES = @json($currencyDuesFloatMap);
 window.IQRA_DEFAULT_DUES_DISPLAY = @json($defaultDuesDisplay);
 window.IQRA_IS_MULTI_CURRENCY = @json($isMultiCurrencyDues);
+window.IQRA_IS_ADMIN = {{ in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true) ? 'true' : 'false' }};
+window.IQRA_CSRF_TOKEN = '{{ csrf_token() }}';
+window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
 </script>
 
 <script>
@@ -1550,82 +1611,292 @@ window.IQRA_IS_MULTI_CURRENCY = @json($isMultiCurrencyDues);
     return null;
   }
 
-  function updateCreateFeePreview() {
+  let previewDebounceTimer = null;
+
+  async function updateCreateFeePreview() {
     if (!previewTbody) return;
-    previewTbody.innerHTML = '';
-    if (previewWarning) previewWarning.style.display = 'none';
 
-    // Get selected students
-    const activeStudentChips = Array.from(document.querySelectorAll('#student-selector-chips .ms-chip.active'));
-    let targetStudents = [];
-    const allStudents = window.IQRA_FAMILY_STUDENTS || [];
-
-    if (activeStudentChips.length === 0 || activeStudentChips.some(c => c.dataset.studentId === 'all')) {
-      targetStudents = allStudents;
-    } else {
-      const selIds = activeStudentChips.map(c => parseInt(c.dataset.studentId));
-      targetStudents = allStudents.filter(s => selIds.includes(s.id));
+    if (previewDebounceTimer) {
+      clearTimeout(previewDebounceTimer);
     }
 
-    // Get selected fee types
-    const activeTypeChips = Array.from(document.querySelectorAll('#fee-types-selector-chips .ms-chip.active'));
-    const selectedTypes = activeTypeChips.map(c => ({
-      id: parseInt(c.dataset.feeTypeId),
-      code: c.dataset.code,
-      name: c.textContent.trim()
-    }));
+    previewDebounceTimer = setTimeout(async () => {
+      // Get selected students
+      const activeStudentChips = Array.from(document.querySelectorAll('#student-selector-chips .ms-chip.active'));
+      const allStudents = window.IQRA_FAMILY_STUDENTS || [];
+      let studentIds = [];
 
-    // Get selected months
-    const activeMonthChips = Array.from(document.querySelectorAll('#months-selector-chips .ms-chip.active'));
-    const selectedMonths = activeMonthChips.map(c => parseInt(c.dataset.monthVal));
-    const yearSelect = document.getElementById('cf-year-select');
-    const selectedYear = yearSelect?.value || new Date().getFullYear();
+      if (activeStudentChips.length === 0 || activeStudentChips.some(c => c.dataset.studentId === 'all')) {
+        studentIds = allStudents.map(s => s.id);
+      } else {
+        studentIds = activeStudentChips.map(c => parseInt(c.dataset.studentId));
+      }
 
-    const monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      // Get selected fee types
+      const activeTypeChips = Array.from(document.querySelectorAll('#fee-types-selector-chips .ms-chip.active'));
+      const feeTypeIds = activeTypeChips.map(c => parseInt(c.dataset.feeTypeId));
 
-    let rowsCount = 0;
-    let missingRates = [];
+      // Get selected months
+      const activeMonthChips = Array.from(document.querySelectorAll('#months-selector-chips .ms-chip.active'));
+      const months = activeMonthChips.map(c => parseInt(c.dataset.monthVal));
+      const yearSelect = document.getElementById('cf-year-select');
+      const year = parseInt(yearSelect?.value || new Date().getFullYear());
 
-    targetStudents.forEach(student => {
-      selectedTypes.forEach(ft => {
-        const rateInfo = resolveStudentFeeRate(student, ft.id, ft.code);
-        if (!rateInfo) {
-          missingRates.push(`${student.name} (${student.grade_label}, ${student.currency}): No approved rate for '${ft.name}'`);
+      const familyId = window.IQRA_FAMILY_ID;
+      if (!familyId || feeTypeIds.length === 0 || months.length === 0) {
+        previewTbody.innerHTML = '<tr><td colspan="6" style="padding: 10px; text-align: center; color: #94a3b8;">Select students, fee types, and billing months to preview obligations</td></tr>';
+        if (btnSubmitCreateFee) btnSubmitCreateFee.disabled = true;
+        return;
+      }
+
+      previewTbody.innerHTML = '<tr><td colspan="6" style="padding: 12px; text-align: center; color: #64748b;">Evaluating billing eligibility & historical protections...</td></tr>';
+
+      try {
+        const response = await fetch('/challan/preview-fee', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-CSRF-TOKEN': window.IQRA_CSRF_TOKEN || document.querySelector('meta[name="csrf-token"]')?.content
+          },
+          body: JSON.stringify({
+            family_id: familyId,
+            student_ids: studentIds,
+            fee_type_ids: feeTypeIds,
+            months: months,
+            year: year
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error('Eligibility evaluation failed');
+        }
+
+        const data = await response.json();
+        previewTbody.innerHTML = '';
+
+        if (!data.items || data.items.length === 0) {
+          previewTbody.innerHTML = '<tr><td colspan="6" style="padding: 10px; text-align: center; color: #94a3b8;">No fee combinations found</td></tr>';
+          if (btnSubmitCreateFee) btnSubmitCreateFee.disabled = true;
           return;
         }
 
-        const isOneTime = rateInfo.isOneTime;
-        const periods = isOneTime ? [selectedMonths[0] || 1] : selectedMonths;
-
-        periods.forEach(m => {
-          rowsCount++;
-          const periodStr = isOneTime ? `One-Time (${monthNames[m]} ${selectedYear})` : `${monthNames[m]} ${selectedYear}`;
+        data.items.forEach(item => {
           const tr = document.createElement('tr');
-          tr.style.borderBottom = '1px solid #f1f5f9';
+          let statusBadge = '';
+          let rowStyle = '';
+          let rateHtml = '';
+          let actionHtml = '';
+
+          const rateStr = `${item.currency} ${(item.amount_minor / 100).toFixed(2)}`;
+
+          if (item.status === 'Eligible for creation') {
+            statusBadge = `<span class="badge" style="background: #eafbf1; color: #28c76f; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Eligible for creation</span>`;
+            rateHtml = `<strong style="color: #28c76f;">${rateStr}</strong>`;
+            actionHtml = `<span style="color: #94a3b8; font-size: 10px;">Ready to create</span>`;
+          } else {
+            rowStyle = 'background: #fbfbfb; color: #64748b;';
+            rateHtml = `<span style="text-decoration: line-through; color: #94a3b8;">${rateStr}</span>`;
+
+            if (item.status === 'Already invoiced') {
+              statusBadge = `<span class="badge" style="background: #e0f2fe; color: #0284c7; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Already invoiced</span>`;
+              actionHtml = `<span style="font-size: 10px; color: #0284c7;">${item.existing_invoice_number || 'Billed'}</span>`;
+            } else if (item.status === 'Previously voided') {
+              statusBadge = `<span class="badge" style="background: #fef3c7; color: #d97706; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Previously voided</span>`;
+              if (window.IQRA_IS_ADMIN && item.voided_item_id) {
+                actionHtml = `<button type="button" class="btn-restore-void" data-item-id="${item.voided_item_id}" style="background: #f59e0b; color: #fff; border: none; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer;">Inspect & Restore</button>`;
+              } else {
+                actionHtml = `<span style="font-size: 10px; color: #d97706;">Voided</span>`;
+              }
+            } else if (item.status === 'Historical MySkool payment exists') {
+              statusBadge = `<span class="badge" style="background: #f3e8ff; color: #9333ea; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Historical payment exists</span>`;
+              actionHtml = `<span style="font-size: 10px; color: #9333ea;">Paid in MySkool</span>`;
+            } else if (item.status === 'Historical opening balance exists') {
+              statusBadge = `<span class="badge" style="background: #f0fdf4; color: #16a34a; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Historical opening balance</span>`;
+              actionHtml = `<span style="font-size: 10px; color: #16a34a;">Opening Balance</span>`;
+            } else if (item.status === 'Requires restoration review') {
+              statusBadge = `<span class="badge" style="background: #ffedd5; color: #ea580c; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Restoration review</span>`;
+              if (window.IQRA_IS_ADMIN && item.voided_item_id) {
+                actionHtml = `<button type="button" class="btn-restore-void" data-item-id="${item.voided_item_id}" style="background: #ea580c; color: #fff; border: none; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer;">Inspect & Restore</button>`;
+              } else {
+                actionHtml = `<span style="font-size: 10px; color: #ea580c;">Review Needed</span>`;
+              }
+            } else {
+              statusBadge = `<span class="badge" style="background: #fee2e2; color: #dc2626; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Financial conflict</span>`;
+              actionHtml = `<span style="font-size: 10px; color: #dc2626;">Blocked</span>`;
+            }
+          }
+
+          tr.style.cssText = rowStyle + '; border-bottom: 1px solid #f1f5f9;';
           tr.innerHTML = `
-            <td style="padding: 4px 6px;"><strong>${student.name}</strong><br><span style="color:#94a3b8;font-size:9px;">${student.grade_label}</span></td>
-            <td style="padding: 4px 6px;"><strong>${ft.name}</strong><br><span style="color:#64748b;font-size:9px;">${rateInfo.source}</span></td>
-            <td style="padding: 4px 6px;"><span class="ms-pill-lavender" style="font-size:9px;">${periodStr}</span></td>
-            <td style="padding: 4px 6px; text-align: right; font-weight: 600;">${student.currency} ${rateInfo.amount.toFixed(2)}</td>
+            <td style="padding: 4px 6px;"><strong>${item.student_name}</strong><br><span style="color:#94a3b8;font-size:9px;">GR: ${item.student_gr} (${item.grade_label})</span></td>
+            <td style="padding: 4px 6px;"><strong>${item.fee_type_name}</strong><br><span style="color:#64748b;font-size:9px;">${item.rate_source}</span></td>
+            <td style="padding: 4px 6px;"><span class="ms-pill-lavender" style="font-size:9px;">${item.period_label}</span></td>
+            <td style="padding: 4px 6px; text-align: right;">${rateHtml}</td>
+            <td style="padding: 4px 6px; text-align: center;">${statusBadge}<br><span style="font-size:8px; color:#94a3b8;" title="${item.reason}">${item.reason.substring(0, 35)}${item.reason.length > 35 ? '...' : ''}</span></td>
+            <td style="padding: 4px 6px; text-align: right;">${actionHtml}</td>
           `;
           previewTbody.appendChild(tr);
         });
-      });
-    });
 
-    if (previewCount) {
-      previewCount.textContent = `${rowsCount} fee obligation(s) planned`;
-    }
+        // Attach restoration button handlers
+        document.querySelectorAll('.btn-restore-void').forEach(btn => {
+          btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const itemId = this.dataset.itemId;
+            openRestorationDrawer(itemId);
+          });
+        });
 
-    if (missingRates.length > 0) {
-      if (previewWarning) {
-        previewWarning.style.display = 'block';
-        previewWarning.innerHTML = `<strong>Cannot proceed: Missing approved rates:</strong><br>${missingRates.join('<br>')}`;
+        const summary = data.summary || {};
+        if (previewCount) {
+          previewCount.textContent = `${summary.total_eligible || 0} charge(s) planned (${summary.total_blocked || 0} blocked)`;
+        }
+
+        if ((summary.total_eligible || 0) === 0) {
+          if (previewWarning) {
+            previewWarning.style.display = 'block';
+            previewWarning.innerHTML = `<strong>No eligible fees to create.</strong> Selected obligations are already invoiced, voided, or historically settled.`;
+          }
+          if (btnSubmitCreateFee) {
+            btnSubmitCreateFee.disabled = true;
+            btnSubmitCreateFee.style.opacity = '0.5';
+            btnSubmitCreateFee.style.cursor = 'not-allowed';
+          }
+        } else {
+          if (previewWarning) previewWarning.style.display = 'none';
+          if (btnSubmitCreateFee) {
+            btnSubmitCreateFee.disabled = false;
+            btnSubmitCreateFee.style.opacity = '1';
+            btnSubmitCreateFee.style.cursor = 'pointer';
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching preview:', err);
+        previewTbody.innerHTML = '<tr><td colspan="6" style="padding: 10px; text-align: center; color: #dc2626;">Error calculating fee eligibility. Check network connection.</td></tr>';
       }
-      if (btnSubmitCreateFee) btnSubmitCreateFee.disabled = true;
-    } else {
-      if (btnSubmitCreateFee) btnSubmitCreateFee.disabled = (rowsCount === 0);
+    }, 150);
+  }
+
+  // RESTORATION DRAWER HANDLERS
+  const restorationDrawer = document.getElementById('myskoolRestorationDrawer');
+  const restorationCloseBtn = document.getElementById('restorationCloseBtn');
+  const restorationForm = document.getElementById('form-restore-voided-fee');
+  const restoreItemIdInput = document.getElementById('restore_item_id');
+  const restorationSpinner = document.getElementById('restoration_loading_spinner');
+  const restorationContent = document.getElementById('restoration_content_block');
+  const btnSubmitRestoration = document.getElementById('btn-submit-restoration');
+
+  if (restorationCloseBtn && restorationDrawer) {
+    restorationCloseBtn.addEventListener('click', () => {
+      restorationDrawer.hidden = true;
+    });
+  }
+
+  async function openRestorationDrawer(itemId) {
+    if (!restorationDrawer) return;
+    restorationDrawer.hidden = false;
+    if (restoreItemIdInput) restoreItemIdInput.value = itemId;
+    if (restorationSpinner) restorationSpinner.style.display = 'block';
+    if (restorationContent) restorationContent.style.display = 'none';
+
+    try {
+      const resp = await fetch(`/challan/inspect-voided-fee/${itemId}`, {
+        headers: {
+          'Accept': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      });
+      const data = await resp.json();
+
+      if (restorationSpinner) restorationSpinner.style.display = 'none';
+      if (restorationContent) restorationContent.style.display = 'block';
+
+      if (!data.exists) {
+        alertNotice(data.error || 'Invoice item not found', 'error');
+        restorationDrawer.hidden = true;
+        return;
+      }
+
+      const item = data.item;
+      const values = data.original_approved_values || {};
+      const proposed = data.proposed_restoration || {};
+      const histEv = data.historical_evidence || {};
+
+      document.getElementById('restore_student_info').textContent = `Student: ${item.student_name} (GR: ${item.gr_number})`;
+      document.getElementById('restore_invoice_info').textContent = `Parent Invoice: ${item.invoice_number} (Status: ${item.invoice_status})`;
+      document.getElementById('restore_period_info').textContent = `Particular: ${item.description} (${item.period_key || item.period_start})`;
+      document.getElementById('restore_original_net').textContent = `${item.currency} ${values.net_formatted}`;
+
+      const settlementBox = document.getElementById('restore_settlement_box');
+      if (histEv.post_cutoff_paid_minor > 0 || proposed.settled_paid_minor > 0) {
+        settlementBox.style.display = 'block';
+        const paidFmt = (proposed.settled_paid_minor / 100).toFixed(2);
+        document.getElementById('restore_settlement_details').textContent =
+          `Verified historical payment of ${item.currency} ${paidFmt} (Slips: ${histEv.slips || 'Verified record'}). This fee will be restored directly with historical settlement applied atomically.`;
+      } else {
+        settlementBox.style.display = 'none';
+      }
+
+      const badge = document.getElementById('restore_safety_badge');
+      badge.textContent = data.safety_status;
+      if (data.is_safe_to_restore) {
+        badge.style.background = '#eafbf1';
+        badge.style.color = '#28c76f';
+        if (btnSubmitRestoration) btnSubmitRestoration.disabled = false;
+      } else {
+        badge.style.background = '#fee2e2';
+        badge.style.color = '#dc2626';
+        if (btnSubmitRestoration) btnSubmitRestoration.disabled = true;
+      }
+
+      document.getElementById('restore_action_desc').textContent = data.action_description;
+    } catch (e) {
+      alertNotice('Failed to inspect voided fee forensics.', 'error');
+      restorationDrawer.hidden = true;
     }
+  }
+
+  if (restorationForm) {
+    restorationForm.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      if (btnSubmitRestoration) {
+        btnSubmitRestoration.disabled = true;
+        btnSubmitRestoration.textContent = 'Restoring...';
+      }
+
+      const fd = new FormData(restorationForm);
+      try {
+        const resp = await fetch(restorationForm.action, {
+          method: 'POST',
+          body: fd,
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json'
+          }
+        });
+
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+          alertNotice(data.message || 'Fee successfully restored');
+          restorationDrawer.hidden = true;
+          setTimeout(() => location.reload(), 700);
+        } else {
+          alertNotice(data.message || 'Restoration failed', 'error');
+          if (btnSubmitRestoration) {
+            btnSubmitRestoration.disabled = false;
+            btnSubmitRestoration.textContent = 'Confirm Safe Restoration';
+          }
+        }
+      } catch (err) {
+        alertNotice('Network error during fee restoration', 'error');
+        if (btnSubmitRestoration) {
+          btnSubmitRestoration.disabled = false;
+          btnSubmitRestoration.textContent = 'Confirm Safe Restoration';
+        }
+      }
+    });
   }
 
   // Hook Create Fee Selectors

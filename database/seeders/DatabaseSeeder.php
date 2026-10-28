@@ -37,8 +37,8 @@ class DatabaseSeeder extends Seeder
                 [
                     'display_name' => 'IQRA Virtual School',
                     'payment_instructions' => 'IQRA Virtual School billing portal. Please deposit fees to authorized bank accounts.',
-                    'footer_email' => 'accounts@iqra.edu.pk',
-                    'footer_phone' => '+920000000000',
+                    'footer_email' => 'acivs2021@gmail.com',
+                    'footer_phone' => '+923255245551',
                     'updated_at' => $now,
                     'created_at' => $now,
                 ]

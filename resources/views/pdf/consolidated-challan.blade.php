@@ -58,7 +58,7 @@
   $signSrc=is_file($signPath)?'data:image/jpeg;base64,'.base64_encode(file_get_contents($signPath)):null;
   $payText=trim((string)($branding?->payment_instructions ?? ''));
   $hasSavedBankAccounts = (bool) preg_match('/\bIBAN\b|\b(?:A\/C|ACCOUNT)\s*(?:NUMBER|NO\.?|#)?\s*[:#]\s*\d{6,}/i', $payText);
-  $footerPhone=trim((string)($branding?->footer_phone ?? '')) ?: '+92 335 524 5551';
+  $footerPhone=trim((string)($branding?->footer_phone ?? '')) ?: '+92 325 524 5551';
   $footerEmail=trim((string)($branding?->footer_email ?? '')) ?: 'acivs2021@gmail.com';
 @endphp
 
@@ -168,7 +168,7 @@
           <div class="bank">{{ $payText }}</div>
         @else
           <table style="width:100%; border-collapse:collapse;"><tr>
-            <td style="border:0; padding:0 8px 0 0; width:50%;"><strong>IQRA VIRTUALSOLUTIONS</strong><br>Meezan Bank Peshawar<br>IBAN: PK71MEZN0007810111367793<br>Account: 07810111367793<br>Branch: 0781<br>Contact: +92 335 524 5551</td>
+            <td style="border:0; padding:0 8px 0 0; width:50%;"><strong>IQRA VIRTUALSOLUTIONS</strong><br>Meezan Bank Peshawar<br>IBAN: PK71MEZN0007810111367793<br>Account: 07810111367793<br>Branch: 0781<br>Contact: +92 325 524 5551</td>
             <td style="border:0; padding:0; width:50%;"><strong>IVSGLOBAL</strong><br>Mashreq Bank<br>IBAN: AE620330000019101455931<br>Account: 019101455931<br>Mobile: +971528838128<br>Ajman Industrial Area 2, UAE</td>
           </tr></table>
           @if($payText !== '')

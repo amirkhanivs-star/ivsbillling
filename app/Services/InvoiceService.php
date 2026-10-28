@@ -186,8 +186,9 @@ final class InvoiceService {
         }, 3);
     }
 
-    public function refreshInvoice(int $invoiceId): void {
-        $totals = DB::table('invoice_items')->where('invoice_id', $invoiceId)
+    public function refreshInvoice(int $invoiceId, ?string $conn = null): void {
+        $db = $conn ? DB::connection($conn) : DB::connection();
+        $totals = $db->table('invoice_items')->where('invoice_id', $invoiceId)
             ->selectRaw("
                 COUNT(*) AS total_count,
                 SUM(CASE WHEN status = 'voided' THEN 1 ELSE 0 END) AS voided_count,
@@ -195,7 +196,7 @@ final class InvoiceService {
                 COALESCE(SUM(CASE WHEN status != 'voided' THEN net_minor ELSE 0 END), 0) AS total,
                 COALESCE(SUM(paid_minor), 0) AS paid
             ")->first();
-        $invoice = DB::table('invoices')->where('id', $invoiceId)->first();
+        $invoice = $db->table('invoices')->where('id', $invoiceId)->first();
         if (!$invoice) return;
 
         $totalCount = (int) ($totals->total_count ?? 0);
@@ -215,7 +216,7 @@ final class InvoiceService {
             $status = 'generated';
         }
 
-        DB::table('invoices')->where('id', $invoiceId)->update([
+        $db->table('invoices')->where('id', $invoiceId)->update([
             'total_minor' => $totalMinor, 'paid_minor' => $paidMinor,
             'status' => $status, 'updated_at' => now(),
         ]);

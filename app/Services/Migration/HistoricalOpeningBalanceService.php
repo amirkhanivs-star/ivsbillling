@@ -1387,6 +1387,7 @@ class HistoricalOpeningBalanceService
         $this->validateQaConnection($conn);
         $db = DB::connection($conn);
 
+        $explicitBatchId = $batchId !== null && trim($batchId) !== '';
         $batchId = self::resolveActiveBatchId($batchId);
 
         $grList = array_values(array_unique(array_filter(
@@ -1429,6 +1430,35 @@ class HistoricalOpeningBalanceService
                 ->whereIn('gr_number', $grList)
                 ->orderBy('source_row')
                 ->get();
+        }
+
+        // If no explicit batch was requested and the default config batch is not in staging,
+        // check if the ledger has a single posted opening-balance lineage batch and use it.
+        if (!$explicitBatchId && $collections->isEmpty() && $dues->isEmpty() && $schema->hasTable('qa_opening_balance_lineage')) {
+            $batchExistsInStaging = ($hasCollectionsTable && $db->table('qa_staged_collections')->where('batch_id', $batchId)->exists())
+                || ($hasDuesTable && $db->table('qa_staged_dues')->where('batch_id', $batchId)->exists());
+
+            if (!$batchExistsInStaging) {
+                $lineageBatches = $db->table('qa_opening_balance_lineage')->distinct()->pluck('batch_id')->filter()->values();
+                if ($lineageBatches->count() === 1) {
+                    $batchId = (string) $lineageBatches->first();
+                    $map['batch_id'] = $batchId;
+                    if ($hasCollectionsTable) {
+                        $collections = $db->table('qa_staged_collections')
+                            ->where('batch_id', $batchId)
+                            ->whereIn('gr_number', $grList)
+                            ->orderBy('source_row')
+                            ->get();
+                    }
+                    if ($hasDuesTable) {
+                        $dues = $db->table('qa_staged_dues')
+                            ->where('batch_id', $batchId)
+                            ->whereIn('gr_number', $grList)
+                            ->orderBy('source_row')
+                            ->get();
+                    }
+                }
+            }
         }
 
         // Guard against a missing or incorrect staging batch silently making historical fees appear safe to regenerate:
