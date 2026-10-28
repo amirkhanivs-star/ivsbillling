@@ -273,8 +273,8 @@ class HistoricalPaymentReconciliationTest extends TestCase
         [$fam, $stu1, $enr1] = $this->createFamilyAndStudent('5929', '5929', 'Khadija Feroz', 'QAR');
         [, $stu2, $enr2] = $this->createFamilyAndStudent('5929', '5930', 'Zahra Feroz', 'QAR');
 
-        $this->createObInvoiceItem($fam, $stu1, $enr1, '5929', 'Monthly Fee - Oct-2026', 'QAR', 28000);
-        $this->createObInvoiceItem($fam, $stu2, $enr2, '5930', 'Monthly Fee - Oct-2026', 'QAR', 28000);
+        [$invId, $item1Id] = $this->createObInvoiceItem($fam, $stu1, $enr1, '5929', 'Monthly Fee - Oct-2026', 'QAR', 28000);
+        [, $item2Id] = $this->createObInvoiceItem($fam, $stu2, $enr2, '5930', 'Monthly Fee - Oct-2026', 'QAR', 28000);
 
         $this->insertStagedCollection(201, '27328', '5929', '5929', 'Monthly Fee - Oct-2026', '2026-10-24', 'QAR', 28000);
         $this->insertStagedCollection(202, '27328', '5930', '5929', 'Monthly Fee - Oct-2026', '2026-10-24', 'QAR', 23000);
@@ -291,7 +291,7 @@ class HistoricalPaymentReconciliationTest extends TestCase
         // Verify invariant
         $this->assertSame(28000, $r['verified_settlement_minor'] + $r['remaining_obligation_minor'] + $r['approved_adjustments_minor']);
 
-        // Default apply targets only CANDIDATE_FULL_SETTLEMENT, so CONCESSION_REVIEW must be skipped
+        // Apply settles ONLY the verified QAR 230 cash payment and does NOT write off the QAR 50 concession candidate
         $applyRes = $service->apply([
             'confirm_cutoff' => true,
             'confirm_owner' => true,
@@ -299,8 +299,15 @@ class HistoricalPaymentReconciliationTest extends TestCase
             'batch_id' => $this->batchId,
             'gr' => '5930',
         ]);
-        $this->assertSame(0, $applyRes['applied_count']);
-        $this->assertSame(1, $applyRes['skipped_count']);
+        $this->assertSame(1, $applyRes['applied_count']);
+        $this->assertSame(0, $applyRes['skipped_count']);
+
+        $item5930 = DB::table('invoice_items')->where('id', $item2Id)->first();
+        $this->assertSame(28000, (int) $item5930->net_minor);
+        $this->assertSame(23000, (int) $item5930->paid_minor);
+        $this->assertSame(0, (int) $item5930->discount_minor);
+        $this->assertSame(0, (int) $item5930->exemption_minor);
+        $this->assertSame('partial', $item5930->status);
     }
 
     /**
@@ -1049,5 +1056,214 @@ class HistoricalPaymentReconciliationTest extends TestCase
         $reversed = DB::table('qa_historical_settlements')->where('id', $settlement->id)->first();
         $this->assertSame('reversed', $reversed->status);
         $this->assertSame($this->userId, (int) $reversed->reversed_by);
+    }
+
+    /**
+     * 22. Reference Case 1: Family 5929 (GR 5929 Khadija Feroz & GR 5930 Zahra Feroz)
+     * October 2026 OB (QAR 280 + QAR 280) + MySkool Slip 27328 (QAR 280 + QAR 230) + November 2026 (QAR 560)
+     * -> QAR 610 total outstanding across Fee Collection, Dashboard, Invoice PDF, and Challan PDF.
+     */
+    public function test_22_reference_case_1_family_5929_end_to_end_fee_collection_and_pdfs(): void
+    {
+        Config::set('imports.active_batch_id', $this->batchId);
+
+        [$fam, $stu5929, $enr5929] = $this->createFamilyAndStudent('5929', '5929', 'Khadija Feroz', 'QAR');
+        [, $stu5930, $enr5930] = $this->createFamilyAndStudent('5929', '5930', 'Zahra Feroz', 'QAR');
+
+        // October 2026 Opening Balance obligations: QAR 280 each = QAR 560
+        [$obInvId, $obItem5929] = $this->createObInvoiceItem($fam, $stu5929, $enr5929, '5929', 'Monthly Fee - Oct-2026', 'QAR', 28000);
+        [, $obItem5930] = $this->createObInvoiceItem($fam, $stu5930, $enr5930, '5930', 'Monthly Fee - Oct-2026', 'QAR', 28000);
+
+        // November 2026 regular monthly billing run and invoice: QAR 280 each = QAR 560, with previous_dues_snapshot_minor = 56000
+        $novRunId = DB::table('billing_runs')->insertGetId([
+            'campus_id' => $this->campusId,
+            'department_id' => $this->deptId,
+            'frequency' => 'monthly',
+            'period_key' => 'monthly:2026-11-01..2026-11-30',
+            'period_start' => '2026-11-01',
+            'period_end' => '2026-11-30',
+            'due_date' => '2026-11-10',
+            'status' => 'generated',
+            'created_by' => $this->userId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $novInvId = DB::table('invoices')->insertGetId([
+            'billing_run_id' => $novRunId,
+            'family_id' => $fam,
+            'campus_id' => $this->campusId,
+            'department_id' => $this->deptId,
+            'currency' => 'QAR',
+            'invoice_number' => 'SCH-2026-0016199',
+            'issued_on' => '2026-11-01',
+            'due_date' => '2026-11-10',
+            'total_minor' => 56000,
+            'paid_minor' => 0,
+            'previous_dues_snapshot_minor' => 56000,
+            'status' => 'generated',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('invoice_items')->insert([
+            [
+                'invoice_id' => $novInvId,
+                'student_id' => $stu5929,
+                'enrollment_id' => $enr5929,
+                'fee_type_id' => $this->monthlyFeeTypeId,
+                'description' => 'Monthly Fee',
+                'period_key' => 'monthly:2026-11-01..2026-11-30',
+                'period_start' => '2026-11-01',
+                'period_end' => '2026-11-30',
+                'currency' => 'QAR',
+                'amount_minor' => 28000,
+                'discount_minor' => 0,
+                'exemption_minor' => 0,
+                'net_minor' => 28000,
+                'paid_minor' => 0,
+                'status' => 'active',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'invoice_id' => $novInvId,
+                'student_id' => $stu5930,
+                'enrollment_id' => $enr5930,
+                'fee_type_id' => $this->monthlyFeeTypeId,
+                'description' => 'Monthly Fee',
+                'period_key' => 'monthly:2026-11-01..2026-11-30',
+                'period_start' => '2026-11-01',
+                'period_end' => '2026-11-30',
+                'currency' => 'QAR',
+                'amount_minor' => 28000,
+                'discount_minor' => 0,
+                'exemption_minor' => 0,
+                'net_minor' => 28000,
+                'paid_minor' => 0,
+                'status' => 'active',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        // MySkool slip 27328 on Oct 24, 2026: GR 5929 paid QAR 280, GR 5930 paid QAR 230
+        $this->insertStagedCollection(34702, '27328', '5929', '5929', 'Monthly Fee - Oct-2026', '2026-10-24', 'QAR', 28000);
+        $this->insertStagedCollection(34703, '27328', '5930', '5929', 'Monthly Fee - Oct-2026', '2026-10-24', 'QAR', 23000);
+
+        // Apply reconciliation via CLI
+        $this->artisan('reconciliation:myskool-historical', [
+            '--apply' => true,
+            '--confirm-cutoff' => true,
+            '--confirm-owner' => true,
+            '--actor-id' => $this->userId,
+            '--batch-id' => $this->batchId,
+        ])->assertExitCode(0);
+
+        // 1. Verify October GR 5929: paid, outstanding QAR 0
+        $oct5929 = DB::table('invoice_items')->where('id', $obItem5929)->first();
+        $this->assertSame(28000, (int) $oct5929->paid_minor);
+        $this->assertSame('paid', $oct5929->status);
+        $this->assertSame(0, (int) $oct5929->net_minor - (int) $oct5929->paid_minor);
+
+        // 2. Verify October GR 5930: QAR 230 historically paid, QAR 50 remaining under concession review (NOT written off)
+        $oct5930 = DB::table('invoice_items')->where('id', $obItem5930)->first();
+        $this->assertSame(28000, (int) $oct5930->net_minor);
+        $this->assertSame(23000, (int) $oct5930->paid_minor);
+        $this->assertSame(0, (int) $oct5930->discount_minor);
+        $this->assertSame('partial', $oct5930->status);
+        $this->assertSame(5000, (int) $oct5930->net_minor - (int) $oct5930->paid_minor);
+
+        // 3. Verify Parent OB Invoice & November previous_dues_snapshot_minor
+        $obInv = DB::table('invoices')->where('id', $obInvId)->first();
+        $this->assertSame(56000, (int) $obInv->total_minor);
+        $this->assertSame(51000, (int) $obInv->paid_minor);
+        $this->assertSame('partial', $obInv->status);
+
+        $novInv = DB::table('invoices')->where('id', $novInvId)->first();
+        $this->assertSame(5000, (int) $novInv->previous_dues_snapshot_minor);
+
+        // 4. Verify Fee Collection screen (/challan?family=5929) shows QAR 610.00 outstanding and preserves Slip 27328
+        $resp = $this->get('/challan?family=5929&search_by=family');
+        $resp->assertStatus(200);
+        $resp->assertSee('Gross: <strong>QAR 1,120.00</strong>', false);
+        $resp->assertSee('Paid: <strong style="color: #0369a1;">QAR 510.00</strong>', false);
+        $resp->assertSee('Outstanding: <strong style="color: #dc2626;">QAR 610.00</strong>', false);
+        $resp->assertSee('Concession Review (QAR 50)', false);
+        $resp->assertSee('27328', false);
+    }
+
+    /**
+     * 23. Reference Case 2: Family 8563 (GR 8563, GR 8620, GR 8769) and MySkool Slip 27256.
+     * Verifies exact settlement of SAR (GR 8563) and AED (GR 8769) obligations while holding GR 8620 cross-currency rows.
+     */
+    public function test_23_reference_case_2_family_8563_gr_8620_slip_27256_multi_currency_and_holds(): void
+    {
+        Config::set('imports.active_batch_id', $this->batchId);
+
+        [$fam, $stu8563, $enr8563] = $this->createFamilyAndStudent('8563', '8563', 'Muhammad yahya', 'SAR');
+        [, $stu8620, $enr8620] = $this->createFamilyAndStudent('8563', '8620', 'Ibrahim yahya', 'AED');
+        [, $stu8769, $enr8769] = $this->createFamilyAndStudent('8563', '8769', 'Zakariya yahya', 'AED');
+
+        // Sep-2026 & Oct-2026 Opening Balance obligations
+        [, $item8563Sep] = $this->createObInvoiceItem($fam, $stu8563, $enr8563, '8563', 'Monthly Fee - Sep-2026', 'SAR', 24000, [
+            'period_key' => 'monthly:2026-09-01..2026-09-30',
+            'period_start' => '2026-09-01',
+            'period_end' => '2026-09-30',
+        ]);
+        [, $item8563Oct] = $this->createObInvoiceItem($fam, $stu8563, $enr8563, '8563', 'Monthly Fee - Oct-2026', 'SAR', 24000);
+
+        [, $item8620Sep] = $this->createObInvoiceItem($fam, $stu8620, $enr8620, '8620', 'Monthly Fee - Sep-2026', 'AED', 33000, [
+            'period_key' => 'monthly:2026-09-01..2026-09-30',
+            'period_start' => '2026-09-01',
+            'period_end' => '2026-09-30',
+        ]);
+        [, $item8620Oct] = $this->createObInvoiceItem($fam, $stu8620, $enr8620, '8620', 'Monthly Fee - Oct-2026', 'AED', 33000);
+
+        [, $item8769Sep] = $this->createObInvoiceItem($fam, $stu8769, $enr8769, '8769', 'Monthly Fee - Sep-2026', 'AED', 36000, [
+            'period_key' => 'monthly:2026-09-01..2026-09-30',
+            'period_start' => '2026-09-01',
+            'period_end' => '2026-09-30',
+        ]);
+        [, $item8769Oct] = $this->createObInvoiceItem($fam, $stu8769, $enr8769, '8769', 'Monthly Fee - Oct-2026', 'AED', 36000);
+
+        // MySkool Slip 27256 on 2026-10-23:
+        // GR 8563: Sep & Oct SAR 240 each (currency matches SAR)
+        $this->insertStagedCollection(34557, '27256', '8563', '8563', 'Monthly Fee - Sep-2026', '2026-10-23', 'SAR', 24000);
+        $this->insertStagedCollection(34556, '27256', '8563', '8563', 'Monthly Fee - Oct-2026', '2026-10-23', 'SAR', 24000);
+        // GR 8620: Sep & Oct SAR 330 each (currency conflict against AED 330 obligation!)
+        $this->insertStagedCollection(34558, '27256', '8620', '8563', 'Monthly Fee - Sep-2026', '2026-10-23', 'SAR', 33000, ['has_currency_conflict' => true]);
+        $this->insertStagedCollection(34559, '27256', '8620', '8563', 'Monthly Fee - Oct-2026', '2026-10-23', 'SAR', 33000, ['has_currency_conflict' => true]);
+        // GR 8769: Sep & Oct AED 360 each (currency matches AED)
+        $this->insertStagedCollection(34561, '27256', '8769', '8563', 'Monthly Fee - Sep-2026', '2026-10-23', 'AED', 36000);
+        $this->insertStagedCollection(34560, '27256', '8769', '8563', 'Monthly Fee - Oct-2026', '2026-10-23', 'AED', 36000);
+
+        $service = app(HistoricalPaymentReconciliationService::class);
+        $applyRes = $service->apply([
+            'confirm_cutoff' => true,
+            'confirm_owner' => true,
+            'cutoff_date' => $this->cutoffDate,
+            'batch_id' => $this->batchId,
+        ]);
+
+        // 4 items settled (GR 8563 Sep/Oct + GR 8769 Sep/Oct), 2 items skipped/held (GR 8620 Sep/Oct currency conflict)
+        $this->assertSame(4, $applyRes['applied_count']);
+        $this->assertSame(2, $applyRes['skipped_count']);
+
+        // GR 8563 Sep & Oct: settled in full (SAR 240 each)
+        $this->assertSame(24000, (int) DB::table('invoice_items')->where('id', $item8563Sep)->value('paid_minor'));
+        $this->assertSame('paid', DB::table('invoice_items')->where('id', $item8563Sep)->value('status'));
+        $this->assertSame(24000, (int) DB::table('invoice_items')->where('id', $item8563Oct)->value('paid_minor'));
+        $this->assertSame('paid', DB::table('invoice_items')->where('id', $item8563Oct)->value('status'));
+
+        // GR 8769 Sep & Oct: settled in full (AED 360 each)
+        $this->assertSame(36000, (int) DB::table('invoice_items')->where('id', $item8769Sep)->value('paid_minor'));
+        $this->assertSame('paid', DB::table('invoice_items')->where('id', $item8769Sep)->value('status'));
+        $this->assertSame(36000, (int) DB::table('invoice_items')->where('id', $item8769Oct)->value('paid_minor'));
+        $this->assertSame('paid', DB::table('invoice_items')->where('id', $item8769Oct)->value('status'));
+
+        // GR 8620 Sep & Oct: held for manual review (0 paid, remains active)
+        $this->assertSame(0, (int) DB::table('invoice_items')->where('id', $item8620Sep)->value('paid_minor'));
+        $this->assertSame('active', DB::table('invoice_items')->where('id', $item8620Sep)->value('status'));
+        $this->assertSame(0, (int) DB::table('invoice_items')->where('id', $item8620Oct)->value('paid_minor'));
+        $this->assertSame('active', DB::table('invoice_items')->where('id', $item8620Oct)->value('status'));
     }
 }

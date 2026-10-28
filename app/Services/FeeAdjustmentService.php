@@ -176,7 +176,9 @@ final class FeeAdjustmentService
             $newExemption = (int) $item->exemption_minor + $exemptAmount;
             $newNet = (int) $item->net_minor - $exemptAmount;
             $newBalance = $currentBalance - $exemptAmount;
-            $newStatus = ($newBalance === 0 && (int) $item->paid_minor === 0) ? 'exempted' : $item->status;
+            $newStatus = ($newBalance === 0 && (int) $item->paid_minor === 0)
+                ? 'exempted'
+                : (($newBalance === 0 && (int) $item->paid_minor > 0) ? 'paid' : $item->status);
 
             DB::table('invoice_items')->where('id', $invoiceItemId)->update([
                 'exemption_minor' => $newExemption,

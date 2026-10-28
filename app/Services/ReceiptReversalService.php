@@ -37,9 +37,12 @@ final class ReceiptReversalService
                 $item = DB::table('invoice_items')->where('id', $alloc->invoice_item_id)->lockForUpdate()->first();
                 if ($item) {
                     $newPaid = max(0, (int) $item->paid_minor - (int) $alloc->amount_minor);
+                    $restoredStatus = ($newPaid < (int) $item->net_minor && $item->status === 'paid')
+                        ? ($newPaid > 0 ? 'partial' : 'active')
+                        : ($newPaid === 0 && $item->status === 'partial' ? 'active' : $item->status);
                     DB::table('invoice_items')->where('id', $item->id)->update([
                         'paid_minor' => $newPaid,
-                        'status' => ($newPaid < (int) $item->net_minor && $item->status === 'paid') ? 'active' : $item->status,
+                        'status' => $restoredStatus,
                         'updated_at' => now(),
                     ]);
 

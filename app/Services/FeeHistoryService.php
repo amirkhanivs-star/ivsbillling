@@ -35,7 +35,7 @@ class FeeHistoryService
         $portalReceipts = $this->fetchPortalReceiptsForFamily($familyId, $user);
 
         // 2. Fetch historical collections from active batch and reconstruct into receipts
-        $historicalReceipts = $this->fetchHistoricalReceipts($studentGrs, $family->family_code);
+        $historicalReceipts = $this->fetchHistoricalReceipts($studentGrs, $family->family_code, $user);
 
         // 3. Merge both collections
         $merged = $portalReceipts->concat($historicalReceipts);
@@ -72,7 +72,7 @@ class FeeHistoryService
         $portalReceipts = $this->fetchPortalReceiptsForStudent($studentId, $user);
 
         // 2. Fetch historical collections for this student's GR number
-        $historicalReceipts = $this->fetchHistoricalReceipts([$student->gr_number], null);
+        $historicalReceipts = $this->fetchHistoricalReceipts([$student->gr_number], null, $user);
 
         // 3. Merge
         $merged = $portalReceipts->concat($historicalReceipts);
@@ -282,6 +282,9 @@ class FeeHistoryService
         $receipt->payment_method = $p->method ?? 'Cash';
         $receipt->print_url = '/receipts/' . $p->id . '/pdf';
         $receipt->can_reverse = $canReverse;
+        $receipt->can_correct_myskool = false;
+        $receipt->correction_status = null;
+        $receipt->correction_badge = null;
         $receipt->items = $items;
 
         $receipt->details_payload = [
@@ -343,7 +346,7 @@ class FeeHistoryService
      * Fetch historical staged collections for given GR numbers and/or family code,
      * and reconstruct them into verified receipt objects without double counting.
      */
-    public function fetchHistoricalReceipts(array $grNumbers, ?string $familyCode = null): Collection
+    public function fetchHistoricalReceipts(array $grNumbers, ?string $familyCode = null, ?object $user = null): Collection
     {
         if (!Schema::hasTable('qa_staged_collections')) {
             return collect();
@@ -383,6 +386,53 @@ class FeeHistoryService
 
         $grFamilyMap = $this->resolveGrFamilyMap($rows->pluck('gr_number')->all());
         $fallbackFamilyCode = trim((string) ($familyCode ?? ''));
+        $rowIds = $rows->pluck('id')->map(fn($id) => (int) $id)->all();
+
+        // Batch-load settlement allocations and correction statuses without N+1 queries
+        $settlementByColId = [];
+        if (Schema::hasTable('qa_historical_settlement_collections')) {
+            $allocRows = DB::table('qa_historical_settlement_collections')
+                ->whereIn('qa_staged_collection_id', $rowIds)
+                ->orderBy('id')
+                ->get();
+            foreach ($allocRows as $ar) {
+                $settlementByColId[(int) $ar->qa_staged_collection_id] = [
+                    'status' => (string) $ar->status,
+                    'reconciliation_id' => (string) $ar->reconciliation_id,
+                    'invoice_item_id' => (int) $ar->invoice_item_id,
+                ];
+            }
+        } elseif (Schema::hasTable('qa_historical_settlements')) {
+            $setRows = DB::table('qa_historical_settlements')
+                ->whereIn('active_primary_collection_id', $rowIds)
+                ->orderBy('id')
+                ->get();
+            foreach ($setRows as $sr) {
+                $settlementByColId[(int) $sr->active_primary_collection_id] = [
+                    'status' => (string) $sr->status,
+                    'reconciliation_id' => (string) $sr->reconciliation_id,
+                    'invoice_item_id' => (int) $sr->invoice_item_id,
+                ];
+            }
+        }
+
+        $correctionByColId = [];
+        if (Schema::hasTable('qa_myskool_payment_corrections')) {
+            $corrRows = DB::table('qa_myskool_payment_corrections')
+                ->whereIn('qa_staged_collection_id', $rowIds)
+                ->orderBy('sequence_no')
+                ->orderBy('id')
+                ->get();
+            foreach ($corrRows as $cr) {
+                $correctionByColId[(int) $cr->qa_staged_collection_id] = [
+                    'correction_id' => (string) $cr->correction_id,
+                    'action_type' => (string) $cr->action_type,
+                    'resulting_status' => (string) $cr->resulting_status,
+                ];
+            }
+        }
+
+        $canCorrectMySkool = (bool) ($user && in_array($user->role, ['super_admin', 'finance_admin', 'admin'], true));
 
         // Reconstruct receipts using verified identity:
         // slip_number + family_code + date + currency
@@ -457,7 +507,27 @@ class FeeHistoryService
                 }
             }
 
+            $colId = (int) $r->id;
+            $setInfo = $settlementByColId[$colId] ?? null;
+            $corrInfo = $correctionByColId[$colId] ?? null;
+
+            $itemStatus = 'historical';
+            if ($corrInfo) {
+                $resStatus = $corrInfo['resulting_status'];
+                if ($resStatus === 'reapplied' || ($setInfo && $setInfo['status'] === 'applied')) {
+                    $itemStatus = 'reconciled';
+                } elseif (in_array($resStatus, ['reversed', 'disputed', 'under_review', 'corrected'], true)) {
+                    $itemStatus = $resStatus;
+                }
+            } elseif ($setInfo) {
+                $itemStatus = ($setInfo['status'] === 'applied') ? 'reconciled' : 'reversed';
+            } elseif (!empty($r->has_currency_conflict) || !empty($r->is_currency_unresolved)) {
+                $itemStatus = 'under_review';
+            }
+
             $grouped[$key]['items'][] = [
+                'id' => $colId,
+                'staged_collection_id' => $colId,
                 'source_row' => $r->source_row,
                 'student_name' => $r->student_name ?: ('GR ' . $r->gr_number),
                 'gr_number' => (string) $r->gr_number,
@@ -467,11 +537,13 @@ class FeeHistoryService
                 'discount' => '0',
                 'amount' => number_format($amt, 2),
                 'currency' => $curr,
+                'correction_status' => $itemStatus,
+                'reconciliation_id' => $setInfo['reconciliation_id'] ?? null,
             ];
         }
 
         // Convert grouped receipts into normalized receipt objects
-        return collect($grouped)->map(function ($grp) {
+        return collect($grouped)->map(function ($grp) use ($canCorrectMySkool) {
             $studentsArr = array_values($grp['students']);
             $studentNames = array_map(function ($s) {
                 return $s['name'] . (!empty($s['gr_number']) ? ' (' . $s['gr_number'] . ')' : '');
@@ -496,6 +568,40 @@ class FeeHistoryService
                 }
             }
 
+            // Compute aggregate correction status & badge across all items on the slip
+            $itemStatuses = array_column($grp['items'], 'correction_status');
+            $totalItemsCount = count($itemStatuses);
+            $reversedItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'reversed'));
+            $reconciledItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'reconciled'));
+            $disputedItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'disputed'));
+            $correctedItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'corrected'));
+            $underReviewItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'under_review'));
+
+            $correctionStatus = 'historical';
+            $correctionBadge = null;
+            $isReversed = false;
+
+            if ($totalItemsCount > 0 && $reversedItemsCount === $totalItemsCount) {
+                $correctionStatus = 'reversed';
+                $correctionBadge = 'Reversed';
+                $isReversed = true;
+            } elseif ($reversedItemsCount > 0 && $reversedItemsCount < $totalItemsCount) {
+                $correctionStatus = 'partially_reversed';
+                $correctionBadge = 'Partially Reversed';
+            } elseif ($disputedItemsCount > 0) {
+                $correctionStatus = 'disputed';
+                $correctionBadge = 'Disputed';
+            } elseif ($correctedItemsCount > 0) {
+                $correctionStatus = 'corrected';
+                $correctionBadge = 'Corrected';
+            } elseif ($underReviewItemsCount > 0) {
+                $correctionStatus = 'under_review';
+                $correctionBadge = 'Under Review';
+            } elseif ($reconciledItemsCount > 0) {
+                $correctionStatus = 'reconciled';
+                $correctionBadge = 'Reconciled';
+            }
+
             $receipt = new \stdClass();
             $receipt->id = (int) $grp['primary_id'];
             $receipt->primary_id = (int) $grp['primary_id'];
@@ -503,8 +609,8 @@ class FeeHistoryService
             $receipt->source = 'myskool';
             $receipt->source_label = 'MySkool';
             $receipt->is_historical = true;
-            $receipt->is_reversed = false;
-            $receipt->status = 'received';
+            $receipt->is_reversed = $isReversed;
+            $receipt->status = $isReversed ? 'reversed' : 'received';
             $receipt->received_on = $dateStandard;
             $receipt->received_on_formatted = $dateFormatted;
             $receipt->currency = $grp['currency'];
@@ -524,7 +630,10 @@ class FeeHistoryService
             $receipt->received_by_name = '—'; // Do not invent receiving staff
             $receipt->payment_method = $grp['payment_method'];
             $receipt->print_url = '/receipts/historical/' . $grp['primary_id'] . '/pdf';
-            $receipt->can_reverse = false; // Strictly protected against ledger reversal
+            $receipt->can_reverse = false; // Strictly protected against Portal cashier reversal
+            $receipt->can_correct_myskool = $canCorrectMySkool;
+            $receipt->correction_status = $correctionStatus;
+            $receipt->correction_badge = $correctionBadge;
             $receipt->items = $grp['items'];
 
             $receipt->details_payload = [
@@ -537,8 +646,10 @@ class FeeHistoryService
                 'discount' => '0',
                 'received_by' => '— (Historical Legacy Record)',
                 'payment_method' => $receipt->payment_method,
-                'status' => 'Historical Staged Collection (Read-Only)',
-                'is_reversed' => false,
+                'status' => $correctionBadge ? "Historical Record ({$correctionBadge})" : 'Historical Staged Collection (Read-Only)',
+                'is_reversed' => $isReversed,
+                'correction_status' => $correctionStatus,
+                'correction_badge' => $correctionBadge,
                 'print_url' => $receipt->print_url,
                 'is_historical' => true,
                 'notice' => 'Historical MySkool Payment Record — Reconstructed from Imported Data',

@@ -60,6 +60,8 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/challan/installment',[B::class,'installment'])->name('challan.installment');
  Route::post('/challan/void',[B::class,'voidFee'])->name('challan.void');
  Route::post('/challan/reverse-receipt',[B::class,'reverseReceipt'])->name('challan.reverse_receipt');
+ Route::get('/challan/inspect-myskool-payment/{id}',[B::class,'inspectMySkoolPayment'])->name('challan.inspect_myskool_payment');
+ Route::post('/challan/correct-myskool-payment',[B::class,'correctMySkoolPayment'])->name('challan.correct_myskool_payment');
  Route::post('/challan/import-outstanding',[B::class,'importOutstanding'])->name('challan.import.outstanding');
  Route::post('/challan/import-outstanding-preloaded',[B::class,'importOutstandingPreloaded'])->name('challan.import.outstanding.preloaded');
  Route::post('/challan/import-collection',[B::class,'importCollection'])->name('challan.import.collection');

@@ -149,6 +149,10 @@
         @elseif((int)($item->exemption_minor ?? 0) > 0)
           <br><span class="green">Exemption: {{ $currency }} {{ $money($item->exemption_minor) }}</span>
         @endif
+        @if((int)($item->paid_minor ?? 0) > 0)
+          @php $itemRemMinor = max(0, (int)($item->net_minor ?? 0) - (int)($item->paid_minor ?? 0)); @endphp
+          <br><span class="green">Paid: {{ $currency }} {{ $money($item->paid_minor) }} ({{ $itemRemMinor > 0 ? 'Remaining: ' . $currency . ' ' . $money($itemRemMinor) : 'SETTLED' }})</span>
+        @endif
       </td>
       <td>{{ !empty($item->period_start) ? \Carbon\Carbon::parse($item->period_start)->format('M Y') : '—' }}</td>
       <td class="num">{{ $money($item->net_minor ?? 0) }}</td>

@@ -717,6 +717,23 @@ class VoidedFeeRestorationService
             }
         }
 
+        if (Schema::connection($connName)->hasTable('qa_myskool_payment_corrections')) {
+            $corrRows = $db->table('qa_myskool_payment_corrections')
+                ->whereIn('qa_staged_collection_id', $targetIds)
+                ->orderBy('sequence_no')
+                ->orderBy('id')
+                ->get(['qa_staged_collection_id', 'resulting_status']);
+            $latestByCol = [];
+            foreach ($corrRows as $cr) {
+                $latestByCol[(int) $cr->qa_staged_collection_id] = (string) $cr->resulting_status;
+            }
+            foreach ($latestByCol as $status) {
+                if (in_array($status, ['reversed', 'disputed', 'under_review', 'corrected'], true)) {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 }

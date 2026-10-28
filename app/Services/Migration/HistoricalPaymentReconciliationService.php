@@ -153,10 +153,7 @@ class HistoricalPaymentReconciliationService
         $preview = $this->preview($options, $cutoffDate, $batchId, $conn);
         $records = $preview['records'];
 
-        $allowedClasses = $options['classes'] ?? [
-            MySkoolReconciliationAuditService::GUARD_CANDIDATE_FULL_SETTLEMENT,
-            MySkoolReconciliationAuditService::CLASS_POST_CUTOFF_FULL,
-        ];
+        $allowedClasses = $this->resolveAllowedApplyClasses($options);
 
         $appliedSettlements = [];
         $skippedHolds = [];
@@ -613,17 +610,23 @@ class HistoricalPaymentReconciliationService
                 'updated_at' => now(),
             ]);
 
-            // Revert subsequent snapshots if tracked
+            // Revert subsequent snapshots if tracked (using delta so out-of-order sibling reversals remain exact)
             if (!empty($settlement->affected_snapshots_json)) {
                 $snapshots = json_decode((string) $settlement->affected_snapshots_json, true) ?: [];
                 foreach ($snapshots as $snap) {
                     if (!empty($snap['invoice_id']) && isset($snap['before_snapshot_minor'])) {
-                        $db->table('invoices')
-                            ->where('id', $snap['invoice_id'])
-                            ->update([
-                                'previous_dues_snapshot_minor' => (int) $snap['before_snapshot_minor'],
-                                'updated_at' => now(),
-                            ]);
+                        $subInv = $db->table('invoices')->where('id', (int) $snap['invoice_id'])->lockForUpdate()->first();
+                        if ($subInv) {
+                            $delta = isset($snap['after_snapshot_minor'])
+                                ? max(0, (int) $snap['before_snapshot_minor'] - (int) $snap['after_snapshot_minor'])
+                                : (int) $settlement->settled_amount_minor;
+                            $db->table('invoices')
+                                ->where('id', (int) $snap['invoice_id'])
+                                ->update([
+                                    'previous_dues_snapshot_minor' => (int) $subInv->previous_dues_snapshot_minor + $delta,
+                                    'updated_at' => now(),
+                                ]);
+                        }
                     }
                 }
             }
@@ -750,14 +753,19 @@ class HistoricalPaymentReconciliationService
             $paymentsTableUntouched = ($portalAllocationsOnHistorical === 0);
         }
 
-        // Invariant 3: Item status consistency (paid iff paid_minor >= net_minor)
-        $inconsistentItems = $db->table('invoice_items')
+        // Invariant 3: Item status consistency for historical settlements (paid iff paid_minor >= net_minor)
+        $inconsistentItems = $db->table('invoice_items as ii')
             ->where(function ($q) {
-                $q->where('status', 'paid')->whereColumn('paid_minor', '<', 'net_minor')
+                $q->where('ii.status', 'paid')->whereColumn('ii.paid_minor', '<', 'ii.net_minor')
                     ->orWhere(function ($q2) {
-                        $q2->where('status', '!=', 'paid')
-                            ->whereColumn('paid_minor', '>=', 'net_minor')
-                            ->where('net_minor', '>', 0);
+                        $q2->where('ii.status', '!=', 'paid')
+                            ->whereColumn('ii.paid_minor', '>=', 'ii.net_minor')
+                            ->where('ii.net_minor', '>', 0)
+                            ->whereNotExists(function ($sub) {
+                                $sub->select(DB::raw(1))
+                                    ->from('payment_allocations as pa')
+                                    ->whereColumn('pa.invoice_item_id', 'ii.id');
+                            });
                     });
             })
             ->count();
@@ -844,17 +852,55 @@ class HistoricalPaymentReconciliationService
             }
 
             if (!empty($filters['class'])) {
-                $targetClass = trim((string) $filters['class']);
+                $targetClasses = is_array($filters['class'])
+                    ? array_values(array_filter(array_map('trim', $filters['class'])))
+                    : array_values(array_filter(array_map('trim', explode(',', (string) $filters['class']))));
                 $recordClass = trim((string) $r['reconciliation_classification']);
                 $guardClass = trim((string) ($r['guard_class'] ?? ''));
 
-                if (strcasecmp($recordClass, $targetClass) !== 0 && strcasecmp($guardClass, $targetClass) !== 0) {
+                $matchedClass = false;
+                foreach ($targetClasses as $tc) {
+                    if (strcasecmp($recordClass, $tc) === 0 || strcasecmp($guardClass, $tc) === 0) {
+                        $matchedClass = true;
+                        break;
+                    }
+                }
+                if (!$matchedClass) {
                     return false;
                 }
             }
 
             return true;
         }));
+    }
+
+    /**
+     * Resolve allowed reconciliation classes for apply().
+     * By default, applies verified post-cutoff cash settlements (full settlements, partial cash payments,
+     * and the verified cash portion of sibling-concession review items while keeping any unpaid concession
+     * remainder open on the ledger). Pre-cutoff residuals, currency conflicts, duplicate source holds,
+     * overpayments, and live-activity holds are never auto-applied.
+     */
+    protected function resolveAllowedApplyClasses(array $options): array
+    {
+        if (!empty($options['classes']) && is_array($options['classes'])) {
+            return array_values(array_filter(array_map('trim', $options['classes'])));
+        }
+
+        if (!empty($options['class'])) {
+            return is_array($options['class'])
+                ? array_values(array_filter(array_map('trim', $options['class'])))
+                : array_values(array_filter(array_map('trim', explode(',', (string) $options['class']))));
+        }
+
+        return [
+            MySkoolReconciliationAuditService::GUARD_CANDIDATE_FULL_SETTLEMENT,
+            MySkoolReconciliationAuditService::CLASS_POST_CUTOFF_FULL,
+            MySkoolReconciliationAuditService::GUARD_CANDIDATE_PARTIAL_SETTLEMENT,
+            MySkoolReconciliationAuditService::CLASS_POST_CUTOFF_PARTIAL,
+            MySkoolReconciliationAuditService::GUARD_CONCESSION_REVIEW,
+            MySkoolReconciliationAuditService::CLASS_POST_CUTOFF_CONCESSION,
+        ];
     }
 
     /**
@@ -893,6 +939,23 @@ class HistoricalPaymentReconciliationService
             }
             foreach ($decoded as $consumedId) {
                 if (isset($targetSet[(int) $consumedId])) {
+                    return true;
+                }
+            }
+        }
+
+        if ($db->getSchemaBuilder()->hasTable('qa_myskool_payment_corrections')) {
+            $corrRows = $db->table('qa_myskool_payment_corrections')
+                ->whereIn('qa_staged_collection_id', $targetIds)
+                ->orderBy('sequence_no')
+                ->orderBy('id')
+                ->get(['qa_staged_collection_id', 'resulting_status']);
+            $latestByCol = [];
+            foreach ($corrRows as $cr) {
+                $latestByCol[(int) $cr->qa_staged_collection_id] = (string) $cr->resulting_status;
+            }
+            foreach ($latestByCol as $status) {
+                if (in_array($status, ['reversed', 'disputed', 'under_review', 'corrected'], true)) {
                     return true;
                 }
             }

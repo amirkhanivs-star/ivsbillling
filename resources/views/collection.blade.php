@@ -448,6 +448,25 @@
                                             @endif
                                         </div>
                                     @endif
+                                    @if((int)$item->paid_minor > 0)
+                                        <div style="margin-top: 3px;">
+                                            <span class="ms-pill-lavender" style="color: #0369a1; background: #e0f2fe; font-size: 10px; font-weight: 600;" title="Paid: {{ $item->currency }} {{ number_format($item->paid_minor / 100, 2) }} of {{ $item->currency }} {{ number_format($item->net_minor / 100, 2) }}">
+                                                Paid: {{ $item->currency }} {{ number_format($item->paid_minor / 100, 0) }} / {{ number_format($item->net_minor / 100, 0) }}
+                                            </span>
+                                            @if(!empty($item->historical_settlement) && ($item->historical_settlement->guard_class ?? '') === 'CONCESSION_REVIEW')
+                                                <div style="font-size: 9px; color: #b45309; background: #fef3c7; padding: 1px 5px; border-radius: 4px; margin-top: 2px; display: inline-block; font-weight: 600;" title="{{ $item->historical_settlement->myskool_slip_numbers }} — Remaining {{ $item->currency }} {{ number_format($balanceMinor / 100, 2) }} held for concession review">
+                                                    Concession Review ({{ $item->currency }} {{ $balanceFmt }})
+                                                </div>
+                                            @endif
+                                        </div>
+                                    @endif
+                                    @if(!empty($item->currency_conflict_hold))
+                                        <div style="margin-top: 3px;">
+                                            <span style="font-size: 9px; color: #b91c1c; background: #fee2e2; padding: 2px 6px; border-radius: 4px; display: inline-block; font-weight: 600;" title="Held for manual review: MySkool Slip #{{ $item->currency_conflict_hold->slip_number }} recorded in {{ $item->currency_conflict_hold->currency }} {{ number_format($item->currency_conflict_hold->amount_minor / 100, 2) }} against {{ $item->currency }} {{ number_format($item->net_minor / 100, 2) }} obligation">
+                                                ⚠ Currency Review (Slip #{{ $item->currency_conflict_hold->slip_number }}: {{ $item->currency_conflict_hold->currency }} {{ number_format($item->currency_conflict_hold->amount_minor / 100, 0) }})
+                                            </span>
+                                        </div>
+                                    @endif
                                 </td>
                                 <td>
                                     <span class="ms-pill-lavender">
@@ -644,7 +663,7 @@
                         </thead>
                         <tbody>
                             @forelse($feeHistory as $receipt)
-                                <tr style="{{ $receipt->is_reversed ? 'opacity: 0.6; background: #fff5f5;' : '' }}">
+                                <tr style="{{ $receipt->is_reversed ? 'opacity: 0.65; background: #fff5f5;' : (($receipt->correction_status ?? '') === 'partially_reversed' ? 'background: #fffbeb;' : '') }}">
                                     <td class="col-slip">
                                         <div class="ms-history-slip-cell">
                                             <span class="ms-pill-lavender" style="font-weight: 700; cursor: pointer;" onclick='showReceiptDetails(@json($receipt->details_payload))' title="Click to view complete itemized breakdown">
@@ -657,6 +676,19 @@
                                             @endif
                                             @if($receipt->is_reversed)
                                                 <span class="ms-source-badge reversed">REVERSED</span>
+                                            @elseif(!empty($receipt->correction_badge))
+                                                @php
+                                                    $cStatus = (string) ($receipt->correction_status ?? '');
+                                                    $badgeStyle = match ($cStatus) {
+                                                        'partially_reversed' => 'background: #fef3c7; color: #92400e; border: 1px solid #fde68a;',
+                                                        'disputed' => 'background: #fee2e2; color: #991b1b; border: 1px solid #fecaca;',
+                                                        'corrected' => 'background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe;',
+                                                        'under_review' => 'background: #ffedd5; color: #9a3412; border: 1px solid #fed7aa;',
+                                                        'reconciled' => 'background: #dcfce7; color: #166534; border: 1px solid #bbf7d0;',
+                                                        default => 'background: #f1f5f9; color: #475569;',
+                                                    };
+                                                @endphp
+                                                <span class="ms-source-badge" style="{{ $badgeStyle }}">{{ strtoupper($receipt->correction_badge) }}</span>
                                             @endif
                                         </div>
                                     </td>
@@ -725,6 +757,19 @@
                                                     data-balance="{{ number_format($receipt->amount_minor / 100, 2, '.', '') }}"
                                                     title="Reverse Receipt">
                                                     ✕
+                                                </button>
+                                            @endif
+                                            {{-- Administrator-Only MySkool Review / Correction Action (Task 2) --}}
+                                            @if(!empty($receipt->can_correct_myskool) && $receipt->source === 'myskool' && in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
+                                                <button type="button"
+                                                    class="btn-ms-square-action js-myskool-correct-trigger"
+                                                    onclick="openMySkoolCorrectionModal({{ (int) $receipt->primary_id }})"
+                                                    data-staged-collection-id="{{ (int) $receipt->primary_id }}"
+                                                    data-slip="{{ $receipt->slip_number }}"
+                                                    style="background: #fffbeb; color: #b45309; border: 1px solid #fcd34d;"
+                                                    title="Review / Correct MySkool Payment"
+                                                    aria-label="Review / Correct MySkool Payment">
+                                                    &#8634;
                                                 </button>
                                             @endif
                                         </div>
@@ -2085,8 +2130,18 @@ window.showReceiptDetails = function(payload) {
     if (payload.items && payload.items.length > 0) {
         payload.items.forEach(function(it) {
             var tr = document.createElement('tr');
-            tr.innerHTML = '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><strong>' + (it.student_name || '—') + '</strong><br><small style="color:#64748b;">GR: ' + (it.gr_number || '—') + '</small></td>' +
-                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;">' + (it.fee_particular || 'Monthly Fee') + '</td>' +
+            var statusTag = '';
+            if (it.correction_status && it.correction_status !== 'historical') {
+                statusTag = ' <span class="ms-pill-lavender" style="font-size:9px;margin-left:4px;">' + String(it.correction_status).toUpperCase() + '</span>';
+            }
+            var adminBtn = '';
+            @if(in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
+            if (payload.is_historical && window.IQRA_IS_ADMIN && it.id) {
+                adminBtn = '<div style="margin-top:4px;"><button type="button" onclick="document.getElementById(\'receipt-details-dialog\').close(); openMySkoolCorrectionModal(' + Number(it.id) + ');" style="background:#fffbeb;color:#b45309;border:1px solid #fcd34d;border-radius:4px;padding:2px 7px;font-size:10px;font-weight:600;cursor:pointer;" title="Review / Correct MySkool Payment">&#8634; Review / Correct Row #' + Number(it.id) + '</button></div>';
+            }
+            @endif
+            tr.innerHTML = '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><strong>' + (it.student_name || '—') + '</strong><br><small style="color:#64748b;">GR: ' + (it.gr_number || '—') + '</small>' + adminBtn + '</td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;">' + (it.fee_particular || 'Monthly Fee') + statusTag + '</td>' +
                 '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><span class="ms-pill-lavender">' + (it.period || '—') + '</span></td>' +
                 '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:700;">' + (it.currency ? it.currency + ' ' : '') + it.amount + '</td>';
             tbody.appendChild(tr);
@@ -2106,5 +2161,470 @@ window.showReceiptDetails = function(payload) {
     document.getElementById('receipt-details-dialog').showModal();
 };
 </script>
+
+@if(in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
+{{-- ADMINISTRATOR-ONLY MYSKOOL PAYMENT INSPECTION & CORRECTION MODAL (TASK 2 - 5) --}}
+<dialog id="myskool-payment-correction-dialog" style="border:none;border-radius:8px;box-shadow:0 16px 48px rgba(0,0,0,0.35);padding:0;max-width:780px;width:96%;margin:auto;font-family:inherit;">
+    <div style="background:#4b3f72;color:#fff;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;border-top-left-radius:8px;border-top-right-radius:8px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:18px;">&#8634;</span>
+            <div>
+                <div style="font-weight:700;font-size:15px;">Review / Correct MySkool Payment — Slip #<span id="mpc-header-slip">—</span></div>
+                <div style="font-size:11px;color:#e2e8f0;">Read-Only Forensic Inspection &amp; Authorized Accounting Correction Facility</div>
+            </div>
+        </div>
+        <button type="button" onclick="document.getElementById('myskool-payment-correction-dialog').close()" style="background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;">&times;</button>
+    </div>
+
+    <div style="padding:18px 20px;font-size:12px;color:#334155;max-height:82vh;overflow-y:auto;">
+        <div id="mpc-loading" style="display:none;padding:30px;text-align:center;color:#64748b;font-size:13px;">
+            Loading MySkool source collection forensics and reconciliation lineage...
+        </div>
+
+        <div id="mpc-body">
+            {{-- Shared-Slip Sibling Allocation Selector (Case C) --}}
+            <div id="mpc-shared-slip-box" style="display:none;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px;margin-bottom:14px;">
+                <div style="font-weight:700;color:#92400e;font-size:12px;margin-bottom:6px;">
+                    Shared MySkool Slip Detected — Select Individual Source Collection Allocation:
+                </div>
+                <div style="font-size:11px;color:#78350f;margin-bottom:8px;">
+                    Correcting or reversing a selected student row affects <strong>only</strong> that specific source collection row and preserves all sibling allocations on this slip intact.
+                </div>
+                <div id="mpc-shared-slip-list" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+            </div>
+
+            {{-- Safety & Reversibility Banner --}}
+            <div id="mpc-safety-banner" style="border-radius:6px;padding:10px 12px;margin-bottom:14px;border:1px solid #cbd5e1;background:#f8fafc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <strong id="mpc-safety-title" style="font-size:12px;">Reversal Safety Check</strong>
+                    <span id="mpc-case-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:#e2e8f0;color:#334155;font-weight:700;">—</span>
+                </div>
+                <div id="mpc-safety-text" style="margin-top:4px;font-size:11px;line-height:1.4;">—</div>
+            </div>
+
+            {{-- 14 Required Forensic Inspection Fields Grid --}}
+            <div style="font-weight:700;color:#1e293b;margin-bottom:6px;font-size:12px;">1. Source Collection &amp; Reconciliation Inspection (Read-Only)</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px;margin-bottom:14px;">
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Original MySkool Slip #</small>
+                    <strong id="mpc-f-slip">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Imported Collection Row ID</small>
+                    <strong id="mpc-f-col-id">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Student Name &amp; GR</small>
+                    <strong id="mpc-f-student">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Family Code</small>
+                    <strong id="mpc-f-family">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Fee Type &amp; Billing Period</small>
+                    <strong id="mpc-f-fee-period">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Currency</small>
+                    <strong id="mpc-f-currency">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Original Receipt Amount</small>
+                    <strong id="mpc-f-amount" style="color:#7367f0;">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Historical Payment Date</small>
+                    <strong id="mpc-f-date">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Reconciled to IQRA Invoice?</small>
+                    <strong id="mpc-f-reconciled">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Invoice &amp; Item Reference</small>
+                    <strong id="mpc-f-invoice">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Current Item / Invoice Balance</small>
+                    <strong id="mpc-f-balance">—</strong>
+                </div>
+                <div>
+                    <small style="color:#64748b;display:block;font-size:10px;">Current Receipt Status</small>
+                    <strong id="mpc-f-status">—</strong>
+                </div>
+            </div>
+
+            {{-- Existing Adjustments & Correction History --}}
+            <div style="font-weight:700;color:#1e293b;margin-bottom:6px;font-size:12px;">2. Existing Adjustments, Settlements &amp; Correction Audit Trail</div>
+            <div id="mpc-history-box" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:11px;max-height:130px;overflow-y:auto;">
+                No prior manual corrections recorded.
+            </div>
+
+            {{-- Proposed Before / After Financial Impact Preview --}}
+            <div style="font-weight:700;color:#1e293b;margin-bottom:6px;font-size:12px;">
+                3. Proposed Financial Impact Preview (<span id="mpc-preview-action-name">Default Action</span>)
+            </div>
+            <table style="width:100%;border-collapse:collapse;font-size:11px;border:1px solid #e2e8f0;margin-bottom:14px;">
+                <thead>
+                    <tr style="background:#f1f5f9;color:#334155;text-align:left;">
+                        <th style="padding:7px 10px;border-bottom:1px solid #e2e8f0;">Accounting Dimension</th>
+                        <th style="padding:7px 10px;border-bottom:1px solid #e2e8f0;">Before Correction</th>
+                        <th style="padding:7px 10px;border-bottom:1px solid #e2e8f0;">After Proposed Correction</th>
+                    </tr>
+                </thead>
+                <tbody id="mpc-impact-tbody"></tbody>
+            </table>
+
+            {{-- Stage 1 -> Stage 2 Gate Button (Inspection stage is strictly read-only by default) --}}
+            <div id="mpc-stage1-controls" style="display:flex;justify-content:space-between;align-items:center;padding-top:10px;border-top:1px solid #e2e8f0;">
+                <span style="font-size:11px;color:#64748b;">Inspection Mode is strictly read-only. Source <code>qa_staged_collections</code> row is permanently preserved.</span>
+                <div style="display:flex;gap:8px;">
+                    <button type="button" id="mpc-btn-unlock-form" onclick="unlockMySkoolCorrectionForm()" style="background:#7367f0;color:#fff;border:none;padding:7px 14px;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">
+                        Proceed to Authorized Correction / Action &rarr;
+                    </button>
+                    <button type="button" onclick="document.getElementById('myskool-payment-correction-dialog').close()" style="background:#f1f5f9;border:1px solid #cbd5e1;padding:7px 14px;border-radius:4px;font-size:12px;font-weight:600;color:#475569;cursor:pointer;">
+                        Close
+                    </button>
+                </div>
+            </div>
+
+            {{-- Stage 2: Authorized Correction Execution Form --}}
+            <form id="mpc-correction-form" method="post" action="{{ route('challan.correct_myskool_payment') }}" style="display:none;background:#faf9ff;border:1px solid #dcd7fa;border-radius:6px;padding:14px;margin-top:10px;">
+                @csrf
+                <input type="hidden" name="qa_staged_collection_id" id="mpc-input-col-id">
+
+                <div style="font-weight:700;color:#4b3f72;margin-bottom:10px;font-size:13px;">
+                    Authorized Financial Administrator Correction Form
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+                    <div>
+                        <label style="display:block;font-weight:600;margin-bottom:4px;font-size:11px;">Correction / Review Action *</label>
+                        <select name="action_type" id="mpc-input-action" class="myskool-input" style="width:100%;" onchange="updateMySkoolImpactTable()"></select>
+                    </div>
+                    <div>
+                        <label style="display:block;font-weight:600;margin-bottom:4px;font-size:11px;">Target Source Collection Row</label>
+                        <input type="text" id="mpc-input-row-readonly" class="myskool-input disabled" readonly style="width:100%;">
+                    </div>
+                </div>
+
+                {{-- Optional Reassignment Fields (Case D) --}}
+                <div id="mpc-reassignment-fields" style="display:none;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px;background:#fff;padding:10px;border:1px solid #e2e8f0;border-radius:4px;">
+                    <div>
+                        <label style="display:block;font-weight:600;margin-bottom:3px;font-size:10px;">Proposed Student GR #</label>
+                        <input type="text" name="proposed_student_gr" id="mpc-input-prop-gr" class="myskool-input" placeholder="e.g. 5930" style="width:100%;">
+                    </div>
+                    <div>
+                        <label style="display:block;font-weight:600;margin-bottom:3px;font-size:10px;">Proposed Period (YYYY-MM)</label>
+                        <input type="text" name="proposed_period_key" id="mpc-input-prop-period" class="myskool-input" placeholder="e.g. 2026-10" style="width:100%;">
+                    </div>
+                    <div>
+                        <label style="display:block;font-weight:600;margin-bottom:3px;font-size:10px;">Proposed Fee Particular</label>
+                        <input type="text" name="proposed_fee_type" id="mpc-input-prop-fee" class="myskool-input" placeholder="e.g. Monthly Fee" style="width:100%;">
+                    </div>
+                </div>
+
+                {{-- Optional Pre-Cutoff Compensation Proposal Field (Case B) --}}
+                <div id="mpc-compensation-fields" style="display:none;margin-bottom:10px;background:#fff;padding:10px;border:1px solid #e2e8f0;border-radius:4px;">
+                    <label style="display:block;font-weight:600;margin-bottom:3px;font-size:10px;">Proposed Pre-Cutoff Compensating Obligation Adjustment (Minor Units)</label>
+                    <input type="number" name="proposed_compensation_minor" id="mpc-input-prop-comp" class="myskool-input" min="0" step="1" placeholder="e.g. 28000" style="width:240px;">
+                    <small style="display:block;color:#64748b;font-size:10px;margin-top:3px;">Logs the proposed compensating adjustment for pre-cutoff snapshot verification without blindly mutating <code>invoice_items.paid_minor</code>.</small>
+                </div>
+
+                <div style="margin-bottom:10px;">
+                    <label style="display:block;font-weight:600;margin-bottom:4px;font-size:11px;">Mandatory Audit Reason &amp; Evidence Justification *</label>
+                    <textarea name="reason" id="mpc-input-reason" class="myskool-input" rows="3" required minlength="5" placeholder="Enter detailed accounting reason and verification reference (minimum 5 characters)..." style="width:100%;height:65px;resize:vertical;"></textarea>
+                </div>
+
+                <label style="display:flex;align-items:flex-start;gap:6px;font-size:11px;color:#334155;margin-bottom:12px;cursor:pointer;">
+                    <input type="checkbox" id="mpc-input-confirm" required style="margin-top:2px;">
+                    <span>I confirm that I have verified the before/after accounting impact and understand that this action will be permanently recorded in the immutable audit trail while preserving <code>qa_staged_collections</code> unchanged.</span>
+                </label>
+
+                <div style="display:flex;justify-content:flex-end;gap:8px;">
+                    <button type="button" onclick="lockMySkoolCorrectionForm()" style="background:#f1f5f9;border:1px solid #cbd5e1;padding:7px 14px;border-radius:4px;font-size:12px;font-weight:600;color:#475569;cursor:pointer;">
+                        &larr; Back to Read-Only Inspection
+                    </button>
+                    <button type="submit" id="mpc-btn-submit" style="background:#dc2626;color:#fff;border:none;padding:7px 16px;border-radius:4px;font-size:12px;font-weight:700;cursor:pointer;">
+                        Execute Authorized Correction
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</dialog>
+
+<script>
+(() => {
+    let currentMySkoolInspection = null;
+
+    const actionLabels = {
+        reverse_settlement: 'Reverse Reconciled MySkool Settlement (Restore Unpaid Invoice Balance)',
+        reapply_settlement: 'Reapply Reversed Historical Settlement',
+        mark_under_review: 'Place Under Finance Review (Audit Hold)',
+        mark_disputed: 'Mark Receipt Disputed (Block Auto-Application)',
+        mark_corrected: 'Mark Receipt Corrected (Audit Notation)',
+        propose_reassignment: 'Propose Reassignment (Student / Period / Fee Type)',
+        propose_pre_cutoff_compensation: 'Log Pre-Cutoff Snapshot Compensation Review'
+    };
+
+    window.openMySkoolCorrectionModal = async function(stagedCollectionId) {
+        const dialog = document.getElementById('myskool-payment-correction-dialog');
+        const loading = document.getElementById('mpc-loading');
+        const body = document.getElementById('mpc-body');
+        if (!dialog) return;
+
+        lockMySkoolCorrectionForm();
+        loading.style.display = 'block';
+        body.style.display = 'none';
+        if (!dialog.open) {
+            dialog.showModal();
+        }
+
+        try {
+            const resp = await fetch('/challan/inspect-myskool-payment/' + encodeURIComponent(stagedCollectionId), {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+            const data = await resp.json();
+            if (!resp.ok || !data.exists) {
+                window.alertNotice(data.error || 'Unable to inspect MySkool payment record.', 'error');
+                dialog.close();
+                return;
+            }
+            currentMySkoolInspection = data;
+            renderMySkoolInspection(data);
+            loading.style.display = 'none';
+            body.style.display = 'block';
+        } catch (err) {
+            window.alertNotice('Network error while inspecting MySkool payment.', 'error');
+            dialog.close();
+        }
+    };
+
+    function renderMySkoolInspection(data) {
+        const curr = data.currency || 'SAR';
+        document.getElementById('mpc-header-slip').textContent = data.slip_number || '—';
+        document.getElementById('mpc-f-slip').textContent = data.slip_number || '—';
+        document.getElementById('mpc-f-col-id').textContent = '#' + data.qa_staged_collection_id + (data.source_row ? ' (Excel Row #' + data.source_row + ')' : '');
+        document.getElementById('mpc-f-student').textContent = (data.student_name || '—') + ' (GR ' + (data.student_gr || '—') + ')';
+        document.getElementById('mpc-f-family').textContent = (data.family_code || '—') + (data.guardian_name ? ' (' + data.guardian_name + ')' : '');
+        document.getElementById('mpc-f-fee-period').textContent = (data.fee_particular || '—') + ' [' + (data.period_key || 'N/A') + ']';
+        document.getElementById('mpc-f-currency').innerHTML = data.has_currency_conflict
+            ? '<span style="color:#dc2626;font-weight:700;">' + curr + ' (CONFLICT vs ' + (data.student_expected_currency || '—') + ')</span>'
+            : curr;
+        document.getElementById('mpc-f-amount').textContent = curr + ' ' + (data.amount_formatted || '0.00');
+        document.getElementById('mpc-f-date').textContent = (data.payment_date_formatted || data.payment_date || '—') + (data.is_pre_cutoff ? ' (Pre-Cutoff <= ' + data.cutoff_date + ')' : ' (Post-Cutoff)');
+        document.getElementById('mpc-f-reconciled').innerHTML = data.is_reconciled
+            ? '<span style="color:#166534;font-weight:700;">Yes — ' + (data.reconciliation_id || 'Applied') + '</span>'
+            : '<span style="color:#9a3412;">No (' + (data.settlement_status || 'Unreconciled') + ')</span>';
+        document.getElementById('mpc-f-invoice').textContent = data.invoice_number
+            ? (data.invoice_number + ' (Item #' + data.invoice_item_id + ')')
+            : 'No Linked Invoice Item';
+        document.getElementById('mpc-f-balance').textContent = data.invoice_item_id
+            ? ('Item: ' + curr + ' ' + data.item_balance_formatted + ' | Inv: ' + curr + ' ' + data.invoice_balance_formatted)
+            : ('Student Due: ' + (data.student_expected_currency || curr) + ' ' + data.student_total_outstanding_formatted);
+        document.getElementById('mpc-f-status').textContent = data.current_status_label || '—';
+
+        // Shared slip allocations (Case C)
+        const sharedBox = document.getElementById('mpc-shared-slip-box');
+        const sharedList = document.getElementById('mpc-shared-slip-list');
+        sharedList.innerHTML = '';
+        if (data.is_shared_slip && Array.isArray(data.shared_slip_allocations) && data.shared_slip_allocations.length > 1) {
+            sharedBox.style.display = 'block';
+            data.shared_slip_allocations.forEach(alloc => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                const active = Boolean(alloc.is_current_row);
+                btn.style.cssText = active
+                    ? 'background:#4b3f72;color:#fff;border:1px solid #4b3f72;border-radius:4px;padding:5px 10px;font-size:11px;font-weight:700;cursor:default;'
+                    : 'background:#fff;color:#334155;border:1px solid #cbd5e1;border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;';
+                const stTag = alloc.correction_status
+                    ? alloc.correction_status.toUpperCase()
+                    : (alloc.settlement_status ? alloc.settlement_status.toUpperCase() : 'HISTORICAL');
+                btn.textContent = (active ? '✓ ' : '') + 'Row #' + alloc.qa_staged_collection_id + ': ' + alloc.student_name + ' (GR ' + alloc.student_gr + ') — ' + alloc.currency + ' ' + alloc.amount_formatted + ' [' + stTag + ']';
+                if (!active) {
+                    btn.onclick = () => window.openMySkoolCorrectionModal(alloc.qa_staged_collection_id);
+                }
+                sharedList.appendChild(btn);
+            });
+        } else {
+            sharedBox.style.display = 'none';
+        }
+
+        // Safety banner
+        const banner = document.getElementById('mpc-safety-banner');
+        const safetyTitle = document.getElementById('mpc-safety-title');
+        const safetyText = document.getElementById('mpc-safety-text');
+        const caseBadge = document.getElementById('mpc-case-badge');
+        caseBadge.textContent = data.case_classification || '—';
+
+        if (data.is_safe_to_reverse) {
+            banner.style.background = '#f0fdf4';
+            banner.style.borderColor = '#bbf7d0';
+            safetyTitle.style.color = '#166534';
+            safetyTitle.textContent = '✓ SAFE TO REVERSE RECONCILED SETTLEMENT';
+        } else if (data.is_safe_to_reapply) {
+            banner.style.background = '#eff6ff';
+            banner.style.borderColor = '#bfdbfe';
+            safetyTitle.style.color = '#1e40af';
+            safetyTitle.textContent = '↺ REVERSED SETTLEMENT — SAFE TO REAPPLY OR UPDATE AUDIT STATUS';
+        } else {
+            banner.style.background = '#fff7ed';
+            banner.style.borderColor = '#fed7aa';
+            safetyTitle.style.color = '#9a3412';
+            safetyTitle.textContent = '⚠ DIRECT SETTLEMENT REVERSAL BLOCKED (' + (data.safety_status || 'MANUAL REVIEW') + ')';
+        }
+        safetyText.textContent = data.safety_explanation || '';
+
+        // Existing adjustments & correction audit trail
+        const histBox = document.getElementById('mpc-history-box');
+        const lines = [];
+        if (Array.isArray(data.settlement_history) && data.settlement_history.length > 0) {
+            data.settlement_history.forEach(sh => {
+                lines.push('<div><strong>Settlement ' + sh.reconciliation_id + '</strong>: ' + curr + ' ' + sh.settled_amount_formatted + ' on Item #' + sh.invoice_item_id + ' — Status: <b>' + String(sh.status).toUpperCase() + '</b> (' + sh.guard_class + ')</div>');
+            });
+        }
+        if (Array.isArray(data.fee_adjustments) && data.fee_adjustments.length > 0) {
+            data.fee_adjustments.forEach(fa => {
+                lines.push('<div><strong>Fee Adjustment #' + fa.id + ' (' + fa.kind + ')</strong>: ' + curr + ' ' + fa.amount_formatted + ' — ' + (fa.reason || '') + '</div>');
+            });
+        }
+        if (Array.isArray(data.correction_history) && data.correction_history.length > 0) {
+            data.correction_history.forEach(ch => {
+                lines.push('<div style="margin-top:4px;padding-top:4px;border-top:1px dashed #cbd5e1;"><strong>Audit #' + ch.sequence_no + ' (' + ch.correction_id + ')</strong> [' + ch.action_type + ' &rarr; <b>' + String(ch.resulting_status).toUpperCase() + '</b>] by ' + ch.actor_name + ' on ' + ch.acted_at + '<br><span style="color:#475569;">Reason: ' + ch.reason + '</span></div>');
+            });
+        }
+        histBox.innerHTML = lines.length > 0 ? lines.join('') : 'No prior settlements, adjustments, or manual corrections recorded for this row.';
+
+        // Populate form action select
+        const actionSelect = document.getElementById('mpc-input-action');
+        actionSelect.innerHTML = '';
+        const avail = Array.isArray(data.available_actions) && data.available_actions.length > 0
+            ? data.available_actions
+            : ['mark_under_review'];
+        avail.forEach(act => {
+            const opt = document.createElement('option');
+            opt.value = act;
+            opt.textContent = actionLabels[act] || act;
+            actionSelect.appendChild(opt);
+        });
+
+        document.getElementById('mpc-input-col-id').value = data.qa_staged_collection_id;
+        document.getElementById('mpc-input-row-readonly').value = 'Row #' + data.qa_staged_collection_id + ' — GR ' + data.student_gr + ' (' + curr + ' ' + data.amount_formatted + ')';
+        document.getElementById('mpc-input-reason').value = '';
+        document.getElementById('mpc-input-confirm').checked = false;
+
+        updateMySkoolImpactTable();
+    }
+
+    window.updateMySkoolImpactTable = function() {
+        if (!currentMySkoolInspection) return;
+        const data = currentMySkoolInspection;
+        const curr = data.currency || 'SAR';
+        const actionSelect = document.getElementById('mpc-input-action');
+        const selectedAction = (actionSelect && actionSelect.value)
+            ? actionSelect.value
+            : (data.is_safe_to_reverse ? 'reverse_settlement' : (data.is_safe_to_reapply ? 'reapply_settlement' : (data.available_actions?.[0] || 'mark_under_review')));
+
+        const effects = data.proposed_effects || {};
+        const eff = effects[selectedAction] || effects.reverse_settlement || {};
+        const before = eff.before || {};
+        const after = eff.after || {};
+
+        document.getElementById('mpc-preview-action-name').textContent = eff.action_label || selectedAction;
+
+        const reassignBox = document.getElementById('mpc-reassignment-fields');
+        const compBox = document.getElementById('mpc-compensation-fields');
+        if (reassignBox) {
+            reassignBox.style.display = (selectedAction === 'propose_reassignment') ? 'grid' : 'none';
+        }
+        if (compBox) {
+            compBox.style.display = (selectedAction === 'propose_pre_cutoff_compensation') ? 'block' : 'none';
+        }
+
+        const tbody = document.getElementById('mpc-impact-tbody');
+        tbody.innerHTML = [
+            ['Receipt / Allocation Status', before.receipt_status || '—', '<b>' + (after.receipt_status || '—') + '</b>'],
+            ['Invoice Item Paid (' + (data.invoice_item_id ? '#' + data.invoice_item_id : 'N/A') + ')', curr + ' ' + (before.item_paid_formatted || '0.00'), '<b>' + curr + ' ' + (after.item_paid_formatted || '0.00') + '</b>'],
+            ['Invoice Item Outstanding Balance', curr + ' ' + (before.item_balance_formatted || '0.00'), '<b style="color:#b45309;">' + curr + ' ' + (after.item_balance_formatted || '0.00') + '</b>'],
+            ['Invoice Item Status', before.item_status || 'N/A', '<b>' + (after.item_status || 'N/A') + '</b>'],
+            ['Parent Invoice Paid (' + (data.invoice_number || 'N/A') + ')', curr + ' ' + (before.invoice_paid_formatted || '0.00'), '<b>' + curr + ' ' + (after.invoice_paid_formatted || '0.00') + '</b>'],
+            ['Parent Invoice Outstanding Balance', curr + ' ' + (before.invoice_balance_formatted || '0.00'), '<b style="color:#b45309;">' + curr + ' ' + (after.invoice_balance_formatted || '0.00') + '</b>'],
+            ['Parent Invoice Status', before.invoice_status || 'N/A', '<b>' + (after.invoice_status || 'N/A') + '</b>'],
+            ['Imported Source Row (qa_staged_collections)', 'Row #' + data.qa_staged_collection_id + ' (' + curr + ' ' + data.amount_formatted + ')', '<span style="color:#166534;font-weight:600;">Preserved 100% Unchanged</span>'],
+            ['Sibling Allocations &amp; Portal Cashier Totals', 'Protected', '<span style="color:#166534;font-weight:600;">0.00 Mutation (Protected)</span>']
+        ].map(r => '<tr><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;">' + r[0] + '</td><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;">' + r[1] + '</td><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;">' + r[2] + '</td></tr>').join('');
+    };
+
+    window.unlockMySkoolCorrectionForm = function() {
+        const s1 = document.getElementById('mpc-stage1-controls');
+        const form = document.getElementById('mpc-correction-form');
+        if (s1) s1.style.display = 'none';
+        if (form) form.style.display = 'block';
+        updateMySkoolImpactTable();
+    };
+
+    window.lockMySkoolCorrectionForm = function() {
+        const s1 = document.getElementById('mpc-stage1-controls');
+        const form = document.getElementById('mpc-correction-form');
+        if (s1) s1.style.display = 'flex';
+        if (form) form.style.display = 'none';
+    };
+
+    const formEl = document.getElementById('mpc-correction-form');
+    if (formEl) {
+        formEl.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const submitBtn = document.getElementById('mpc-btn-submit');
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Processing...';
+            }
+
+            try {
+                const fd = new FormData(formEl);
+                const resp = await fetch(formEl.action, {
+                    method: 'POST',
+                    body: fd,
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+                const res = await resp.json();
+                if (resp.ok && res.success) {
+                    window.alertNotice(res.notice || 'MySkool payment correction recorded.');
+                    document.getElementById('myskool-payment-correction-dialog').close();
+                    setTimeout(() => location.reload(), 700);
+                } else {
+                    let msg = res.message || 'Correction blocked by financial safety rules.';
+                    if (res.errors) {
+                        const firstErr = Object.values(res.errors)[0];
+                        if (Array.isArray(firstErr) && firstErr[0]) {
+                            msg = firstErr[0];
+                        }
+                    }
+                    window.alertNotice(msg, 'error');
+                    if (submitBtn) {
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = 'Execute Authorized Correction';
+                    }
+                }
+            } catch (err) {
+                window.alertNotice('Network error while submitting MySkool payment correction.', 'error');
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Execute Authorized Correction';
+                }
+            }
+        });
+    }
+})();
+</script>
+@endif
 
 @endsection

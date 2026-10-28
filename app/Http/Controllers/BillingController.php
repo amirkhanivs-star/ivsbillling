@@ -92,7 +92,7 @@ class BillingController {
    ->select('p.id','p.receipt_number','p.received_on','p.currency','p.status','pa.amount_minor',\Illuminate\Support\Facades\DB::raw("COALESCE(ft.name, ii.description, 'Monthly Fee') as fee_type_name"),'ii.period_start as item_period')
    ->orderByDesc('p.received_on')
    ->limit(100)->get();
-  $activeBatch = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+  $activeBatch = (string) config('imports.active_batch_id', 'BATCH-20261025-FINAL-MYSKOOL');
   $stagedCollections = \Illuminate\Support\Facades\Schema::hasTable('qa_staged_collections')
    ? DB::table('qa_staged_collections')->where('batch_id', $activeBatch)->where('gr_number', $s->gr_number)->orderBy('source_row')->get()
    : collect();
@@ -1054,7 +1054,7 @@ class BillingController {
     'receipts' => $group->values(),
    ]);
 
-  $activeBatch = (string) config('imports.active_batch_id', 'BATCH-20261022-PORTAL-V2-REVISED');
+  $activeBatch = (string) config('imports.active_batch_id', 'BATCH-20261025-FINAL-MYSKOOL');
   $familyGrNumbers = $family ? DB::table('students')->where('family_id', $family->id)->pluck('gr_number')->filter()->all() : [];
   $historicalCollections = (\Illuminate\Support\Facades\Schema::hasTable('qa_staged_collections') && !empty($familyGrNumbers))
    ? DB::table('qa_staged_collections')->where('batch_id', $activeBatch)->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
@@ -1062,6 +1062,35 @@ class BillingController {
   $historicalDues = (\Illuminate\Support\Facades\Schema::hasTable('qa_staged_dues') && !empty($familyGrNumbers))
    ? DB::table('qa_staged_dues')->where('batch_id', $activeBatch)->whereIn('gr_number', $familyGrNumbers)->orderBy('source_row')->get()
    : collect();
+
+  if ($invoiceItems->isNotEmpty()) {
+   $itemIds = $invoiceItems->pluck('id')->all();
+   $historicalSettlementsByItem = \Illuminate\Support\Facades\Schema::hasTable('qa_historical_settlements')
+    ? DB::table('qa_historical_settlements')->whereIn('invoice_item_id', $itemIds)->where('status', 'applied')->get()->keyBy('invoice_item_id')
+    : collect();
+   $histColsByGr = $historicalCollections->groupBy(fn($c) => trim((string) $c->gr_number));
+
+   $invoiceItems = $invoiceItems->map(function ($item) use ($historicalSettlementsByItem, $histColsByGr) {
+    $item->historical_settlement = $historicalSettlementsByItem->get($item->id);
+    $item->currency_conflict_hold = null;
+    if (!$item->historical_settlement && (int) $item->paid_minor < (int) $item->net_minor) {
+     $gr = trim((string) ($item->gr_number ?? ''));
+     $itemDesc = trim((string) ($item->description ?? ''));
+     $itemCurr = strtoupper(trim((string) ($item->currency ?? '')));
+     $studentCols = $histColsByGr->get($gr, collect());
+     $conflictCol = $studentCols->first(function ($c) use ($itemDesc, $itemCurr) {
+      $colPart = trim((string) ($c->fee_particular ?? ''));
+      $colCurr = strtoupper(trim((string) ($c->currency ?? '')));
+      return $colPart !== '' && strcasecmp($colPart, $itemDesc) === 0
+       && ((bool) ($c->has_currency_conflict ?? false) || ($colCurr !== '' && $colCurr !== $itemCurr));
+     });
+     if ($conflictCol) {
+      $item->currency_conflict_hold = $conflictCol;
+     }
+    }
+    return $item;
+   });
+  }
 
   $feeHistoryService = app(\App\Services\FeeHistoryService::class);
   $feeHistory = $family ? $feeHistoryService->getFamilyFeeHistory($family->id, $r->all(), $r->user()) : new \Illuminate\Pagination\LengthAwarePaginator([], 0, 20);
@@ -1823,6 +1852,35 @@ class BillingController {
   return back()->with('notice', $result['message']);
  }
 
+ public function inspectMySkoolPayment(Request $r, int $id, \App\Services\Migration\MySkoolPaymentCorrectionService $svc){
+  abort_unless(in_array($r->user()->role,['super_admin','finance_admin','admin'],true),403,'Unauthorized access. Only Finance Administrators or Super Administrators may inspect or correct historical MySkool payments.');
+  $inspection=$svc->inspect($id);
+  if(empty($inspection['exists'])){
+   return response()->json($inspection,404);
+  }
+  return response()->json($inspection);
+ }
+
+ public function correctMySkoolPayment(Request $r, \App\Services\Migration\MySkoolPaymentCorrectionService $svc){
+  abort_unless(in_array($r->user()->role,['super_admin','finance_admin','admin'],true),403,'Unauthorized access. Only Finance Administrators or Super Administrators may execute historical MySkool payment corrections.');
+  $d=$r->validate([
+   'qa_staged_collection_id'=>'required|integer|exists:qa_staged_collections,id',
+   'action_type'=>'required|string|max:64',
+   'reason'=>'required|string|min:5|max:1000',
+   'proposed_student_gr'=>'nullable|string|max:50',
+   'proposed_period_key'=>'nullable|string|max:64',
+   'proposed_fee_type'=>'nullable|string|max:120',
+   'proposed_compensation_minor'=>'nullable|integer|min:0',
+   'proposed_currency'=>'nullable|string|max:10',
+  ]);
+  $result=$svc->executeCorrection((int)$d['qa_staged_collection_id'],$d,(int)$r->user()->id);
+  $notice="MySkool receipt correction ({$result['correction_id']}) recorded with status '".strtoupper((string)$result['resulting_status'])."'.";
+  if($r->wantsJson()){
+   return response()->json(array_merge(['success'=>true,'notice'=>$notice],$result));
+  }
+  return back()->with('notice',$notice);
+ }
+
  public function reverseReceipt(Request $r,ReceiptReversalService $svc){
   abort_if($r->user()->role==='auditor',403);
   $d=$r->validate([
@@ -1928,16 +1986,16 @@ class BillingController {
   } else {
    $parentDisplay = GuardianNameResolver::forFamilyDisplay($family);
   }
-  $items=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')->where('item.invoice_id',$i->id)->select('item.*','s.name','s.gr_number')->get();
+  $items=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')->where('item.invoice_id',$i->id)->where('item.status','!=','voided')->select('item.*','s.name','s.gr_number')->get();
   $dept=DB::table('departments')->where('id',$i->department_id)->first();
   $branding=DB::table('department_branding')->where('department_id',$i->department_id)->first();
   $currentPeriod=DB::table('billing_runs')->where('id',$i->billing_run_id)->value('period_start');
-  $previous=(int)DB::table('invoices as older')->join('billing_runs as b','b.id','=','older.billing_run_id')->where('older.id','<>',$i->id)->where('older.family_id',$i->family_id)->where('older.department_id',$i->department_id)->where('older.campus_id',$i->campus_id)->where('older.currency',$i->currency)->where('b.period_start','<',$currentPeriod)->selectRaw('COALESCE(SUM(older.total_minor-older.paid_minor),0) as dues')->value('dues');
+  $previous=(int)DB::table('invoices as older')->join('billing_runs as b','b.id','=','older.billing_run_id')->where('older.id','<>',$i->id)->where('older.family_id',$i->family_id)->where('older.department_id',$i->department_id)->where('older.campus_id',$i->campus_id)->where('older.currency',$i->currency)->whereNotIn('older.status',['void','voided'])->where('b.period_start','<',$currentPeriod)->selectRaw('COALESCE(SUM(CASE WHEN older.total_minor > older.paid_minor THEN older.total_minor-older.paid_minor ELSE 0 END),0) as dues')->value('dues');
   $history=[];
   $month=\Carbon\Carbon::parse($currentPeriod)->startOfMonth();
   for($back=6;$back>=1;$back--){
    $d=$month->copy()->subMonths($back);
-   $stats=DB::table('invoice_items as x')->join('invoices as ix','ix.id','=','x.invoice_id')->where('ix.family_id',$i->family_id)->where('ix.department_id',$i->department_id)->where('ix.campus_id',$i->campus_id)->where('ix.currency',$i->currency)->where('x.period_start','>=',$d->toDateString())->where('x.period_start','<',$d->copy()->addMonth()->toDateString())->selectRaw('COALESCE(SUM(x.net_minor),0) AS billed,COALESCE(SUM(x.paid_minor),0) AS paid')->first();
+   $stats=DB::table('invoice_items as x')->join('invoices as ix','ix.id','=','x.invoice_id')->where('ix.family_id',$i->family_id)->where('ix.department_id',$i->department_id)->where('ix.campus_id',$i->campus_id)->where('ix.currency',$i->currency)->where('x.status','!=','voided')->whereNotIn('ix.status',['void','voided'])->where('x.period_start','>=',$d->toDateString())->where('x.period_start','<',$d->copy()->addMonth()->toDateString())->selectRaw('COALESCE(SUM(x.net_minor),0) AS billed,COALESCE(SUM(x.paid_minor),0) AS paid')->first();
    $status=!(int)$stats->billed?'Not billed':((int)$stats->paid>=(int)$stats->billed?'Paid':((int)$stats->paid>0?'Partial':'Unpaid'));
    $history[]=['month'=>$d->format('F'),'status'=>$status];
   }

@@ -27,6 +27,7 @@ class InvoicePayloadBuilder
             ->leftJoin('students as s', 's.id', '=', 'ii.student_id')
             ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
             ->where('ii.invoice_id', $invoice->id)
+            ->where('ii.status', '!=', 'voided')
             ->select(
                 'ii.id as item_id',
                 'ii.student_id',

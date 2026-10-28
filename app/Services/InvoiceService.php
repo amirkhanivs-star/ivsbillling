@@ -188,6 +188,13 @@ final class InvoiceService {
 
     public function refreshInvoice(int $invoiceId, ?string $conn = null): void {
         $db = $conn ? DB::connection($conn) : DB::connection();
+        $db->table('invoice_items')
+            ->where('invoice_id', $invoiceId)
+            ->where('status', 'partial')
+            ->where('net_minor', '>', 0)
+            ->whereColumn('paid_minor', '>=', 'net_minor')
+            ->update(['status' => 'paid', 'updated_at' => now()]);
+
         $totals = $db->table('invoice_items')->where('invoice_id', $invoiceId)
             ->selectRaw("
                 COUNT(*) AS total_count,
@@ -232,7 +239,7 @@ final class InvoiceService {
             $items = DB::table('invoice_items as ii')->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
                 ->where('i.family_id', $familyId)->where('i.currency', $currency)
                 ->where('i.department_id', $deptId)->where('i.campus_id', $campusId)
-                ->where('ii.status', 'active')
+                ->whereIn('ii.status', ['active', 'partial'])
                 ->whereNotIn('i.status', ['void', 'voided'])
                 ->whereRaw('ii.paid_minor < ii.net_minor')
                 ->when($credit->selected_period, fn ($q) => $q
@@ -244,7 +251,12 @@ final class InvoiceService {
                 if ($remaining <= 0) break;
                 $amount = min($remaining, (int) $item->net_minor - (int) $item->paid_minor);
                 if ($amount <= 0) continue;
-                DB::table('invoice_items')->where('id', $item->id)->increment('paid_minor', $amount);
+                $newItemPaid = (int) $item->paid_minor + $amount;
+                DB::table('invoice_items')->where('id', $item->id)->update([
+                    'paid_minor' => $newItemPaid,
+                    'status' => ($item->status === 'partial' && $newItemPaid >= (int) $item->net_minor) ? 'paid' : $item->status,
+                    'updated_at' => now(),
+                ]);
                 DB::table('payment_allocations')->insert([
                     'payment_id' => $credit->id, 'invoice_item_id' => $item->id,
                     'amount_minor' => $amount, 'created_at' => now(), 'updated_at' => now(),

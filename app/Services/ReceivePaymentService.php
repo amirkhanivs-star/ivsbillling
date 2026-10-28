@@ -217,7 +217,7 @@ final class ReceivePaymentService
                     ->where('i.family_id', $familyId)->where('i.campus_id', $campusId)
                     ->where('i.department_id', $departmentId)->where('i.currency', $currency)
                     ->where('ii.fee_type_id', $regFeeTypeId)
-                    ->where('ii.status', 'active')
+                    ->whereIn('ii.status', ['active', 'partial'])
                     ->whereRaw('ii.paid_minor < ii.net_minor')
                     ->select('ii.*', 'i.id as parent_invoice_id')
                     ->orderBy('ii.id')->lockForUpdate()->get();
@@ -235,7 +235,12 @@ final class ReceivePaymentService
                     $take = min($regLeft, $due);
                     if ($take <= 0) continue;
 
-                    DB::table('invoice_items')->where('id', $regItem->id)->increment('paid_minor', $take);
+                    $newRegPaid = (int) $regItem->paid_minor + $take;
+                    DB::table('invoice_items')->where('id', $regItem->id)->update([
+                        'paid_minor' => $newRegPaid,
+                        'status' => ($regItem->status === 'partial' && $newRegPaid >= (int) $regItem->net_minor) ? 'paid' : $regItem->status,
+                        'updated_at' => now(),
+                    ]);
                     DB::table('payment_allocations')->insert([
                         'payment_id' => $paymentId,
                         'invoice_item_id' => $regItem->id,
@@ -286,7 +291,7 @@ final class ReceivePaymentService
                                 'selected_item_ids' => "Cross-currency allocation is strictly prohibited. Selected fee item #{$item->id} is in {$item->currency}, but payment is in {$currency}.",
                             ]);
                         }
-                        if ($item->status !== 'active') {
+                        if (!in_array($item->status, ['active', 'partial'], true)) {
                             throw ValidationException::withMessages([
                                 'selected_item_ids' => "Selected fee item #{$item->id} is not active ({$item->status}).",
                             ]);
@@ -311,7 +316,7 @@ final class ReceivePaymentService
                             ->where('i.department_id', $departmentId)
                             ->where('i.currency', $currency)
                             ->whereNotIn('ii.id', $selectedItemIds)
-                            ->where('ii.status', 'active')
+                            ->whereIn('ii.status', ['active', 'partial'])
                             ->whereRaw('ii.paid_minor < ii.net_minor')
                             ->exists();
 
@@ -341,7 +346,7 @@ final class ReceivePaymentService
                         ->where('i.family_id', $familyId)->where('i.campus_id', $campusId)
                         ->where('i.department_id', $departmentId)->where('i.currency', $currency)
                         ->where('ii.fee_type_id', '!=', $regFeeTypeId)
-                        ->where('ii.status', 'active')
+                        ->whereIn('ii.status', ['active', 'partial'])
                         ->whereRaw('ii.paid_minor < ii.net_minor');
 
                     if (!empty($input['selected_period'])) {
@@ -363,7 +368,7 @@ final class ReceivePaymentService
                             ->where('i.campus_id', $campusId)
                             ->where('i.department_id', $departmentId)
                             ->where('i.currency', $currency)
-                            ->where('ii.status', 'active')
+                            ->whereIn('ii.status', ['active', 'partial'])
                             ->whereRaw('ii.paid_minor < ii.net_minor')
                             ->exists();
 
@@ -383,7 +388,12 @@ final class ReceivePaymentService
                     $take = min($monthlyLeft, $due);
                     if ($take <= 0) continue;
 
-                    DB::table('invoice_items')->where('id', $item->id)->increment('paid_minor', $take);
+                    $newMonthlyPaid = (int) $item->paid_minor + $take;
+                    DB::table('invoice_items')->where('id', $item->id)->update([
+                        'paid_minor' => $newMonthlyPaid,
+                        'status' => ($item->status === 'partial' && $newMonthlyPaid >= (int) $item->net_minor) ? 'paid' : $item->status,
+                        'updated_at' => now(),
+                    ]);
                     DB::table('payment_allocations')->insert([
                         'payment_id' => $paymentId,
                         'invoice_item_id' => $item->id,
