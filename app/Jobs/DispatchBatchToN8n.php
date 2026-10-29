@@ -14,6 +14,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -60,8 +61,9 @@ class DispatchBatchToN8n implements ShouldQueue
             return;
         }
 
+        $nextJob = null;
         try {
-            $this->dispatchLocked();
+            $nextJob = $this->dispatchLocked();
         } catch (\Throwable $e) {
             // Transport exception messages can contain secret URLs.
             $this->recover('Dispatch failed before completion ('.class_basename($e).').');
@@ -69,14 +71,31 @@ class DispatchBatchToN8n implements ShouldQueue
         } finally {
             $lock->release();
         }
+
+        if ($nextJob !== null) {
+            dispatch($nextJob);
+        }
     }
 
-    private function dispatchLocked(): void
+    public static function getChunkIntervalSeconds(): int
+    {
+        $seconds = config('services.n8n.batch_chunk_interval_seconds');
+        if ($seconds !== null) {
+            return max(0, (int) $seconds);
+        }
+        $minutes = config('services.n8n.batch_chunk_interval_minutes');
+        if ($minutes !== null) {
+            return max(0, ((int) $minutes) * 60);
+        }
+        return 1800; // default 30 minutes
+    }
+
+    private function dispatchLocked(): ?self
     {
         $startedAt = microtime(true);
         $batch = DB::table('notification_batches')->where('batch_id', $this->batchId)->first();
         if (!$batch || in_array($batch->status, ['submitted', 'completed', 'qa_suppressed'], true)) {
-            return;
+            return null;
         }
 
         if (($batch->webhook_type ?? 'monthly') === 'paid' && $this->selectedNotificationIds === null) {
@@ -84,7 +103,7 @@ class DispatchBatchToN8n implements ShouldQueue
                 'status' => 'blocked', 'error' => 'Legacy paid job has no explicit selection. Review and select invoices again.',
                 'updated_at' => now(),
             ]);
-            return;
+            return null;
         }
 
         // The connection lock proves no other current worker owns this batch.
@@ -109,7 +128,7 @@ class DispatchBatchToN8n implements ShouldQueue
                 'error' => 'QA Portal: real notifications and external webhooks are disabled.',
                 'updated_at' => now(),
             ]);
-            return;
+            return null;
         }
 
         $webhookType = $batch->webhook_type ?? 'monthly';
@@ -128,15 +147,52 @@ class DispatchBatchToN8n implements ShouldQueue
                 'error' => $msg,
                 'updated_at' => now(),
             ]);
-            return;
+            return null;
+        }
+
+        $previousChunksSent = (int) $batch->chunks_sent;
+        $intervalSeconds = self::getChunkIntervalSeconds();
+
+        // 30-minute interval rule:
+        // Chunk 1 sends immediately when loaded into queue ($previousChunksSent === 0).
+        // Chunk 2 sends 30 minutes after Chunk 1 was sent.
+        // Remaining chunks send one every 30 minutes.
+        if ($previousChunksSent > 0 && $intervalSeconds > 0) {
+            $lastSentAt = null;
+            if (isset($batch->last_chunk_at) && $batch->last_chunk_at) {
+                $lastSentAt = \Illuminate\Support\Carbon::parse($batch->last_chunk_at);
+            } else {
+                $lastSubmitted = DB::table('notifications')
+                    ->where('batch_id', $this->batchId)
+                    ->where('status', 'submitted')
+                    ->max('submitted_at');
+                if ($lastSubmitted) {
+                    $lastSentAt = \Illuminate\Support\Carbon::parse($lastSubmitted);
+                }
+            }
+
+            if ($lastSentAt !== null) {
+                $elapsed = now()->timestamp - $lastSentAt->timestamp;
+                if ($elapsed < $intervalSeconds) {
+                    $remainingDelay = $intervalSeconds - $elapsed;
+                    DB::table('notification_batches')->where('id', $batch->id)->update([
+                        'status' => 'queued',
+                        'updated_at' => now(),
+                    ]);
+                    if ($this->job) {
+                        $this->release(max(1, $remainingDelay));
+                    }
+                    return null;
+                }
+            }
         }
 
         // Fetch all notifications belonging to this batch that need dispatching
-        $notifications = $this->pendingNotifications()->get();
+        $notifications = $this->pendingNotifications()->orderBy('chunk_index')->orderBy('id')->get();
 
         if ($notifications->isEmpty()) {
             $this->reconcileBatch();
-            return;
+            return null;
         }
 
         $payloadBuilder = app(InvoicePayloadBuilder::class);
@@ -197,21 +253,22 @@ class DispatchBatchToN8n implements ShouldQueue
 
         if (empty($recipientPayloads)) {
             $this->reconcileBatch();
-            return;
+            return null;
         }
 
-        // Chunking configuration
-        $chunkSize = max(1, (int) config('services.n8n.batch_chunk_size', 50));
+        // Chunking configuration: maximum 50 recipients per chunk
+        $chunkSize = max(1, min(50, (int) config('services.n8n.batch_chunk_size', 50)));
         $chunks = array_chunk($recipientPayloads, $chunkSize);
         $notificationChunks = array_chunk($validNotifications, $chunkSize);
-        $totalChunks = count($chunks);
+        $totalChunksInPending = count($chunks);
 
-        $previousChunksSent = (int) $batch->chunks_sent;
         $otherQueued = DB::table('notifications')->where('batch_id', $this->batchId)
             ->whereIn('status', ['queued', 'failed'])
             ->whereNotIn('id', array_map(fn ($n) => $n->id, $validNotifications))->count();
+        $totalChunksForBatch = max((int) $batch->chunks_total, $previousChunksSent + $totalChunksInPending + (int) ceil($otherQueued / $chunkSize));
+
         DB::table('notification_batches')->where('id', $batch->id)->update([
-            'chunks_total' => $previousChunksSent + $totalChunks + (int) ceil($otherQueued / $chunkSize),
+            'chunks_total' => $totalChunksForBatch,
             'updated_at' => now(),
         ]);
 
@@ -220,118 +277,107 @@ class DispatchBatchToN8n implements ShouldQueue
 
         $channels = !empty($batch->channels) ? json_decode($batch->channels, true) : ['whatsapp'];
 
-        $lastResponseCode = null;
-        $lastResponseBody = null;
-        $chunksSent = 0;
+        // Process strictly ONE chunk (max 50 recipients)
+        $chunkPayloads = $chunks[0];
+        $notifChunk = $notificationChunks[0];
+        $chunkIndex = (int) ($notifChunk[0]->chunk_index ?: ($previousChunksSent + 1));
 
-        foreach ($chunks as $idx => $chunkPayloads) {
-            if (microtime(true) - $startedAt > 240 && $this->job) {
-                // Bound each reservation even on Windows workers without pcntl.
-                $this->reconcileBatch();
-                $this->release(30);
-                return;
+        $batchPayload = [
+            'event' => $batch->event_type,
+            'event_type' => $batch->event_type,
+            'batch_id' => $batch->batch_id,
+            'event_id' => (string)Str::uuid(),
+            'billing_period' => $batch->billing_period,
+            'requested_channels' => $channels,
+            'approved_by' => $approverName,
+            'total_recipient_count' => count($chunkPayloads),
+            'total_invoice_count' => count($chunkPayloads),
+            'chunk_index' => $chunkIndex,
+            'total_chunks' => $totalChunksForBatch,
+            'timestamp' => now()->toIso8601String(),
+            'source_system' => 'IQRA Virtual School',
+            'invoices' => $chunkPayloads,
+        ];
+
+        $body = json_encode($batchPayload, JSON_THROW_ON_ERROR);
+
+        $headers = [
+            'Content-Type' => 'application/json',
+            'User-Agent' => 'IQRA-Virtual-School-Billing/1.0',
+        ];
+
+        if (!empty($setting->secret)) {
+            $headers['X-IQRA-Signature'] = hash_hmac('sha256', $body, $setting->secret);
+        }
+
+        foreach ($notifChunk as $pending) {
+            if ($webhookType === 'paid' && !PaidInvoiceEligibility::eligible((int) $pending->invoice_id)) {
+                throw new RuntimeException('Paid eligibility changed during payload preparation.');
             }
-            $chunkIndex = $idx + 1;
-            $notifChunk = $notificationChunks[$idx];
+        }
+        // Persist HTTP intent first; a killed worker must not cause blind replay.
+        // Update notifications in chunk with payload & attempt
+        $notifIds = array_map(fn($n) => $n->id, $notifChunk);
+        DB::table('notifications')->whereIn('id', $notifIds)->update([
+            'status' => 'processing',
+            'chunk_index' => $chunkIndex,
+            'attempts' => DB::raw('attempts + 1'),
+            'last_attempt_at' => now(),
+            'payload' => $body,
+            'updated_at' => now(),
+        ]);
 
-            $batchPayload = [
-                'event' => $batch->event_type,
-                'event_type' => $batch->event_type,
-                'batch_id' => $batch->batch_id,
-                'event_id' => (string)Str::uuid(),
-                'billing_period' => $batch->billing_period,
-                'requested_channels' => $channels,
-                'approved_by' => $approverName,
-                'total_recipient_count' => count($chunkPayloads),
-                'total_invoice_count' => count($chunkPayloads),
-                'chunk_index' => $chunkIndex,
-                'total_chunks' => $totalChunks,
-                'timestamp' => now()->toIso8601String(),
-                'source_system' => 'IQRA Virtual School',
-                'invoices' => $chunkPayloads,
-            ];
+        try {
+            $lastResponseCode = null;
+            $lastResponseBody = null;
+            $response = Http::connectTimeout(10)->timeout(30)
+                ->withHeaders($headers)
+                ->withBody($body, 'application/json')
+                ->post($setting->url);
 
-            $body = json_encode($batchPayload, JSON_THROW_ON_ERROR);
+            $lastResponseCode = $response->status();
+            $lastResponseBody = substr($response->body(), 0, 1000);
 
-            $headers = [
-                'Content-Type' => 'application/json',
-                'User-Agent' => 'IQRA-Virtual-School-Billing/1.0',
-            ];
-
-            if (!empty($setting->secret)) {
-                $headers['X-IQRA-Signature'] = hash_hmac('sha256', $body, $setting->secret);
+            if (!$response->successful()) {
+                throw new RuntimeException("Webhook HTTP {$lastResponseCode}");
             }
 
-            foreach ($notifChunk as $pending) {
-                if ($webhookType === 'paid' && !PaidInvoiceEligibility::eligible((int) $pending->invoice_id)) {
-                    throw new RuntimeException('Paid eligibility changed during payload preparation.');
-                }
-            }
-            // Persist HTTP intent first; a killed worker must not cause blind replay.
-            // Update notifications in chunk with payload & attempt
-            $notifIds = array_map(fn($n) => $n->id, $notifChunk);
-            DB::table('notifications')->whereIn('id', $notifIds)->update([
-                'status' => 'processing',
-                'chunk_index' => $chunkIndex,
-                'attempts' => DB::raw('attempts + 1'),
-                'last_attempt_at' => now(),
-                'payload' => $body,
-                'updated_at' => now(),
-            ]);
+            $providerMsgId = $response->json('message_id') ?? $response->json('batch_id');
+            $sentAt = now();
 
-            try {
-                $lastResponseCode = null;
-                $lastResponseBody = null;
-                $response = Http::connectTimeout(10)->timeout(30)
-                    ->withHeaders($headers)
-                    ->withBody($body, 'application/json')
-                    ->post($setting->url);
-
-                $lastResponseCode = $response->status();
-                $lastResponseBody = substr($response->body(), 0, 1000);
-
-                if (!$response->successful()) {
-                    throw new RuntimeException("Webhook HTTP {$lastResponseCode}");
-                }
-
-                $providerMsgId = $response->json('message_id') ?? $response->json('batch_id');
-
-                // Mark chunk notifications as submitted (HTTP 200/202 indicates webhook acceptance)
-                DB::table('notifications')
-                    ->whereIn('id', $notifIds)
-                    ->whereNotIn('status', ['delivered', 'read'])
-                    ->update([
-                        'status' => 'submitted',
-                        'provider_message_id' => $providerMsgId,
-                        'response_code' => $lastResponseCode,
-                        'response_body' => $lastResponseBody,
-                        'error' => null,
-                        'submitted_at' => now(),
-                        'updated_at' => now(),
-                    ]);
-
-                $chunksSent++;
-                DB::table('notification_batches')->where('id', $batch->id)->update([
-                    'chunks_sent' => $previousChunksSent + $chunksSent,
+            // Mark chunk notifications as submitted (HTTP 200/202 indicates webhook acceptance)
+            DB::table('notifications')
+                ->whereIn('id', $notifIds)
+                ->whereNotIn('status', ['delivered', 'read'])
+                ->update([
+                    'status' => 'submitted',
+                    'provider_message_id' => $providerMsgId,
                     'response_code' => $lastResponseCode,
                     'response_body' => $lastResponseBody,
                     'error' => null,
-                    'updated_at' => now(),
+                    'submitted_at' => $sentAt,
+                    'updated_at' => $sentAt,
                 ]);
-            } catch (\Throwable $e) {
-                // Preserve uncertainty for paid sends; retain the existing monthly retry behavior.
-                DB::table('notifications')
-                    ->whereIn('id', $notifIds)
-                    ->whereNotIn('status', ['submitted', 'delivered', 'read'])
-                    ->update([
-                        'status' => $webhookType === 'paid' ? 'blocked' : 'failed',
-                        'response_code' => $lastResponseCode,
-                        'response_body' => $lastResponseBody,
-                        'error' => $webhookType === 'paid' ? 'HTTP acceptance uncertain; reconcile n8n before retrying ('.class_basename($e).').' : 'Webhook HTTP '.($lastResponseCode ?? 'connection failure'),
-                        'updated_at' => now(),
-                    ]);
 
-                DB::table('notification_batches')->where('id', $batch->id)->update([
+            $newChunksSent = $previousChunksSent + 1;
+            $batchUpdates = [
+                'chunks_sent' => $newChunksSent,
+                'chunks_total' => $totalChunksForBatch,
+                'response_code' => $lastResponseCode,
+                'response_body' => $lastResponseBody,
+                'error' => null,
+                'updated_at' => $sentAt,
+            ];
+            if (Schema::hasColumn('notification_batches', 'last_chunk_at')) {
+                $batchUpdates['last_chunk_at'] = $sentAt;
+            }
+            DB::table('notification_batches')->where('id', $batch->id)->update($batchUpdates);
+        } catch (\Throwable $e) {
+            // Preserve uncertainty for paid sends; retain the existing monthly retry behavior.
+            DB::table('notifications')
+                ->whereIn('id', $notifIds)
+                ->whereNotIn('status', ['submitted', 'delivered', 'read'])
+                ->update([
                     'status' => $webhookType === 'paid' ? 'blocked' : 'failed',
                     'response_code' => $lastResponseCode,
                     'response_body' => $lastResponseBody,
@@ -339,11 +385,36 @@ class DispatchBatchToN8n implements ShouldQueue
                     'updated_at' => now(),
                 ]);
 
-                throw $e;
+            DB::table('notification_batches')->where('id', $batch->id)->update([
+                'status' => $webhookType === 'paid' ? 'blocked' : 'failed',
+                'response_code' => $lastResponseCode,
+                'response_body' => $lastResponseBody,
+                'error' => $webhookType === 'paid' ? 'HTTP acceptance uncertain; reconcile n8n before retrying ('.class_basename($e).').' : 'Webhook HTTP '.($lastResponseCode ?? 'connection failure'),
+                'updated_at' => now(),
+            ]);
+
+            throw $e;
+        }
+
+        // Check if additional pending chunks remain for this batch
+        $hasMorePending = $this->pendingNotifications()->exists();
+        if ($hasMorePending) {
+            // Keep batch status as queued while remaining chunks wait for their interval
+            DB::table('notification_batches')->where('id', $batch->id)->update([
+                'status' => 'queued',
+                'updated_at' => now(),
+            ]);
+
+            $targetQueue = $this->queue ?: ($webhookType === 'paid' ? 'paid-future' : 'notifications');
+            $nextJob = (new self($this->batchId, $this->selectedNotificationIds))->onQueue($targetQueue);
+            if ($intervalSeconds > 0) {
+                $nextJob->delay($sentAt->copy()->addSeconds($intervalSeconds));
             }
+            return $nextJob;
         }
 
         $this->reconcileBatch();
+        return null;
     }
 
     private function pendingNotifications(): \Illuminate\Database\Query\Builder

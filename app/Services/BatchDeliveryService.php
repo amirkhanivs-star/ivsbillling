@@ -647,7 +647,7 @@ class BatchDeliveryService
 
         // Generate unique batch ID
         $batchId = 'BATCH-' . now()->format('Ymd') . '-' . strtoupper(Str::random(6));
-        $chunkSize = max(1, (int)config('services.n8n.batch_chunk_size', 50));
+        $chunkSize = max(1, min(50, (int)config('services.n8n.batch_chunk_size', 50)));
         $totalRecipients = count($snapshot['eligible_recipients']);
         $chunksTotal = max(1, (int)ceil($totalRecipients / $chunkSize));
 

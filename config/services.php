@@ -5,5 +5,7 @@ return ['n8n'=>[
  'callback_secret'=>env('N8N_CALLBACK_SECRET'),
  'rate_limit'=>(int)env('IQRA_NOTIFICATION_RATE_LIMIT',30),
  'batch_chunk_size'=>(int)env('N8N_BATCH_CHUNK_SIZE',50),
+ 'batch_chunk_interval_minutes'=>(int)env('N8N_BATCH_CHUNK_INTERVAL_MINUTES',30),
+ 'batch_chunk_interval_seconds'=>env('N8N_BATCH_CHUNK_INTERVAL_SECONDS') !== null ? (int)env('N8N_BATCH_CHUNK_INTERVAL_SECONDS') : null,
  'paid_automatic_dispatch'=>(bool)env('PAID_AUTO_DISPATCH',true),
 ]];
