@@ -141,6 +141,12 @@
     margin-right: 3px;
     margin-bottom: 2px;
 }
+.iq-invoice-review thead {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 1;
+    background: #f8fafc;
+}
 </style>
 
 <div class="panel">
@@ -432,7 +438,7 @@
             </div>
 
             {{-- READY TO SEND CHALLANS TABLE --}}
-            <div class="table-wrap">
+            <div class="table-wrap" tabindex="0" role="region" aria-label="Ready to Send Consolidated Family Invoices">
                 <table class="table iq-invoice-review">
                     <thead>
                         <tr>
@@ -440,24 +446,41 @@
                             <th>Invoice / Period</th>
                             <th>Family &amp; Guardian</th>
                             <th>Students &amp; Siblings</th>
-                            <th>Current Fee</th>
-                            <th>Previous Unpaid Dues</th>
-                            <th>Total Payable</th>
+                            <th>Previous Outstanding</th>
+                            <th>Selected-Month Unpaid</th>
+                            <th>Later-Period Unpaid</th>
+                            <th>TOTAL OUTSTANDING PAYABLE</th>
                             <th>WhatsApp Destination</th>
-                            <th style="text-align:right;">Challan PDF</th>
+                            <th style="text-align:right;">Fee Invoice</th>
                         </tr>
                     </thead>
                     <tbody>
                     @forelse($readyChallans as $row)
-                        <tr>
+                        <tr @if(!empty($row->has_data_integrity_issue)) style="background:#fffbeb;" @endif>
                             <td>
-                                <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->invoice_id }}"
-                                       data-invoice="{{ $row->invoice_number }}"
-                                       data-family="{{ $row->family_code }}"
-                                       data-status="{{ $row->invoice_status }}">
+                                @if(!empty($row->has_data_integrity_issue))
+                                    <input type="checkbox" disabled title="Blocked: Financial data-integrity review required before sending">
+                                @else
+                                    <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->invoice_id }}"
+                                           data-invoice="{{ $row->invoice_number }}"
+                                           data-family="{{ $row->family_code }}"
+                                           data-status="{{ $row->invoice_status }}">
+                                @endif
                             </td>
                             <td>
                                 <strong>{{ $row->invoice_number }}</strong>
+                                @if(count($row->invoice_numbers ?? []) > 1)
+                                    <span class="badge" style="background:#f1f5f9; color:#475569; font-size:9.5px; padding:1px 5px;" title="{{ implode(', ', $row->invoice_numbers) }}">
+                                        +{{ count($row->invoice_numbers) - 1 }} more
+                                    </span>
+                                @endif
+                                @if(!empty($row->has_data_integrity_issue))
+                                    <div style="margin-top:3px;">
+                                        <span class="badge" style="background:#fef3c7; color:#92400e; border:1px solid #f59e0b; font-size:9.5px; font-weight:800; padding:2px 6px;">
+                                            ⚠ Data Integrity Issue — Staff Review Required
+                                        </span>
+                                    </div>
+                                @endif
                                 <div class="muted" style="font-size:11px;">{{ \Carbon\Carbon::parse($row->billing_period)->format('M Y') }} &bull; Due: {{ $row->due_date }}</div>
                             </td>
                             <td>
@@ -480,35 +503,96 @@
                                 @endif
                             </td>
                             <td>
-                                <strong style="color:#0f172a;">{{ $row->currency }} {{ \App\Services\Money::format($row->total_minor ?? $row->total_payable_minor ?? 0) }}</strong>
-                            </td>
-                            <td>
-                                @if(!empty($row->dues_by_month))
-                                    <div><strong>{{ $row->formatted_prev_dues }}</strong></div>
-                                    <div style="margin-top:2px;">
-                                        @foreach($row->dues_by_month as $mDue)
-                                            <span class="due-month-pill" title="{{ $mDue['currency'] }} {{ \App\Services\Money::format($mDue['dues_minor']) }}">
-                                                {{ \Carbon\Carbon::createFromFormat('Y-m', $mDue['month'])->format('M-y') }}: {{ \App\Services\Money::format($mDue['dues_minor']) }}
-                                            </span>
-                                        @endforeach
-                                    </div>
+                                @php($prevCurrencies = collect($row->currencies_map ?? [])->filter(fn($c) => ($c['previous_dues_minor'] ?? 0) > 0))
+                                @if($prevCurrencies->isNotEmpty())
+                                    @foreach($prevCurrencies as $cCode => $cData)
+                                        <div><strong>{{ $cData['formatted_previous_dues'] }}</strong></div>
+                                    @endforeach
+                                    @if(!empty($row->dues_by_month))
+                                        <div style="margin-top:2px;">
+                                            @foreach($row->dues_by_month as $mDue)
+                                                @php($mLabel = $mDue['month_label'] ?? (($mDue['month'] ?? '') !== 'OB' ? \Carbon\Carbon::createFromFormat('Y-m', $mDue['month'])->format('M-y') : 'Opening'))
+                                                <span class="due-month-pill" title="{{ $mDue['period_label'] ?? $mLabel }}: {{ $mDue['formatted'] ?? ($mDue['currency'] . ' ' . \App\Services\Money::format($mDue['dues_minor'])) }}">
+                                                    {{ $mLabel }}: {{ $row->is_multi_currency ? ($mDue['formatted'] ?? ($mDue['currency'] . ' ' . \App\Services\Money::format($mDue['dues_minor']))) : \App\Services\Money::format($mDue['dues_minor']) }}
+                                                </span>
+                                            @endforeach
+                                        </div>
+                                    @endif
                                 @else
                                     <span class="muted" style="font-size:11px;">No previous dues</span>
                                 @endif
                             </td>
                             <td>
-                                @if($row->is_multi_currency)
+                                @php($currCurrencies = collect($row->currencies_map ?? [])->filter(fn($c) => ($c['selected_month_minor'] ?? $c['current_fee_minor'] ?? 0) > 0))
+                                @if($currCurrencies->isNotEmpty())
+                                    @foreach($currCurrencies as $cCode => $cData)
+                                        <div><strong style="color:#0f172a;">{{ $cData['formatted_selected_month'] ?? $cData['formatted_current_fee'] }}</strong></div>
+                                    @endforeach
+                                    <div class="muted" style="font-size:10px;">{{ \Carbon\Carbon::parse($row->billing_period)->format('M Y') }} unpaid</div>
+                                @elseif(!empty($row->has_data_integrity_issue))
+                                    <div><strong style="color:#92400e; font-size:11px;">{{ $row->formatted_selected_month }}</strong></div>
+                                    <div class="muted" style="font-size:10px; color:#b45309;">No valid unpaid invoice items</div>
+                                @else
+                                    <strong style="color:#0f172a;">{{ $row->formatted_selected_month ?? $row->formatted_current_fee }}</strong>
+                                    <div class="muted" style="font-size:10px;">{{ \Carbon\Carbon::parse($row->billing_period)->format('M Y') }} unpaid</div>
+                                @endif
+                            </td>
+                            <td>
+                                @php($laterCurrencies = collect($row->currencies_map ?? [])->filter(fn($c) => ($c['later_period_minor'] ?? 0) > 0))
+                                @if($laterCurrencies->isNotEmpty())
+                                    @foreach($laterCurrencies as $cCode => $cData)
+                                        <div><strong style="color:#1e40af;">{{ $cData['formatted_later_period'] }}</strong></div>
+                                    @endforeach
+                                    @if(!empty($row->later_dues_by_month))
+                                        <div style="margin-top:2px;">
+                                            @foreach($row->later_dues_by_month as $lDue)
+                                                <span class="due-month-pill"
+                                                      style="background:{{ !empty($lDue['is_overdue']) ? '#fef2f2' : '#eff6ff' }}; color:{{ !empty($lDue['is_overdue']) ? '#991b1b' : '#1d4ed8' }}; border-color:{{ !empty($lDue['is_overdue']) ? '#fecaca' : '#bfdbfe' }}; max-width:none; white-space:nowrap;"
+                                                      title="Due: {{ $lDue['due_date_formatted'] ?? ($lDue['due_date'] ?: 'Scheduled') }}">
+                                                    {{ $lDue['month_label'] }}: {{ $row->is_multi_currency ? $lDue['formatted'] : \App\Services\Money::format($lDue['dues_minor']) }}
+                                                    &bull; {{ $lDue['status_label'] }}
+                                                </span>
+                                            @endforeach
+                                        </div>
+                                    @endif
+                                @else
+                                    <span class="muted" style="font-size:11px;">No later-period charges</span>
+                                @endif
+                            </td>
+                            <td style="white-space:nowrap;">
+                                @if(!empty($row->has_data_integrity_issue) && empty($row->currencies_map))
+                                    <div>
+                                        <strong style="color:#92400e; font-size:11.5px; background:#fef3c7; border:1px solid #f59e0b; padding:3px 8px; border-radius:4px; display:inline-block; white-space:nowrap;">
+                                            {{ $row->formatted_total_payable }}
+                                        </strong>
+                                        @if(!empty($row->data_integrity_message))
+                                            <div style="font-size:10px; color:#92400e; white-space:normal; max-width:240px; margin-top:3px;">
+                                                {{ $row->data_integrity_message }}
+                                            </div>
+                                        @endif
+                                    </div>
+                                @elseif($row->is_multi_currency)
                                     <div>
                                         @foreach($row->currencies_map as $cCode => $cData)
-                                            <div style="margin-bottom:2px;">
-                                                <span class="badge" style="background:#fee2e2; color:#991b1b; font-weight:800; font-size:11px;">
+                                            <div style="margin-bottom:3px;">
+                                                <span class="badge" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:800; font-size:11.5px; padding:3px 8px; white-space:nowrap;">
                                                     {{ $cData['formatted'] ?? $cData['formatted_total_payable'] ?? ($cCode . ' ' . \App\Services\Money::format($cData['total_payable_minor'] ?? 0)) }}
                                                 </span>
                                             </div>
                                         @endforeach
+                                        <div class="muted" style="font-size:10px;">Separate currencies</div>
                                     </div>
                                 @else
-                                    <strong style="color:#991b1b; font-size:13px;">{{ $row->formatted_total_payable }}</strong>
+                                    <div>
+                                        <strong style="color:#991b1b; font-size:13.5px; background:#fef2f2; border:1px solid #fecaca; padding:3px 8px; border-radius:4px; display:inline-block; white-space:nowrap;">
+                                            {{ $row->formatted_total_payable }}
+                                        </strong>
+                                        @if(!empty($row->has_data_integrity_issue) && !empty($row->data_integrity_message))
+                                            <div style="font-size:10px; color:#92400e; white-space:normal; max-width:240px; margin-top:3px;">
+                                                {{ $row->data_integrity_message }}
+                                            </div>
+                                        @endif
+                                    </div>
                                 @endif
                             </td>
                             <td>
@@ -528,19 +612,14 @@
                                 @endif
                             </td>
                             <td style="text-align:right;">
-                                <div style="display:flex; flex-direction:column; gap:3px; align-items:flex-end;">
-                                    <a href="{{ $row->consolidated_challan_url }}" target="_blank" rel="noopener" class="btn small" style="background:#7c3aed; color:#fff; font-size:10px; padding:3px 8px; font-weight:700;">
-                                        📄 Preview Challan
-                                    </a>
-                                    <a href="{{ $row->invoice_pdf_url ?? ('/invoices/' . $row->invoice_id . '/pdf') }}" target="_blank" rel="noopener" class="btn small gray" style="font-size:10px; padding:2px 6px;">
-                                        Invoice PDF
-                                    </a>
-                                </div>
+                                <a href="{{ $row->consolidated_challan_url }}" target="_blank" rel="noopener" class="btn small" style="background:#7c3aed; color:#fff; font-size:10.5px; padding:5px 10px; font-weight:700; display:inline-block; white-space:nowrap;">
+                                    📄 Preview / Print Fee Invoice
+                                </a>
                             </td>
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="9" style="text-align:center; padding:30px; color:#64748b;">
+                            <td colspan="10" style="text-align:center; padding:30px; color:#64748b;">
                                 <strong>No monthly challans awaiting review for {{ $dashboardStats['selected_month'] }}.</strong><br>
                                 <span class="muted" style="font-size:12px;">All eligible challans may already be queued, submitted to n8n, or superseded.</span>
                             </td>

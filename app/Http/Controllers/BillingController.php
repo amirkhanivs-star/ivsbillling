@@ -48,15 +48,23 @@ class BillingController {
   $q=DB::table('students as s')->join('families as f','f.id','=','s.family_id')
    ->leftJoin('student_registration_details as sd','sd.student_id','=','s.id')
    ->select('s.*','f.family_code','f.guardian_name','f.whatsapp','sd.father_name','sd.guardian_name_override','sd.registration_date')
-   ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByDesc('e.id')->select('grade_label')->limit(1),'current_class')
-   ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByDesc('e.id')->select('monthly_fee_minor')->limit(1),'monthly_fee_minor')
-   ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByDesc('e.id')->select('currency')->limit(1),'fee_currency');
+   ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByRaw("CASE WHEN e.status = 'active' THEN 0 ELSE 1 END")->orderByDesc('e.id')->select('grade_label')->limit(1),'current_class')
+   ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByRaw("CASE WHEN e.status = 'active' THEN 0 ELSE 1 END")->orderByDesc('e.id')->select('monthly_fee_minor')->limit(1),'monthly_fee_minor')
+   ->selectSub(DB::table('enrollments as e')->whereColumn('e.student_id','s.id')->orderByRaw("CASE WHEN e.status = 'active' THEN 0 ELSE 1 END")->orderByDesc('e.id')->select('currency')->limit(1),'fee_currency');
   if(!in_array($r->user()->role,['super_admin','finance_admin'],true)){
    $q->whereExists(function($sub)use($r){$sub->selectRaw('1')->from('enrollments as e')->whereColumn('e.student_id','s.id')->where('e.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($x)=>$x->where('e.department_id',$r->user()->department_id));});
   }
   if($term=trim((string)$r->query('q',''))){$q->where(fn($w)=>$w->where('s.name','like','%'.$term.'%')->orWhere('s.gr_number','like','%'.$term.'%')->orWhere('f.family_code','like','%'.$term.'%')->orWhere('sd.father_name','like','%'.$term.'%')->orWhere('sd.guardian_name_override','like','%'.$term.'%')->orWhere('f.guardian_name','like','%'.$term.'%'));}
+  if($classFilter=trim((string)($r->query('class',$r->query('grade',''))))){
+   $q->whereExists(function($sub)use($classFilter){
+    $sub->selectRaw('1')->from('enrollments as e')->whereColumn('e.student_id','s.id')
+     ->whereRaw("e.id = (SELECT e2.id FROM enrollments as e2 WHERE e2.student_id = s.id ORDER BY CASE WHEN e2.status = 'active' THEN 0 ELSE 1 END, e2.id DESC LIMIT 1)")
+     ->where('e.grade_label',$classFilter);
+   });
+  }
   if($status=$r->query('status')){if(in_array($status,['present','suspended','left','review_hold','historical_hold'],true))$q->where('s.status',$status);}
-  return view('students',['students'=>$q->orderBy('s.id')->paginate(25)->withQueryString()]);
+  $classOptions = DB::table('enrollments')->whereNotNull('grade_label')->where('grade_label','!=','')->distinct()->orderBy('grade_label')->pluck('grade_label');
+  return view('students',['students'=>$q->orderBy('s.id')->paginate(25)->withQueryString(),'classOptions'=>$classOptions]);
  }
  public function showStudent(int $student){
   $s=DB::table('students as s')
@@ -71,7 +79,11 @@ class BillingController {
    abort_unless(DB::table('enrollments')->where('student_id',$student)->where('campus_id',auth()->user()->campus_id)->when(auth()->user()->department_id,fn($q)=>$q->where('department_id',auth()->user()->department_id))->exists(),403);
   }
   $scope=fn($q)=>$q->when(!in_array(auth()->user()->role,['super_admin','finance_admin'],true),fn($v)=>$v->where('e.campus_id',auth()->user()->campus_id)->when(auth()->user()->department_id,fn($x)=>$x->where('e.department_id',auth()->user()->department_id)));
-  $enrollments=$scope(DB::table('enrollments as e')->join('departments as d','d.id','=','e.department_id')->where('e.student_id',$student))->select('e.*','d.name as department_name')->get();
+  $enrollments=$scope(DB::table('enrollments as e')->join('departments as d','d.id','=','e.department_id')->where('e.student_id',$student))
+   ->select('e.*','d.name as department_name')
+   ->orderByRaw("CASE WHEN e.status = 'active' THEN 0 ELSE 1 END")
+   ->orderByDesc('e.id')
+   ->get();
   $feeItems=DB::table('invoice_items as ii')
    ->join('invoices as i','i.id','=','ii.invoice_id')
    ->join('billing_runs as b','b.id','=','i.billing_run_id')
@@ -150,10 +162,88 @@ class BillingController {
  public function fees(){return view('fee-structure',['types'=>DB::table('fee_types')->orderBy('name')->get(),'plans'=>DB::table('fee_plan_items as p')->join('enrollments as e','e.id','=','p.enrollment_id')->join('students as s','s.id','=','e.student_id')->when(!in_array(auth()->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('e.campus_id',auth()->user()->campus_id)->when(auth()->user()->department_id,fn($v)=>$v->where('e.department_id',auth()->user()->department_id)))->select('p.*','s.name as student_name','s.gr_number')->orderByDesc('p.id')->paginate(25),'enrollments'=>DB::table('enrollments as e')->join('students as s','s.id','=','e.student_id')->when(!in_array(auth()->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('e.campus_id',auth()->user()->campus_id)->when(auth()->user()->department_id,fn($v)=>$v->where('e.department_id',auth()->user()->department_id)))->select('e.id','s.name','s.gr_number','e.currency')->orderBy('s.name')->limit(200)->get()]);}
  public function addFeePlan(Request $r){$d=$r->validate(['enrollment_id'=>'required|exists:enrollments,id','fee_type_id'=>'required|exists:fee_types,id','description'=>'required|string|max:255','amount'=>['required','regex:/^\d{1,13}(?:\.\d{1,2})?$/'],'frequency'=>['required',Rule::in(['monthly','weekly','quarterly','term','annual','one_time','custom'])],'discount_kind'=>'nullable|in:fixed,percent','discount_value'=>'nullable|numeric|min:0','subject_name'=>'nullable|string|max:120','class_days_per_week'=>'nullable|integer|min:1|max:7']);$en=DB::table('enrollments')->where('id',$d['enrollment_id'])->first();abort_if($r->user()->role==='auditor',403);$this->assertAccess($r,$en->department_id,$en->campus_id);
   $discountKind=$d['discount_kind']??null;$discountValue=$discountKind==='percent'?(int)round(((float)($d['discount_value']??0))*100):($discountKind==='fixed'?Money::minor((string)($d['discount_value']??0)):0);abort_if($discountKind==='percent'&&$discountValue>10000,422);
-  DB::table('fee_plan_items')->insert(['enrollment_id'=>$d['enrollment_id'],'fee_type_id'=>$d['fee_type_id'],'description'=>$d['description'],'frequency'=>$d['frequency'],'currency'=>$en->currency,'amount_minor'=>Money::minor((string)$d['amount']),'discount_kind'=>$discountKind,'discount_value'=>$discountValue,'subject_name'=>$d['subject_name']??null,'class_days_per_week'=>$d['class_days_per_week']??null,'created_at'=>now(),'updated_at'=>now()]);return back()->with('notice','Fee plan saved.');}
+  $amountMinor=Money::minor((string)$d['amount']);
+  $subjectName=$d['subject_name']??null;
+  DB::transaction(function() use ($d,$en,$amountMinor,$discountKind,$discountValue,$subjectName){
+   $priorActive=DB::table('fee_plan_items')
+    ->where('enrollment_id',$d['enrollment_id'])
+    ->where('fee_type_id',$d['fee_type_id'])
+    ->where('frequency',$d['frequency'])
+    ->where(function($q) use ($subjectName){
+     if($subjectName===null || $subjectName===''){
+      $q->whereNull('subject_name')->orWhere('subject_name','');
+     }else{
+      $q->where('subject_name',$subjectName);
+     }
+    })
+    ->where('is_active',true)
+    ->get();
+   $newPlanId=DB::table('fee_plan_items')->insertGetId([
+    'enrollment_id'=>$d['enrollment_id'],
+    'fee_type_id'=>$d['fee_type_id'],
+    'description'=>$d['description'],
+    'frequency'=>$d['frequency'],
+    'currency'=>$en->currency,
+    'amount_minor'=>$amountMinor,
+    'discount_kind'=>$discountKind,
+    'discount_value'=>$discountValue,
+    'subject_name'=>$subjectName,
+    'class_days_per_week'=>$d['class_days_per_week']??null,
+    'effective_from'=>now()->startOfMonth()->toDateString(),
+    'effective_to'=>null,
+    'is_active'=>true,
+    'status'=>'active',
+    'created_at'=>now(),
+    'updated_at'=>now(),
+   ]);
+   $priorDay=now()->startOfMonth()->subDay()->toDateString();
+   foreach($priorActive as $oldPlan){
+    $effTo=$oldPlan->effective_to ?: ((!empty($oldPlan->effective_from) && $priorDay < $oldPlan->effective_from) ? $oldPlan->effective_from : $priorDay);
+    DB::table('fee_plan_items')->where('id',$oldPlan->id)->update([
+     'is_active'=>false,
+     'status'=>'superseded',
+     'effective_to'=>$effTo,
+     'superseded_by_plan_id'=>$newPlanId,
+     'superseded_at'=>now(),
+     'updated_at'=>now(),
+    ]);
+   }
+  });
+  return back()->with('notice','Fee plan saved.');}
  public function creator(Request $r){
   $grades=DB::table('enrollments')->where('status','active')->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('department_id',$r->user()->department_id)))->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
-  return view('fee-creator',$this->basics($r)+['types'=>DB::table('fee_types')->get(),'grades'=>$grades]);
+  $schoolNow=\Carbon\Carbon::now(BillingPeriod::schoolTimezone());
+  $selectedYear=(int)$r->input('year',old('year',$schoolNow->year));
+  if($selectedYear<2000||$selectedYear>2100) $selectedYear=(int)$schoolNow->year;
+  $rawMonths=$r->input('months',old('months',[(int)$schoolNow->month]));
+  $selectedMonths=is_array($rawMonths)
+   ? array_values(array_unique(array_filter(array_map('intval',$rawMonths),fn($m)=>$m>=1&&$m<=12)))
+   : [(int)$schoolNow->month];
+  if(empty($selectedMonths)) $selectedMonths=[(int)$schoolNow->month];
+  $rawIssue=$r->input('issue_date',old('issue_date',$r->input('issued_on',old('issued_on'))));
+  try {
+   $issueDate=BillingPeriod::resolveIssueDate(is_string($rawIssue)?$rawIssue:null);
+  } catch (\Throwable) {
+   $issueDate=BillingPeriod::resolveIssueDate();
+  }
+  $dueDay=(int)$r->input('due_day',old('due_day',BillingPeriod::DEFAULT_DUE_DAY));
+  if($dueDay<1||$dueDay>28) $dueDay=BillingPeriod::DEFAULT_DUE_DAY;
+  $minDaysRaw=$r->input('minimum_payment_days',old('minimum_payment_days',BillingPeriod::DEFAULT_MINIMUM_PAYMENT_DAYS));
+  $minimumPaymentDays=is_numeric($minDaysRaw)?max(0,min(90,(int)$minDaysRaw)):BillingPeriod::DEFAULT_MINIMUM_PAYMENT_DAYS;
+  $dueDatePreview=BillingPeriod::previewSchedule($selectedYear,$selectedMonths,$dueDay,$issueDate,$minimumPaymentDays);
+  if($r->boolean('preview_due_dates')||$r->wantsJson()){
+   return response()->json($dueDatePreview);
+  }
+  return view('fee-creator',$this->basics($r)+[
+   'types'=>DB::table('fee_types')->get(),
+   'grades'=>$grades,
+   'selectedYear'=>$selectedYear,
+   'selectedMonths'=>$selectedMonths,
+   'issueDate'=>$issueDate,
+   'dueDay'=>$dueDay,
+   'minimumPaymentDays'=>$minimumPaymentDays,
+   'dueDatePreview'=>$dueDatePreview,
+  ]);
  }
  public function generate(Request $r,InvoiceService $svc){
   abort_if($r->user()->role==='auditor',403);
@@ -165,11 +255,14 @@ class BillingController {
    'department_id'=>'required|integer|exists:departments,id',
    'frequency'=>'required|in:monthly,weekly,quarterly,term,annual,one_time,custom',
    'fee_type_ids'=>'nullable|array','fee_type_ids.*'=>'integer|exists:fee_types,id',
+   'issue_date'=>'nullable|date',
+   'issued_on'=>'nullable|date',
+   'minimum_payment_days'=>'nullable|integer|min:0|max:90',
   ];
   if($monthlySelection){
    $rules+=[
     'year'=>'required|integer|between:2000,2100','months'=>'required|array|min:1|max:12',
-    'months.*'=>'required|integer|between:1,12|distinct','due_day'=>'required|integer|between:1,28',
+    'months.*'=>'required|integer|between:1,12|distinct','due_day'=>'nullable|integer|between:1,28',
    ];
   }else{
    $rules+=[
@@ -179,16 +272,22 @@ class BillingController {
   }
   $d=$r->validate($rules);
   $this->assertAccess($r,$d['department_id'],$d['campus_id']);
+  $rawIssueDate=$d['issue_date']??($d['issued_on']??null);
+  $issueDate=BillingPeriod::resolveIssueDate($rawIssueDate);
+  $minimumPaymentDays=isset($d['minimum_payment_days'])&&$d['minimum_payment_days']!==''
+   ? (int)$d['minimum_payment_days']
+   : BillingPeriod::DEFAULT_MINIMUM_PAYMENT_DAYS;
   if($monthlySelection){
-   $periods=BillingPeriod::selectedMonths((int)$d['year'],$d['months'],(int)$d['due_day']);
+   $dueDay=(int)($d['due_day']??BillingPeriod::DEFAULT_DUE_DAY);
+   $periods=BillingPeriod::selectedMonths((int)$d['year'],$d['months'],$dueDay,$issueDate,$minimumPaymentDays);
   }else{
    $from=\Carbon\Carbon::parse($d['period_start']);$to=\Carbon\Carbon::parse($d['period_end']);
    if($d['frequency']==='monthly' && ($from->format('Y-m')!==$to->format('Y-m')||$from->day!==1||$to->day!==$to->daysInMonth))
     throw \Illuminate\Validation\ValidationException::withMessages(['period_end'=>'Monthly billing must cover a full calendar month.']);
-   $periods=[['start'=>$from->toDateString(),'end'=>$to->toDateString(),'due'=>$d['due_date']]];
+   $periods=[['start'=>$from->toDateString(),'end'=>$to->toDateString(),'due'=>BillingPeriod::enforceMinimumWindow($d['due_date'],$issueDate,$minimumPaymentDays)]];
   }
   // All selected months either finish together or are rolled back together.
-  $result=DB::transaction(function()use($d,$r,$svc,$periods){
+  $result=DB::transaction(function()use($d,$r,$svc,$periods,$issueDate){
    $total=['created'=>0,'skipped'=>0,'invoices'=>[]];
    foreach($periods as $period){
     $key=$d['frequency'].':'.$period['start'].'..'.$period['end'];
@@ -199,7 +298,7 @@ class BillingController {
      'fee_type_ids'=>json_encode($d['fee_type_ids']??[]),
      'created_by'=>$r->user()->id,'created_at'=>now(),'updated_at'=>now(),
     ]);
-    $one=$svc->generate($runId);
+    $one=$svc->generate($runId,$issueDate);
     $total['created']+=$one['created'];$total['skipped']+=$one['skipped'];
     array_push($total['invoices'],...$one['invoices']);
    }
@@ -365,6 +464,9 @@ class BillingController {
   ]);
 
   $webhookType=$d['webhook_type']??($r->boolean('paid_only')?'paid':'monthly');
+  if($webhookType==='monthly'){
+   abort_unless(app(\App\Services\ConsolidatedInvoiceBuilder::class)->canDispatchFullFamilyStatement($r->user()),403,'Unauthorized: Restricted staff cannot dispatch unrestricted full-family consolidated fee statements.');
+  }
   $actionType=$d['action_type']??$r->input('action_type', 'send_now');
   $dispatchNow=($actionType !== 'add_to_queue');
 
@@ -457,6 +559,10 @@ class BillingController {
 
  public function retryBatchFailed(Request $r, string $batch){
   abort_if($r->user()->role==='auditor',403);
+  $batchRow=DB::table('notification_batches')->where('batch_id',$batch)->first();
+  if($batchRow && ($batchRow->webhook_type??'monthly')==='monthly'){
+   abort_unless(app(\App\Services\ConsolidatedInvoiceBuilder::class)->canDispatchFullFamilyStatement($r->user()),403,'Unauthorized: Restricted staff cannot dispatch unrestricted full-family consolidated fee statements.');
+  }
   $batchService=app(BatchDeliveryService::class);
   try {
    $res=$batchService->retryFailedBatchRecipients($batch,$r->user());
@@ -561,6 +667,10 @@ class BillingController {
   ]);
 
   $webhookType=$d['webhook_type']??($r->boolean('paid_only')?'paid':'monthly');
+  $consolidatedBuilder=app(\App\Services\ConsolidatedInvoiceBuilder::class);
+  if($webhookType==='monthly'){
+   abort_unless($consolidatedBuilder->canDispatchFullFamilyStatement($r->user()),403,'Unauthorized: Restricted staff cannot dispatch unrestricted full-family consolidated fee statements.');
+  }
   $webhookService=app(WebhookSettingService::class);
   $setting=$webhookService->getSettings($webhookType);
 
@@ -601,6 +711,14 @@ class BillingController {
    }
   }
 
+  $familyEligibilityMap = ($webhookType === 'monthly')
+   ? $consolidatedBuilder->evaluateFamiliesDispatchEligibility(
+       $invoices->pluck('family_id')->unique()->filter()->values()->all(),
+       $r->input('period'),
+       $r->user()
+     )
+   : [];
+
   $queuedCount = 0;
   $retriedCount = 0;
   $blockedCount = 0;
@@ -613,12 +731,21 @@ class BillingController {
   foreach ($invoices as $invoice) {
    $family = DB::table('families')->where('id', $invoice->family_id)->first();
    $failureReason = WebhookSettingService::evaluateContactEligibility($family, $channels);
+   $isIntegrityHold = false;
+   if ($webhookType === 'monthly') {
+    $famElig = $familyEligibilityMap[(int) $invoice->family_id] ?? null;
+    if (!$famElig || !$famElig['can_dispatch']) {
+     $failureReason = $famElig['block_reason']
+      ?? "Data Integrity Issue: Invoice {$invoice->invoice_number} has an unverified consolidated payable balance. Flagged for staff review.";
+     $isIntegrityHold = true;
+    }
+   }
 
    $notificationIdToDispatch = null;
 
    try {
     DB::transaction(function () use (
-     $invoice, $channels, $channelsStr, $webhookType, $failureReason, $r,
+     $invoice, $channels, $channelsStr, $webhookType, $failureReason, $isIntegrityHold, $r,
      &$queuedCount, &$retriedCount, &$blockedCount, &$skippedQueued, &$skippedSubmitted, &$skippedDelivered, &$notificationIdToDispatch
     ) {
      // Look up existing notification using complete uniqueness identity: invoice_id, channel, kind
@@ -655,6 +782,17 @@ class BillingController {
           'approved_by' => $r->user()->id,
           'updated_at' => now(),
          ]);
+         if ($isIntegrityHold) {
+          DB::table('audit_logs')->insert([
+           'actor_id' => $r->user()->id,
+           'action' => 'notification.blocked_financial_integrity',
+           'subject_type' => 'notification',
+           'subject_id' => $existing->id,
+           'metadata' => json_encode(['invoice_id' => $invoice->id, 'invoice_number' => $invoice->invoice_number, 'reason' => $failureReason]),
+           'created_at' => now(),
+           'updated_at' => now(),
+          ]);
+         }
          $blockedCount++;
          return;
         }
@@ -680,6 +818,17 @@ class BillingController {
           'approved_by' => $r->user()->id,
           'updated_at' => now(),
          ]);
+         if ($isIntegrityHold) {
+          DB::table('audit_logs')->insert([
+           'actor_id' => $r->user()->id,
+           'action' => 'notification.blocked_financial_integrity',
+           'subject_type' => 'notification',
+           'subject_id' => $existing->id,
+           'metadata' => json_encode(['invoice_id' => $invoice->id, 'invoice_number' => $invoice->invoice_number, 'reason' => $failureReason]),
+           'created_at' => now(),
+           'updated_at' => now(),
+          ]);
+         }
          $blockedCount++;
          return;
         }
@@ -706,7 +855,7 @@ class BillingController {
      // No existing notification record exists: create new record
      if ($failureReason !== null) {
       $blockedCount++;
-      DB::table('notifications')->insert([
+      $blockedNotifId = DB::table('notifications')->insertGetId([
        'invoice_id' => $invoice->id,
        'channel' => $channelsStr,
        'kind' => $webhookType,
@@ -721,6 +870,17 @@ class BillingController {
        'created_at' => now(),
        'updated_at' => now(),
       ]);
+      if ($isIntegrityHold) {
+       DB::table('audit_logs')->insert([
+        'actor_id' => $r->user()->id,
+        'action' => 'notification.blocked_financial_integrity',
+        'subject_type' => 'notification',
+        'subject_id' => $blockedNotifId,
+        'metadata' => json_encode(['invoice_id' => $invoice->id, 'invoice_number' => $invoice->invoice_number, 'reason' => $failureReason]),
+        'created_at' => now(),
+        'updated_at' => now(),
+       ]);
+      }
       return;
      }
 
@@ -791,8 +951,40 @@ class BillingController {
   abort_unless($invoice,404,'Associated invoice not found.');
   $this->assertAccess($r,$invoice->department_id,$invoice->campus_id);
 
+  $webhookType=$notification->webhook_type?:($notification->kind?:'monthly');
+  $consolidatedBuilder=app(\App\Services\ConsolidatedInvoiceBuilder::class);
+  if($webhookType==='monthly'){
+   abort_unless($consolidatedBuilder->canDispatchFullFamilyStatement($r->user()),403,'Unauthorized: Restricted staff cannot dispatch unrestricted full-family consolidated fee statements.');
+  }
+
   if(!in_array($notification->status,['failed','blocked'],true)){
    return back()->with('error','Only failed or blocked notifications can be retried.');
+  }
+
+  if($webhookType==='monthly'){
+   $elig=$consolidatedBuilder->evaluateFamilyDispatchEligibility((int)$invoice->family_id,null,$r->user());
+   if(!$elig['can_dispatch']){
+    $blockReason=$elig['block_reason']??"Data Integrity Issue: Invoice {$invoice->invoice_number} has an unverified consolidated payable balance.";
+    DB::table('notifications')->where('id',$notification->id)->update([
+     'status'=>'blocked',
+     'error'=>$blockReason,
+     'updated_at'=>now(),
+    ]);
+    DB::table('audit_logs')->insert([
+     'actor_id'=>$r->user()->id,
+     'action'=>'notification.retry_blocked_financial_integrity',
+     'subject_type'=>'notification',
+     'subject_id'=>$notification->id,
+     'metadata'=>json_encode([
+      'invoice_number'=>$invoice->invoice_number,
+      'webhook_type'=>$webhookType,
+      'reason'=>$blockReason,
+     ]),
+     'created_at'=>now(),
+     'updated_at'=>now(),
+    ]);
+    return back()->withErrors(['retry'=>$blockReason])->with('error',$blockReason);
+   }
   }
 
   DB::table('notifications')->where('id',$notification->id)->update([
@@ -868,13 +1060,15 @@ class BillingController {
    if($invoiceIds){
     $invoiceItems=DB::table('invoice_items as ii')
      ->join('invoices as i','i.id','=','ii.invoice_id')
+     ->join('billing_runs as br','br.id','=','i.billing_run_id')
      ->join('departments as d','d.id','=','i.department_id')
      ->join('students as s','s.id','=','ii.student_id')
      ->leftJoin('enrollments as en','en.id','=','ii.enrollment_id')
      ->leftJoin('fee_types as ft','ft.id','=','ii.fee_type_id')
      ->whereIn('ii.invoice_id',$invoiceIds)
      ->where('ii.status','!=','voided')
-     ->select('ii.*','i.invoice_number','i.due_date','d.name as department_name','s.name as student_name','s.gr_number','en.grade_label as class_name','ft.name as fee_type_name','ft.code as fee_type_code')
+     ->whereNotIn('i.status',['void','voided'])
+     ->select('ii.*','i.invoice_number','i.due_date','br.frequency as billing_run_frequency','d.name as department_name','s.name as student_name','s.gr_number',DB::raw("COALESCE(en.grade_label, (SELECT e2.grade_label FROM enrollments as e2 WHERE e2.student_id = s.id ORDER BY CASE WHEN e2.status = 'active' THEN 0 ELSE 1 END, e2.id DESC LIMIT 1)) as class_name"),'ft.name as fee_type_name','ft.code as fee_type_code')
      ->orderBy('ii.period_start')->orderBy('ii.id')->get();
 
     $itemIds=$invoiceItems->pluck('id')->all();
@@ -1036,11 +1230,28 @@ class BillingController {
    ->join('students as s', 's.id', '=', 'e.student_id')
    ->join('fee_types as ft', 'ft.id', '=', 'fpi.fee_type_id')
    ->where('s.family_id', $family->id)
+   ->where('e.status', 'active')
    ->where('fpi.is_active', true)
+   ->where(function ($q) {
+    $q->whereNull('fpi.status')->orWhere('fpi.status', 'active');
+   })
+   ->whereNull('fpi.superseded_by_plan_id')
+   ->whereColumn('fpi.currency', 'e.currency')
+   ->orderByRaw('CASE WHEN fpi.effective_to IS NULL THEN 0 ELSE 1 END')
    ->orderByDesc('fpi.effective_from')
    ->orderByDesc('fpi.id')
    ->select('fpi.*', 's.name as student_name', 's.gr_number', 'e.grade_label', 'ft.name as fee_type_name', 'ft.code as fee_type_code')
-   ->get() : collect();
+   ->get()
+   ->unique(function ($p) {
+    return sprintf(
+     '%d|%d|%s|%s',
+     (int) $p->enrollment_id,
+     (int) ($p->fee_type_id ?? 0),
+     strtolower((string) ($p->frequency ?? 'monthly')),
+     strtolower(trim((string) ($p->subject_name ?? '')))
+    );
+   })
+   ->values() : collect();
   $advanceCredits = $family ? DB::table('payments')
    ->where('family_id', $family->id)
    ->where('status', 'received')
@@ -1070,10 +1281,23 @@ class BillingController {
    $historicalSettlementsByItem = \Illuminate\Support\Facades\Schema::hasTable('qa_historical_settlements')
     ? DB::table('qa_historical_settlements')->whereIn('invoice_item_id', $itemIds)->where('status', 'applied')->get()->keyBy('invoice_item_id')
     : collect();
+   $anySettlementByItem = \Illuminate\Support\Facades\Schema::hasTable('qa_historical_settlements')
+    ? DB::table('qa_historical_settlements')->whereIn('invoice_item_id', $itemIds)->orderByDesc('id')->get()->keyBy('invoice_item_id')
+    : collect();
+   $obLineageByItem = \Illuminate\Support\Facades\Schema::hasTable('qa_opening_balance_lineage')
+    ? DB::table('qa_opening_balance_lineage')->whereIn('invoice_item_id', $itemIds)->pluck('invoice_item_id')->flip()
+    : collect();
    $histColsByGr = $historicalCollections->groupBy(fn($c) => trim((string) $c->gr_number));
 
-   $invoiceItems = $invoiceItems->map(function ($item) use ($historicalSettlementsByItem, $histColsByGr) {
+   $invoiceItems = $invoiceItems->map(function ($item) use ($historicalSettlementsByItem, $anySettlementByItem, $obLineageByItem, $histColsByGr) {
     $item->historical_settlement = $historicalSettlementsByItem->get($item->id);
+    $anySet = $anySettlementByItem->get($item->id);
+    $item->is_myskool_imported = (($item->billing_run_frequency ?? '') === 'opening_balance')
+     || $item->historical_settlement !== null
+     || $anySet !== null
+     || $obLineageByItem->has($item->id);
+    $item->myskool_collection_id = $item->historical_settlement?->active_primary_collection_id
+     ?? ($anySet?->active_primary_collection_id ?? null);
     $item->currency_conflict_hold = null;
     if (!$item->historical_settlement && (int) $item->paid_minor < (int) $item->net_minor) {
      $gr = trim((string) ($item->gr_number ?? ''));
@@ -1094,9 +1318,30 @@ class BillingController {
    });
   }
 
+  $myskoolDisputes = collect();
+  if (\Illuminate\Support\Facades\Schema::hasTable('myskool_disputes')) {
+   $dispQuery = DB::table('myskool_disputes as md')
+    ->leftJoin('users as sub_u', 'sub_u.id', '=', 'md.submitted_by')
+    ->leftJoin('users as rev_u', 'rev_u.id', '=', 'md.reviewed_by')
+    ->select('md.*', 'sub_u.name as submitted_by_name', 'rev_u.name as reviewed_by_name')
+    ->orderByDesc('md.id');
+   if ($family) {
+    $dispQuery->where(function ($q) use ($family, $familyGrNumbers) {
+     $q->where('md.family_id', $family->id);
+     if (!empty($family->family_code)) {
+      $q->orWhere('md.family_code', $family->family_code);
+     }
+     if (!empty($familyGrNumbers)) {
+      $q->orWhereIn('md.student_gr', $familyGrNumbers);
+     }
+    });
+   }
+   $myskoolDisputes = $dispQuery->limit(50)->get();
+  }
+
   $feeHistoryService = app(\App\Services\FeeHistoryService::class);
   $feeHistory = $family ? $feeHistoryService->getFamilyFeeHistory($family->id, $r->all(), $r->user()) : new \Illuminate\Pagination\LengthAwarePaginator([], 0, 20);
-  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','feeHistory','dueGroups','scopes','registrationStatus','summaryMetrics','summaryByCurrency','feeTypes','familyStudents','catalogRates','studentFeePlans','advanceCredits','advanceCreditsByCurrency','historicalCollections','historicalDues'));
+  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','feeHistory','dueGroups','scopes','registrationStatus','summaryMetrics','summaryByCurrency','feeTypes','familyStudents','catalogRates','studentFeePlans','advanceCredits','advanceCreditsByCurrency','historicalCollections','historicalDues','myskoolDisputes'));
  }
 
  public function createChallanFee(Request $r){
@@ -1111,6 +1356,10 @@ class BillingController {
    'months'=>'required|array|min:1',
    'months.*'=>'integer|between:1,12',
    'year'=>'required|integer|between:2020,2050',
+   'due_day'=>'nullable|integer|between:1,28',
+   'issue_date'=>'nullable|date',
+   'issued_on'=>'nullable|date',
+   'minimum_payment_days'=>'nullable|integer|min:0|max:90',
   ]);
 
   $family=!empty($d['family_id'])
@@ -1181,46 +1430,22 @@ class BillingController {
 
       foreach($monthsToBill as $m){
        $month=(int)$m;
+       $dueDay=(int)($d['due_day']??BillingPeriod::DEFAULT_DUE_DAY);
+       $issueDate=BillingPeriod::resolveIssueDate($d['issue_date']??($d['issued_on']??null));
+       $minDays=isset($d['minimum_payment_days'])&&$d['minimum_payment_days']!==''
+        ? (int)$d['minimum_payment_days']
+        : BillingPeriod::DEFAULT_MINIMUM_PAYMENT_DAYS;
        $periodStart=sprintf('%04d-%02d-01',$year,$month);
-       $periodEnd=date('Y-m-t',strtotime($periodStart));
-       $dueDate=sprintf('%04d-%02d-25',$year,$month);
+       $periodEnd=(new \DateTimeImmutable($periodStart,BillingPeriod::schoolTimezone()))->format('Y-m-t');
+       $dueDate=BillingPeriod::calculateDueDate($year,$month,$dueDay,$issueDate,$minDays);
        $periodKey=$isOneTime?"one_time:{$feeType->code}:{$periodStart}":"monthly:{$periodStart}..{$periodEnd}";
 
-       // Rule 1, 2, 3, 6: Rate resolution for target period
-       $amountMinor=0;
-       $discountMinor=0;
-
-       // Priority 1: Check student-specific active plan in fee_plan_items for target period
-       $planItem=DB::table('fee_plan_items')
-        ->where('enrollment_id',$student->enrollment_id)
-        ->where('fee_type_id',$feeType->id)
-        ->where('is_active',true)
-        ->where(fn($q)=>$q->whereNull('effective_from')->orWhere('effective_from','<=',$periodEnd))
-        ->where(fn($q)=>$q->whereNull('effective_to')->orWhere('effective_to','>=',$periodStart))
-        ->orderByDesc('effective_from')
-        ->orderByDesc('id')
-        ->first();
-
-       $periodCurrency=$planItem ? (string)$planItem->currency : (string)($student->currency ?? 'SAR');
-
-       if($planItem){
-        $amountMinor=(int)$planItem->amount_minor;
-        $discountMinor=\App\Services\Money::discount($amountMinor,$planItem->discount_kind,(int)$planItem->discount_value);
-       }elseif($feeType->code==='monthly' && !empty($student->monthly_fee_minor)){
-        $amountMinor=(int)$student->monthly_fee_minor;
-       }else{
-        // Priority 2: Check approved class catalog rate
-        $rate=DB::table('fee_catalog_rates')
-         ->where('fee_type_id',$feeType->id)
-         ->where('department_id',$student->department_id)
-         ->where('class_label',$student->grade_label)
-         ->where('currency',$periodCurrency)
-         ->first();
-
-        if($rate){
-         $amountMinor=(int)$rate->amount_minor;
-        }
-       }
+       // Rule 1, 2, 3, 6: Consolidated rate and currency resolution for target student
+       $resolvedFee=\App\Services\InvoiceService::resolveFeeAndCurrency($student,$feeType);
+       $periodCurrency=$resolvedFee['currency'];
+       $amountMinor=$resolvedFee['amount_minor'];
+       $discountMinor=$resolvedFee['discount_minor'];
+       $planItem=$resolvedFee['plan_item'];
 
        // Rule 2 & 3: Never fall back to unrelated class/currency. Missing rate = clear error.
        if($amountMinor<=0){
@@ -1295,6 +1520,8 @@ class BillingController {
         continue;
        }
 
+       $netMinor=max(0,$amountMinor-$discountMinor);
+
        // Rule 7b: Prevent duplicate fee obligations already settled in historical staging or held on cross-currency conflict
        $histCheck=\App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
         $historicalMap,
@@ -1302,7 +1529,8 @@ class BillingController {
         (string)$feeType->code,
         $periodStart,
         (string)$student->currency,
-        $planItem?->subject_name??null
+        $planItem?->subject_name??null,
+        $netMinor
        );
        if($histCheck===null && $isOneTime){
         $histCheck=\App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
@@ -1311,88 +1539,121 @@ class BillingController {
          (string)$feeType->code,
          'ONE_TIME',
          (string)$student->currency,
-         $planItem?->subject_name??null
+         $planItem?->subject_name??null,
+         $netMinor
         );
        }
 
        if($histCheck!==null && ($histCheck['blocks_billing']??true)){
-        $skippedItems++;
         $periodLabel=$isOneTime?$feeType->name:date('M-Y',strtotime($periodStart));
-        if(!empty($histCheck['review_required']) || ($histCheck['status']??'')==='cross_currency_conflict'){
-         $crossCurrencyConflictCount++;
-         $conflictCurrencies=implode(', ',$histCheck['conflicting_currencies']??($histCheck['currencies']??[]));
-         $crossCurrencyConflictMessages[]="Historical obligation for GR {$student->gr_number} ({$feeType->name} — {$periodLabel}) exists in a different currency ({$conflictCurrencies} vs {$student->currency}) and requires manual review rather than automatic billing.";
-        }elseif(!empty($histCheck['is_settled'])){
-         $paidDuplicatesCount++;
-        }else{
-         $historicalObCount++;
-         $unpaidDuplicatesCount++;
-        }
 
-        // Check if a voided item exists for this obligation to give clear restoration feedback
+        // Check if a voided item exists for this obligation
         $voidedItemCheck=DB::table('invoice_items')
          ->where('student_id',$student->id)
          ->where('fee_type_id',$feeType->id)
          ->where('status','voided')
          ->where(function($q) use ($periodKey,$periodStart){
           $q->where('period_key',$periodKey)->orWhere('period_start',$periodStart);
-         })->first();
+         })
+         ->orderByDesc('id')
+         ->first();
 
+        $canRecreateVoidedImported=false;
         if($voidedItemCheck){
-         if(!empty($histCheck['paid_minor']) || !empty($histCheck['is_settled'])){
-          $restorationReviewCount++;
-          $restorationReviewMessages[]="Fee obligation for {$student->name} ({$feeType->name} — {$periodLabel}) was previously voided (Item #{$voidedItemCheck->id}) and has verified historical MySkool payment evidence. Requires administrative restoration review rather than recreation.";
+         $voidedEval=\App\Services\Migration\HistoricalOpeningBalanceService::evaluateVoidedImportedObligation(
+          DB::connection(),
+          $historicalMap,
+          $voidedItemCheck,
+          (string)($student->gr_number??''),
+          (string)$feeType->code,
+          $periodStart,
+          (string)$periodCurrency,
+          $planItem?->subject_name??null
+         );
+         if(!empty($voidedEval['can_recreate'])){
+          $canRecreateVoidedImported=true;
          }else{
-          $previouslyVoidedCount++;
-          $previouslyVoidedMessages[]="Fee obligation for {$student->name} ({$feeType->name} — {$periodLabel}) was previously voided (Item #{$voidedItemCheck->id}). Use administrative restoration to restore this obligation.";
+          $skippedItems++;
+          if(($voidedEval['status_code']??'')==='restoration_review'){
+           $restorationReviewCount++;
+           if(!empty($histCheck['is_settled']) || ($voidedEval['block_category']??'')==='historical_payment_full'){
+            $paidDuplicatesCount++;
+           }
+           $restorationReviewMessages[]=$voidedEval['reason'] ?? "Fee obligation for {$student->name} ({$feeType->name} — {$periodLabel}) was previously voided (Item #{$voidedItemCheck->id}) and has verified historical MySkool payment evidence. Requires administrative restoration review rather than recreation.";
+          }else{
+           $crossCurrencyConflictCount++;
+           $crossCurrencyConflictMessages[]=$voidedEval['reason'] ?? "Recreation blocked for GR {$student->gr_number} ({$feeType->name} — {$periodLabel}): historical MySkool conflict exists.";
+          }
+          continue;
          }
         }
-        continue;
+
+        if(!$canRecreateVoidedImported){
+         $skippedItems++;
+         if(!empty($histCheck['review_required']) || ($histCheck['status']??'')==='cross_currency_conflict'){
+          $crossCurrencyConflictCount++;
+          $conflictCurrencies=implode(', ',$histCheck['conflicting_currencies']??($histCheck['currencies']??[]));
+          $crossCurrencyConflictMessages[]="Historical obligation for GR {$student->gr_number} ({$feeType->name} — {$periodLabel}) exists in a different currency ({$conflictCurrencies} vs {$student->currency}) and requires manual review rather than automatic billing.";
+         }elseif(!empty($histCheck['is_settled'])){
+          $paidDuplicatesCount++;
+         }else{
+          $historicalObCount++;
+          $unpaidDuplicatesCount++;
+         }
+         continue;
+        }
        }
 
-       // Check if a voided (or existing unique-key) invoice_items row already occupies (fee_plan_item_id, period_key)
-       // or matches this student/fee_type/period so we can safely recreate it instead of colliding with uniqueness constraints.
+       // Check if an active or voided invoice_items row matches this student/fee_type/period
        $voidedItem=null;
        if($planItem){
         $existingKeyRow=DB::table('invoice_items')
          ->where('fee_plan_item_id',$planItem->id)
          ->where('period_key',$periodKey)
+         ->where('status','!=','voided')
          ->lockForUpdate()
          ->first();
         if($existingKeyRow){
-         if($existingKeyRow->status!=='voided'){
-          $skippedItems++;
-          if((int)$existingKeyRow->paid_minor > 0 || $existingKeyRow->status === 'paid'){
-           $paidDuplicatesCount++;
-          }else{
-           $unpaidDuplicatesCount++;
-          }
-          continue;
+         $skippedItems++;
+         if((int)$existingKeyRow->paid_minor > 0 || $existingKeyRow->status === 'paid'){
+          $paidDuplicatesCount++;
+         }else{
+          $unpaidDuplicatesCount++;
          }
-         $voidedItem=$existingKeyRow;
+         continue;
         }
        }
-       if(!$voidedItem){
-        $voidedQuery=DB::table('invoice_items')
-         ->where('student_id',$student->id)
-         ->where('fee_type_id',$feeType->id)
-         ->where('status','voided');
-        if(!$isOneTime){
-         $voidedQuery->where(function($q) use ($periodKey,$periodStart){
-          $q->where('period_key',$periodKey)->orWhere('period_start',$periodStart);
-         });
-        }
-        $voidedItem=$voidedQuery->orderByDesc('id')->lockForUpdate()->first();
+       $voidedQuery=DB::table('invoice_items')
+        ->where('student_id',$student->id)
+        ->where('fee_type_id',$feeType->id)
+        ->where('status','voided');
+       if(!$isOneTime){
+        $voidedQuery->where(function($q) use ($periodKey,$periodStart){
+         $q->where('period_key',$periodKey)->orWhere('period_start',$periodStart);
+        });
        }
+       $voidedItem=$voidedQuery->orderByDesc('id')->lockForUpdate()->first();
 
        if($voidedItem){
-        $newerPlan = DB::table('fee_plan_items')
+        $activePlansForType = DB::table('fee_plan_items')
          ->where('enrollment_id', $student->enrollment_id)
          ->where('fee_type_id', $feeType->id)
          ->where('is_active', true)
-         ->where('effective_from', '>', $periodEnd)
+         ->where(function ($q) {
+          $q->whereNull('status')->orWhere('status', 'active');
+         })
+         ->whereNull('superseded_by_plan_id')
          ->orderBy('effective_from')
-         ->first();
+         ->get();
+
+        // Only treat $newerPlan as an unapproved future-dated override when a distinct earlier active plan
+        // still covers the target period AND a separate future active plan exists after $periodEnd.
+        $hasEarlierActivePlan = $activePlansForType->contains(function ($p) use ($periodEnd) {
+         return empty($p->effective_from) || $p->effective_from <= $periodEnd;
+        });
+        $newerPlan = $hasEarlierActivePlan
+         ? $activePlansForType->first(fn($p) => !empty($p->effective_from) && $p->effective_from > $periodEnd)
+         : null;
 
         $isRateOrCurrencyChanged = (
          (int)$amountMinor !== (int)$voidedItem->amount_minor ||
@@ -1426,7 +1687,8 @@ class BillingController {
         }
        }
 
-       // Rule 8 & 9: Find existing regular family invoice for this period. NEVER attach to opening balance invoices!
+       // Rule 8 & 9: Find existing ACTIVE (non-voided) regular family invoice for this period.
+       // NEVER attach to opening balance invoices and NEVER silently reuse a voided invoice!
        $runPeriodKey="monthly:{$periodStart}..{$periodEnd}";
        $invoice=DB::table('invoices as i')
         ->join('billing_runs as b','b.id','=','i.billing_run_id')
@@ -1434,6 +1696,7 @@ class BillingController {
         ->where('i.department_id',$student->department_id)
         ->where('i.campus_id',$student->campus_id)
         ->where('i.currency',$periodCurrency)
+        ->whereNotIn('i.status',['void','voided'])
         ->where('b.frequency','!=','opening_balance')
         ->where('b.period_start',$periodStart)
         ->select('i.*')
@@ -1470,6 +1733,7 @@ class BillingController {
          ->where('billing_run_id',$runId)
          ->where('family_id',$family->id)
          ->where('currency',$periodCurrency)
+         ->whereNotIn('status',['void','voided'])
          ->lockForUpdate()
          ->first();
 
@@ -1482,7 +1746,7 @@ class BillingController {
           'department_id'=>$student->department_id,
           'currency'=>$periodCurrency,
           'invoice_number'=>'PENDING-'.\Illuminate\Support\Str::uuid(),
-          'issued_on'=>now()->toDateString(),
+          'issued_on'=>$issueDate,
           'due_date'=>$dueDate,
           'total_minor'=>0,
           'paid_minor'=>0,
@@ -1491,8 +1755,9 @@ class BillingController {
           'created_at'=>now(),
           'updated_at'=>now(),
          ]);
+         $invoiceYear=substr($issueDate,0,4);
          DB::table('invoices')->where('id',$invoiceId)->update([
-          'invoice_number'=>strtoupper(substr($deptCode,0,3)).'-'.date('Y').'-'.str_pad((string)$invoiceId,7,'0',STR_PAD_LEFT),
+          'invoice_number'=>strtoupper(substr($deptCode,0,3)).'-'.$invoiceYear.'-'.str_pad((string)$invoiceId,7,'0',STR_PAD_LEFT),
          ]);
          $invoice=DB::table('invoices')->where('id',$invoiceId)->first();
         }
@@ -1501,7 +1766,7 @@ class BillingController {
        $netMinor=max(0,$amountMinor-$discountMinor);
 
        if($voidedItem){
-        app(\App\Services\FeeAdjustmentService::class)->recreateVoidedFee(
+        $recreatedRow = app(\App\Services\FeeAdjustmentService::class)->recreateVoidedFee(
          (int)$voidedItem->id,
          [
           'invoice_id'=>(int)$invoice->id,
@@ -1522,8 +1787,18 @@ class BillingController {
          (int)$r->user()->id,
          'Fee recreated via manual challan fee creation'
         );
+        $targetInvId = (int)($recreatedRow->invoice_id ?? $invoice->id);
        }else{
-        DB::table('invoice_items')->insert([
+        $partialPaid = 0;
+        $stagedColIds = [];
+        $slipNos = '';
+        if ($histCheck !== null && !empty($histCheck['is_partial'])) {
+            $partialPaid = min($netMinor, (int) ($histCheck['paid_minor'] ?? 0));
+            $stagedColIds = $histCheck['staged_collection_ids'] ?? [];
+            $slipNos = implode(', ', $histCheck['slips'] ?? []);
+        }
+
+        $newItemId = DB::table('invoice_items')->insertGetId([
          'invoice_id'=>$invoice->id,
          'student_id'=>$student->id,
          'enrollment_id'=>$student->enrollment_id,
@@ -1537,16 +1812,76 @@ class BillingController {
          'amount_minor'=>$amountMinor,
          'discount_minor'=>$discountMinor,
          'net_minor'=>$netMinor,
-         'paid_minor'=>0,
-         'status'=>'active',
+         'paid_minor'=>$partialPaid,
+         'status'=>$partialPaid >= $netMinor && $netMinor > 0 ? 'paid' : ($partialPaid > 0 ? 'partial' : 'active'),
          'created_at'=>now(),
          'updated_at'=>now(),
         ]);
+
+        if ($partialPaid > 0 && \Illuminate\Support\Facades\Schema::hasTable('qa_historical_settlements')) {
+            $reconId = sprintf('HRECON-GEN-I%d-S%d', $newItemId, $student->id);
+            $batchId = (string) ($historicalMap['batch_id'] ?? config('imports.active_batch_id', 'BATCH-20261025-FINAL-MYSKOOL'));
+            $settlementId = DB::table('qa_historical_settlements')->insertGetId([
+                'reconciliation_id' => $reconId,
+                'batch_id' => $batchId,
+                'cutoff_date' => '2026-10-22',
+                'invoice_item_id' => $newItemId,
+                'active_invoice_item_id' => $newItemId,
+                'invoice_id' => (int) $invoice->id,
+                'student_id' => $student->id,
+                'family_id' => $family->id,
+                'student_gr' => (string) $student->gr_number,
+                'family_code' => (string) ($family->family_code ?? ''),
+                'currency' => (string) $periodCurrency,
+                'fee_description' => (string) $feeType->name,
+                'period_key' => (string) $periodKey,
+                'original_obligation_minor' => $netMinor,
+                'settled_amount_minor' => $partialPaid,
+                'remaining_obligation_minor' => max(0, $netMinor - $partialPaid),
+                'unmatched_overpayment_minor' => 0,
+                'previous_item_paid_minor' => 0,
+                'new_item_paid_minor' => $partialPaid,
+                'previous_item_status' => 'active',
+                'new_item_status' => ($partialPaid >= $netMinor ? 'paid' : 'partial'),
+                'previous_invoice_paid_minor' => (int) $invoice->paid_minor,
+                'new_invoice_paid_minor' => (int) $invoice->paid_minor + $partialPaid,
+                'previous_invoice_status' => (string) $invoice->status,
+                'new_invoice_status' => ((int) $invoice->paid_minor + $partialPaid >= (int) $invoice->total_minor ? 'paid' : 'partial'),
+                'qa_staged_due_id' => null,
+                'active_primary_collection_id' => $stagedColIds[0] ?? null,
+                'qa_staged_collection_ids' => !empty($stagedColIds) ? json_encode($stagedColIds) : null,
+                'myskool_slip_numbers' => $slipNos,
+                'reconciliation_classification' => ($partialPaid >= $netMinor ? 'POST_CUTOFF_FULL_SETTLEMENT' : 'POST_CUTOFF_PARTIAL_PAYMENT'),
+                'guard_class' => ($partialPaid >= $netMinor ? 'CANDIDATE_FULL_SETTLEMENT' : 'CANDIDATE_PARTIAL_SETTLEMENT'),
+                'status' => 'applied',
+                'applied_by' => (int) $r->user()->id,
+                'applied_at' => now(),
+                'notes' => 'Credited verified historical advance MySkool payment on invoice creation',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            if (!empty($stagedColIds) && \Illuminate\Support\Facades\Schema::hasTable('qa_historical_settlement_collections')) {
+                foreach ($stagedColIds as $cid) {
+                    DB::table('qa_historical_settlement_collections')->insert([
+                        'settlement_id' => $settlementId,
+                        'reconciliation_id' => $reconId,
+                        'invoice_item_id' => $newItemId,
+                        'qa_staged_collection_id' => (int) $cid,
+                        'active_staged_collection_id' => (int) $cid,
+                        'status' => 'applied',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+            }
+        }
+        $targetInvId = (int)$invoice->id;
        }
 
        $createdItems++;
-       $affectedInvoices[$invoice->id]=[
-        'invoice_id'=>$invoice->id,
+       $affectedInvoices[$targetInvId]=[
+        'invoice_id'=>$targetInvId,
         'family_id'=>$family->id,
         'currency'=>$periodCurrency,
         'department_id'=>$student->department_id,
@@ -1629,6 +1964,10 @@ class BillingController {
    'months'=>'required|array|min:1',
    'months.*'=>'integer|between:1,12',
    'year'=>'required|integer|between:2020,2050',
+   'due_day'=>'nullable|integer|between:1,28',
+   'issue_date'=>'nullable|date',
+   'issued_on'=>'nullable|date',
+   'minimum_payment_days'=>'nullable|integer|min:0|max:90',
   ]);
   $eval=$svc->evaluateEligibility($d);
   return response()->json($eval);
@@ -1903,6 +2242,20 @@ class BillingController {
   return back()->with('notice', $result['message']);
  }
 
+ public function recreateVoidedFee(Request $r, \App\Services\VoidedFeeRestorationService $svc){
+  abort_unless(in_array($r->user()->role,['super_admin','finance_admin','admin'],true),403,'Unauthorized access.');
+  $d=$r->validate([
+   'invoice_item_id'=>'required|integer|exists:invoice_items,id',
+   'reason'=>'nullable|string|max:1000',
+  ]);
+  $reason=trim((string)($d['reason']??'')) ?: 'Recreated voided fee obligation using current approved student settings.';
+  $result=$svc->recreateWithCurrentSettings((int)$d['invoice_item_id'], ['reason'=>$reason], (int)$r->user()->id);
+  if($r->wantsJson()){
+   return response()->json($result);
+  }
+  return back()->with('notice', $result['message']);
+ }
+
  public function inspectMySkoolPayment(Request $r, int $id, \App\Services\Migration\MySkoolPaymentCorrectionService $svc){
   abort_unless(in_array($r->user()->role,['super_admin','finance_admin','admin'],true),403,'Unauthorized access. Only Finance Administrators or Super Administrators may inspect or correct historical MySkool payments.');
   $inspection=$svc->inspect($id);
@@ -1918,6 +2271,10 @@ class BillingController {
    'qa_staged_collection_id'=>'required|integer|exists:qa_staged_collections,id',
    'action_type'=>'required|string|max:64',
    'reason'=>'required|string|min:5|max:1000',
+   'restoration_mode'=>'nullable|string|in:full,partial',
+   'restore_amount'=>'nullable|numeric',
+   'restore_amount_minor'=>'nullable|integer',
+   'idempotency_key'=>'nullable|string|max:100',
    'proposed_student_gr'=>'nullable|string|max:50',
    'proposed_period_key'=>'nullable|string|max:64',
    'proposed_fee_type'=>'nullable|string|max:120',
@@ -1930,6 +2287,61 @@ class BillingController {
    return response()->json(array_merge(['success'=>true,'notice'=>$notice],$result));
   }
   return back()->with('notice',$notice);
+ }
+
+ public function restoreMySkoolPayment(Request $r, \App\Services\Migration\MySkoolPaymentCorrectionService $svc){
+  abort_unless(in_array($r->user()->role,['super_admin','finance_admin','admin'],true),403,'Unauthorized access. Only Finance Administrators or Super Administrators may restore historical MySkool payments.');
+  $d=$r->validate([
+   'qa_staged_collection_id'=>'required|integer|exists:qa_staged_collections,id',
+   'restoration_mode'=>'nullable|string|in:full,partial',
+   'restore_amount'=>'nullable',
+   'restore_amount_minor'=>'nullable',
+   'reason'=>'required|string|min:5|max:1000',
+   'idempotency_key'=>'nullable|string|max:100',
+   'auto_reconcile'=>'nullable|boolean',
+  ]);
+  $result=$svc->restorePayment((int)$d['qa_staged_collection_id'],$d,(int)$r->user()->id);
+  $notice="Restored {$result['currency']} {$result['restored_amount_formatted']} to outstanding dues ({$result['allocation_status_label']}). Remaining paid on allocation: {$result['currency']} {$result['remaining_paid_formatted']}.";
+  if($r->wantsJson()){
+   return response()->json(array_merge(['success'=>true,'notice'=>$notice],$result));
+  }
+  return back()->with('notice',$notice);
+ }
+
+ public function inspectMySkoolInvoiceItem(Request $r, int $id, \App\Services\Migration\MySkoolPaymentCorrectionService $svc){
+  abort_unless(in_array($r->user()->role,['super_admin','finance_admin','admin'],true),403,'Unauthorized access.');
+  $inspection=$svc->inspectInvoiceItemForMySkool($id);
+  if(empty($inspection['exists'])){
+   return response()->json($inspection,404);
+  }
+  return response()->json($inspection);
+ }
+
+ public function disputeMySkoolPayment(Request $r, \App\Services\Migration\MySkoolPaymentCorrectionService $svc){
+  abort_unless(in_array($r->user()->role,['super_admin','finance_admin','admin'],true),403,'Unauthorized access. Only Finance Administrators or Super Administrators may submit MySkool disputes.');
+  $d=$r->validate([
+   'qa_staged_collection_id'=>'nullable|integer|exists:qa_staged_collections,id',
+   'invoice_item_id'=>'nullable|integer|exists:invoice_items,id',
+   'reason'=>'required|string|min:5|max:1000',
+  ]);
+  $result=$svc->submitDispute($d,(int)$r->user()->id);
+  if($r->wantsJson()){
+   return response()->json(array_merge(['success'=>true,'notice'=>$result['message'] ?? 'Dispute case submitted.'],$result));
+  }
+  return back()->with('notice',$result['message'] ?? 'Dispute case submitted.');
+ }
+
+ public function updateMySkoolDisputeStatus(Request $r, int $id, \App\Services\Migration\MySkoolPaymentCorrectionService $svc){
+  abort_unless(in_array($r->user()->role,['super_admin','finance_admin','admin'],true),403,'Unauthorized access. Only Finance Administrators or Super Administrators may review or resolve MySkool disputes.');
+  $d=$r->validate([
+   'status'=>'required|string|in:under_review,approved,rejected,resolved',
+   'review_notes'=>'nullable|string|max:1000',
+  ]);
+  $result=$svc->updateDisputeStatus($id,$d,(int)$r->user()->id);
+  if($r->wantsJson()){
+   return response()->json(array_merge(['success'=>true,'notice'=>$result['message'] ?? 'Dispute status updated.'],$result));
+  }
+  return back()->with('notice',$result['message'] ?? 'Dispute status updated.');
  }
 
  public function reverseReceipt(Request $r,ReceiptReversalService $svc){
@@ -2018,6 +2430,7 @@ class BillingController {
    $pdfService = app(\App\Services\PdfAccessService::class);
    $hasValidToken = $token && $pdfService->isPathTokenValid('invoice', $i->id, $token);
    $isSigned = $r->hasValidSignature() && $pdfService->isAccessValid('invoice', $i->id, $r->query('k'));
+   $isPublic = $hasValidToken || $isSigned;
    if ($token !== null) {
     abort_if(!$hasValidToken, 403, 'This invoice PDF link is invalid or has been revoked.');
    } elseif ($isSigned) {
@@ -2026,41 +2439,19 @@ class BillingController {
     abort_unless($r->user(), 401);
     $this->assertAccess($r,$i->department_id,$i->campus_id);
    }
-   return $this->renderInvoice($i);
+   return $this->renderInvoice($i, $r, $isPublic);
   }
- private function renderInvoice(object $i){
-  $family=DB::table('families')->where('id',$i->family_id)->first();
-  $invoiceStudentIds = DB::table('invoice_items')->where('invoice_id', $i->id)->pluck('student_id')->filter()->unique()->values();
-  if ($invoiceStudentIds->count() === 1) {
-   $stu = DB::table('students as s')->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')->where('s.id', $invoiceStudentIds[0])->first();
-   $parentDisplay = GuardianNameResolver::forStudentDisplay($stu, $family);
-  } else {
-   $parentDisplay = GuardianNameResolver::forFamilyDisplay($family);
-  }
-  $items=DB::table('invoice_items as item')->join('students as s','s.id','=','item.student_id')->where('item.invoice_id',$i->id)->where('item.status','!=','voided')->select('item.*','s.name','s.gr_number')->get();
-  $dept=DB::table('departments')->where('id',$i->department_id)->first();
-  $branding=DB::table('department_branding')->where('department_id',$i->department_id)->first();
-  $currentPeriod=DB::table('billing_runs')->where('id',$i->billing_run_id)->value('period_start');
-  $previous=(int)DB::table('invoices as older')->join('billing_runs as b','b.id','=','older.billing_run_id')->where('older.id','<>',$i->id)->where('older.family_id',$i->family_id)->where('older.department_id',$i->department_id)->where('older.campus_id',$i->campus_id)->where('older.currency',$i->currency)->whereNotIn('older.status',['void','voided'])->where('b.period_start','<',$currentPeriod)->selectRaw('COALESCE(SUM(CASE WHEN older.total_minor > older.paid_minor THEN older.total_minor-older.paid_minor ELSE 0 END),0) as dues')->value('dues');
-  $history=[];
-  $month=\Carbon\Carbon::parse($currentPeriod)->startOfMonth();
-  for($back=6;$back>=1;$back--){
-   $d=$month->copy()->subMonths($back);
-   $stats=DB::table('invoice_items as x')->join('invoices as ix','ix.id','=','x.invoice_id')->where('ix.family_id',$i->family_id)->where('ix.department_id',$i->department_id)->where('ix.campus_id',$i->campus_id)->where('ix.currency',$i->currency)->where('x.status','!=','voided')->whereNotIn('ix.status',['void','voided'])->where('x.period_start','>=',$d->toDateString())->where('x.period_start','<',$d->copy()->addMonth()->toDateString())->selectRaw('COALESCE(SUM(x.net_minor),0) AS billed,COALESCE(SUM(x.paid_minor),0) AS paid')->first();
-   $status=!(int)$stats->billed?'Not billed':((int)$stats->paid>=(int)$stats->billed?'Paid':((int)$stats->paid>0?'Partial':'Unpaid'));
-   $history[]=['month'=>$d->format('F'),'status'=>$status];
-  }
-  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.invoice',[
-   'i'=>$i,
-   'family'=>$family,
-   'parentDisplay'=>$parentDisplay,
-   'items'=>$items,
-   'dept'=>$dept,
-   'branding'=>$branding,
-   'previous'=>max(0,$previous),
-   'history'=>$history,
-   'banner'=>$this->bannerDataUri($branding)
-  ])->setPaper('a4')->stream($i->invoice_number.'.pdf');
+ private function renderInvoice(object $i, ?Request $r = null, bool $isPublic = false){
+  $targetPeriod = $r && $r->filled('period') ? (string) $r->query('period') : null;
+  $viewData = app(\App\Services\ConsolidatedInvoiceBuilder::class)->buildForInvoice(
+   $i,
+   $r?->user(),
+   $isPublic,
+   $targetPeriod
+  );
+  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.consolidated-challan', $viewData)
+   ->setPaper('a4')
+   ->stream(($i->invoice_number ?: 'Monthly-Fee-Invoice') . '.pdf');
  }
 
  public function studentConsolidatedChallanPdf(int $student, Request $r){
@@ -2073,6 +2464,7 @@ class BillingController {
   abort_unless($s, 404);
 
   if (!in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
+   abort_unless(!empty($r->user()->campus_id), 403);
    $hasAccess = DB::table('enrollments')
     ->where('student_id', $student)
     ->where('campus_id', $r->user()->campus_id)
@@ -2081,65 +2473,23 @@ class BillingController {
    abort_unless($hasAccess, 403);
   }
 
-  $items = DB::table('invoice_items as ii')
-   ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
-   ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
-   ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
-   ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
-   ->where('ii.student_id', $student)
-   ->whereRaw('ii.net_minor > ii.paid_minor')
-   ->whereNotIn('ii.status', ['voided', 'exempted', 'paid'])
-   ->whereNotIn('i.status', ['void', 'voided', 'paid'])
-   ->when(!in_array($r->user()->role, ['super_admin', 'finance_admin'], true), function($q) use ($r) {
-    $q->where('i.campus_id', $r->user()->campus_id)
-      ->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id));
-   })
-   ->select(
-    'ii.*',
-    'i.invoice_number',
-    'i.issued_on',
-    'i.due_date',
-    'i.department_id',
-    'i.campus_id',
-    'd.name as department_name',
-    'e.grade_label',
-    'b.period_start as billing_period'
-   )
-   ->orderBy('ii.currency')
-   ->orderBy('ii.period_start')
-   ->orderBy('ii.id')
-   ->get();
+  $targetInvoiceId = $r->filled('invoice_id') ? (int) $r->query('invoice_id') : null;
+  if ($targetInvoiceId !== null && !in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
+   $targetInv = DB::table('invoices')->where('id', $targetInvoiceId)->where('family_id', $s->family_id)->first();
+   abort_unless($targetInv, 404);
+   $this->assertAccess($r, (int) $targetInv->department_id, (int) $targetInv->campus_id);
+  }
+  $targetPeriod = $r->filled('period') ? (string) $r->query('period') : null;
+  $viewData = app(\App\Services\ConsolidatedInvoiceBuilder::class)->buildStudentViewData(
+   $s,
+   $r->user(),
+   $targetInvoiceId,
+   $targetPeriod
+  );
 
-  $currencyGroups = $items->groupBy('currency')->map(function($cItems, $currency) {
-   return [
-    'currency' => $currency,
-    'items' => $cItems,
-    'total_net_minor' => $cItems->sum('net_minor'),
-    'total_paid_minor' => $cItems->sum('paid_minor'),
-    'total_balance_minor' => $cItems->sum(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor)),
-   ];
-  });
-
-  $enrollment = DB::table('enrollments')->where('student_id', $student)->orderByDesc('id')->first();
-  $primaryDeptId = $items->first()?->department_id ?? $enrollment?->department_id ?? 1;
-  $dept = DB::table('departments')->where('id', $primaryDeptId)->first();
-  $branding = DB::table('department_branding')->where('department_id', $primaryDeptId)->first();
-  $banner = $this->bannerDataUri($branding);
-  $parentDisplay = GuardianNameResolver::forStudentDisplay($s);
-
-  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.consolidated-challan', [
-   'mode' => 'student',
-   'student' => $s,
-   'enrollment' => $enrollment,
-   'parentDisplay' => $parentDisplay,
-   'currencyGroups' => $currencyGroups,
-   'totalItemsCount' => $items->count(),
-   'dept' => $dept,
-   'branding' => $branding,
-   'banner' => $banner,
-   'statementNumber' => 'CHL-STU-' . $s->gr_number . '-' . now()->format('Ymd'),
-   'generatedAt' => now(),
-  ])->setPaper('a4')->stream('Monthly-Fee-Invoice.pdf');
+  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.consolidated-challan', $viewData)
+   ->setPaper('a4')
+   ->stream('Monthly-Fee-Invoice.pdf');
  }
 
  public function familyConsolidatedChallanPdf(Request $r, int $family, ?string $token = null){
@@ -2157,96 +2507,43 @@ class BillingController {
    // Valid legacy signed route
   } elseif (!in_array($r->user()?->role, ['super_admin', 'finance_admin'], true)) {
    abort_unless($r->user(), 401);
+   abort_unless(!empty($r->user()->campus_id), 403);
    $hasAccess = DB::table('enrollments as e')
     ->join('students as s', 's.id', '=', 'e.student_id')
     ->where('s.family_id', $family)
     ->where('e.campus_id', $r->user()->campus_id)
     ->when($r->user()->department_id, fn($q) => $q->where('e.department_id', $r->user()->department_id))
+    ->exists()
+    || DB::table('invoices as i')
+    ->where('i.family_id', $family)
+    ->where('i.campus_id', $r->user()->campus_id)
+    ->when($r->user()->department_id, fn($q) => $q->where('i.department_id', $r->user()->department_id))
     ->exists();
    abort_unless($hasAccess, 403);
   }
 
-  $items = DB::table('invoice_items as ii')
-   ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
-   ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
-   ->join('students as s', 's.id', '=', 'ii.student_id')
-   ->leftJoin('enrollments as e', 'e.id', '=', 'ii.enrollment_id')
-   ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
-   ->where('i.family_id', $family)
-   ->whereRaw('ii.net_minor > ii.paid_minor')
-   ->whereNotIn('ii.status', ['voided', 'exempted', 'paid'])
-   ->whereNotIn('i.status', ['void', 'voided', 'paid'])
-   ->when(!$isPublic && !in_array($r->user()?->role, ['super_admin', 'finance_admin'], true), function($q) use ($r) {
-    if ($r->user()) {
-     $q->where('i.campus_id', $r->user()->campus_id)
-       ->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id));
-    }
-   })
-   ->select(
-    'ii.*',
-    's.name as student_name',
-    's.gr_number',
-    'i.invoice_number',
-    'i.issued_on',
-    'i.due_date',
-    'i.department_id',
-    'i.campus_id',
-    'd.name as department_name',
-    'e.grade_label',
-    'b.period_start as billing_period'
-   )
-   ->orderBy('ii.currency')
-   ->orderBy('s.name')
-   ->orderBy('ii.period_start')
-   ->orderBy('ii.id')
-   ->get();
+  $targetInvoiceId = $r->filled('invoice_id') ? (int) $r->query('invoice_id') : null;
+  if ($targetInvoiceId !== null && $r->user() && !in_array($r->user()->role, ['super_admin', 'finance_admin'], true)) {
+   $targetInv = DB::table('invoices')->where('id', $targetInvoiceId)->where('family_id', $family)->first();
+   abort_unless($targetInv, 404);
+   $this->assertAccess($r, (int) $targetInv->department_id, (int) $targetInv->campus_id);
+  }
+  $targetPeriod = $r->filled('period') ? (string) $r->query('period') : null;
+  $viewData = app(\App\Services\ConsolidatedInvoiceBuilder::class)->buildFamilyViewData(
+   $f,
+   $r->user(),
+   $isPublic,
+   $targetInvoiceId,
+   $targetPeriod
+  );
 
-  $currencyGroups = $items->groupBy('currency')->map(function($cItems, $currency) {
-   $studentsGroup = $cItems->groupBy('student_id')->map(function($sItems) {
-    $first = $sItems->first();
-    return [
-     'student_id' => $first->student_id,
-     'student_name' => $first->student_name,
-     'gr_number' => $first->gr_number,
-     'grade_label' => $first->grade_label,
-     'items' => $sItems,
-     'student_subtotal_balance_minor' => $sItems->sum(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor)),
-    ];
-   });
-   return [
-    'currency' => $currency,
-    'students' => $studentsGroup,
-    'total_net_minor' => $cItems->sum('net_minor'),
-    'total_paid_minor' => $cItems->sum('paid_minor'),
-    'total_balance_minor' => $cItems->sum(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor)),
-   ];
-  });
+  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.consolidated-challan', $viewData)
+   ->setPaper('a4')
+   ->stream('Monthly-Fee-Invoice.pdf');
+ }
 
-  $familyStudents = DB::table('students as s')
-   ->leftJoin('student_registration_details as sd', 'sd.student_id', '=', 's.id')
-   ->where('s.family_id', $family)
-   ->select('s.*', 'sd.father_name', 'sd.guardian_name_override')
-   ->get();
-  $parentDisplay = GuardianNameResolver::forFamilyDisplay($f, $familyStudents);
-
-  $primaryDeptId = $items->first()?->department_id ?? 1;
-  $dept = DB::table('departments')->where('id', $primaryDeptId)->first();
-  $branding = DB::table('department_branding')->where('department_id', $primaryDeptId)->first();
-  $banner = $this->bannerDataUri($branding);
-
-  return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.consolidated-challan', [
-   'mode' => 'family',
-   'family' => $f,
-   'familyStudents' => $familyStudents,
-   'parentDisplay' => $parentDisplay,
-   'currencyGroups' => $currencyGroups,
-   'totalItemsCount' => $items->count(),
-   'dept' => $dept,
-   'branding' => $branding,
-   'banner' => $banner,
-   'statementNumber' => 'CHL-FAM-' . ($f->family_code ?: $f->id) . '-' . now()->format('Ymd'),
-   'generatedAt' => now(),
-  ])->setPaper('a4')->stream('Monthly-Fee-Invoice.pdf');
+ private function resolveAuthoritativeChallanDates(\Illuminate\Support\Collection $items, ?int $targetInvoiceId = null, ?string $targetPeriod = null): array {
+  return app(\App\Services\ConsolidatedInvoiceBuilder::class)->resolveAuthoritativeChallanDates($items, $targetInvoiceId, $targetPeriod);
  }
 
  private function resolveParentDisplay(?string $guardianName, ?string $fatherName): array {

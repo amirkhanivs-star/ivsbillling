@@ -135,12 +135,22 @@ class BatchDeliveryService
 
         // Grade filter
         if (!empty($filters['grade'])) {
-            $q->whereExists(function ($sub) use ($filters) {
+            $grade = $filters['grade'];
+            $q->whereExists(function ($sub) use ($grade) {
                 $sub->selectRaw('1')
                     ->from('invoice_items as fi')
-                    ->join('enrollments as fe', 'fe.id', '=', 'fi.enrollment_id')
+                    ->leftJoin('enrollments as fe', 'fe.id', '=', 'fi.enrollment_id')
                     ->whereColumn('fi.invoice_id', 'i.id')
-                    ->where('fe.grade_label', $filters['grade']);
+                    ->where(function ($gq) use ($grade) {
+                        $gq->where('fe.grade_label', $grade)
+                            ->orWhereExists(function ($eq) use ($grade) {
+                                $eq->selectRaw('1')
+                                    ->from('enrollments as active_fe')
+                                    ->whereColumn('active_fe.student_id', 'fi.student_id')
+                                    ->where('active_fe.status', 'active')
+                                    ->where('active_fe.grade_label', $grade);
+                            });
+                    });
             });
         }
 
@@ -250,6 +260,7 @@ class BatchDeliveryService
                 'excluded_breakdown' => [
                     'superseded' => 0,
                     'contact_ineligible' => 0,
+                    'data_integrity_hold' => 0,
                     'already_submitted' => 0,
                     'already_delivered' => 0,
                     'already_queued' => 0,
@@ -278,10 +289,23 @@ class BatchDeliveryService
         $excludedBreakdown = [
             'superseded' => 0,
             'contact_ineligible' => 0,
+            'data_integrity_hold' => 0,
             'already_submitted' => 0,
             'already_delivered' => 0,
             'already_queued' => 0,
         ];
+
+        $periodForSummary = !empty($filters['period'])
+            ? (string) $filters['period']
+            : ($allInvoices->first()?->billing_period_start ? substr((string) $allInvoices->first()->billing_period_start, 0, 7) : date('Y-m'));
+
+        $consolidatedSummaries = ($webhookType === 'monthly')
+            ? app(ConsolidatedInvoiceBuilder::class)->summarizeFamiliesOutstanding(
+                $allInvoices->pluck('family_id')->unique()->filter()->values()->all(),
+                $periodForSummary,
+                $user
+            )
+            : [];
 
         foreach ($grouped as $groupKey => $invoicesGroup) {
             // Sort group so that the latest appropriate invoice comes first
@@ -331,6 +355,16 @@ class BatchDeliveryService
                             $excludedReasons[$oldId] = "Superseded for delivery by invoice {$primaryInvoice->invoice_number}";
                         }
                     }
+                }
+
+                // Enforce canonical financial data-integrity verification before eligibility
+                $famSummary = $consolidatedSummaries[(int) $primaryInvoice->family_id] ?? null;
+                if (!$famSummary || !empty($famSummary['has_data_integrity_issue']) || empty($famSummary['is_payable_verified']) || empty($famSummary['currencies_map'])) {
+                    $holdMessage = $famSummary['data_integrity_message']
+                        ?? "Data Integrity Issue: Unverified consolidated payable balance for invoice {$primaryInvoice->invoice_number}. Flagged for staff review.";
+                    $excludedBreakdown['data_integrity_hold']++;
+                    $excludedReasons[$primaryInvoice->id] = $holdMessage;
+                    continue;
                 }
             }
 
@@ -407,14 +441,39 @@ class BatchDeliveryService
             }
 
             // Calculate multi-currency breakdowns for this family
-            $familyCurrencies = $invoicesGroup->groupBy('currency')->map(function ($cInvs, $cName) {
-                return [
-                    'currency' => $cName,
-                    'total_minor' => $cInvs->sum('total_minor'),
-                    'paid_minor' => $cInvs->sum('paid_minor'),
-                    'outstanding_minor' => $cInvs->sum(fn($i) => max(0, (int)$i->total_minor - (int)$i->paid_minor)),
-                ];
-            });
+            if ($webhookType === 'monthly' && !empty($famSummary['currencies_map'])) {
+                $familyCurrencies = collect($famSummary['currencies_map'])->map(function ($cSummary, $cName) {
+                    $payableMinor = (int) ($cSummary['total_payable_minor'] ?? 0);
+                    return [
+                        'currency' => $cName,
+                        'total_minor' => $payableMinor,
+                        'paid_minor' => 0,
+                        'outstanding_minor' => $payableMinor,
+                        'previous_dues_minor' => (int) ($cSummary['previous_dues_minor'] ?? 0),
+                        'selected_month_minor' => (int) ($cSummary['selected_month_minor'] ?? 0),
+                        'later_period_minor' => (int) ($cSummary['later_period_minor'] ?? 0),
+                        'formatted_total_payable' => $cSummary['formatted_total_payable'] ?? ($cName . ' ' . Money::format($payableMinor)),
+                    ];
+                });
+            } else {
+                $familyCurrencies = $invoicesGroup->groupBy('currency')->map(function ($cInvs, $cName) {
+                    return [
+                        'currency' => $cName,
+                        'total_minor' => $cInvs->sum('total_minor'),
+                        'paid_minor' => $cInvs->sum('paid_minor'),
+                        'outstanding_minor' => $cInvs->sum(fn($i) => max(0, (int)$i->total_minor - (int)$i->paid_minor)),
+                    ];
+                });
+            }
+
+            $primaryCurrCode = (string) ($primaryInvoice->currency ?: 'SAR');
+            $primaryCurrStat = $familyCurrencies->get($primaryCurrCode) ?? $familyCurrencies->first();
+            $recipientTotalMinor = ($webhookType === 'monthly' && $primaryCurrStat)
+                ? (int) $primaryCurrStat['total_minor']
+                : (int) $primaryInvoice->total_minor;
+            $recipientOutstandingMinor = ($webhookType === 'monthly' && $primaryCurrStat)
+                ? (int) $primaryCurrStat['outstanding_minor']
+                : max(0, (int)$primaryInvoice->total_minor - (int)$primaryInvoice->paid_minor);
 
             $eligibleRecipients[] = [
                 'invoice_id' => $primaryInvoice->id,
@@ -424,9 +483,9 @@ class BatchDeliveryService
                 'guardian_name' => GuardianNameResolver::isValid($primaryInvoice->guardian_name) ? $primaryInvoice->guardian_name : GuardianNameResolver::forFamily($primaryInvoice->family_id),
                 'whatsapp' => $primaryInvoice->whatsapp,
                 'currency' => $primaryInvoice->currency,
-                'total_minor' => (int)$primaryInvoice->total_minor,
+                'total_minor' => $recipientTotalMinor,
                 'paid_minor' => (int)$primaryInvoice->paid_minor,
-                'outstanding_minor' => max(0, (int)$primaryInvoice->total_minor - (int)$primaryInvoice->paid_minor),
+                'outstanding_minor' => $recipientOutstandingMinor,
                 'currencies_breakdown' => $familyCurrencies->all(),
                 'is_multi_currency' => ($familyCurrencies->count() > 1),
                 'billing_period' => $primaryInvoice->billing_period_start ? substr($primaryInvoice->billing_period_start, 0, 7) : null,
@@ -577,11 +636,34 @@ class BatchDeliveryService
         $eventType = ($webhookType === 'paid') ? 'invoice.paid.batch' : 'invoice.monthly.batch';
         $channelsStr = implode(',', $channels);
 
+        $consolidatedBuilder = app(ConsolidatedInvoiceBuilder::class);
+        if ($webhookType === 'monthly' && !$consolidatedBuilder->canDispatchFullFamilyStatement($user)) {
+            throw new RuntimeException('Unauthorized: Restricted staff cannot dispatch unrestricted full-family consolidated fee statements.');
+        }
+
         $webhookService = app(WebhookSettingService::class);
         $setting = $webhookService->getSettings($webhookType);
 
         if (!$setting || !$setting->is_enabled || empty($setting->url)) {
             throw new RuntimeException(ucfirst($webhookType) . " Invoice Webhook is disabled or not configured in Settings → Webhooks.");
+        }
+
+        // If explicitInvoiceIds provided, validate server-side financial integrity before staging
+        if ($explicitInvoiceIds !== null && $webhookType === 'monthly') {
+            $explicitInvoices = DB::table('invoices')->whereIn('id', $explicitInvoiceIds)->get();
+            $explicitFamilyIds = $explicitInvoices->pluck('family_id')->unique()->filter()->values()->all();
+            $periodCheck = $billingPeriod ?: ($filters['period'] ?? date('Y-m'));
+            $eligibilityMap = $consolidatedBuilder->evaluateFamiliesDispatchEligibility($explicitFamilyIds, $periodCheck, $user);
+
+            foreach ($explicitInvoices as $expInv) {
+                $elig = $eligibilityMap[(int) $expInv->family_id] ?? null;
+                if (!$elig || !$elig['can_dispatch']) {
+                    $blockReason = $elig['block_reason']
+                        ?? "Data Integrity Issue: Invoice {$expInv->invoice_number} has an unverified payable balance. Flagged for staff review.";
+                    $this->recordDataIntegrityBlockedNotification($expInv, $channels, $webhookType, $blockReason, (int) $user->id);
+                    throw new RuntimeException($blockReason);
+                }
+            }
         }
 
         // Resolve snapshot server-side
@@ -605,6 +687,18 @@ class BatchDeliveryService
         }
 
         if (empty($snapshot['eligible_invoice_ids'])) {
+            if ($webhookType === 'monthly' && !empty($snapshot['excluded_breakdown']['data_integrity_hold'])) {
+                foreach ($snapshot['excluded_reasons'] as $heldInvId => $heldReason) {
+                    if (str_contains((string) $heldReason, 'Data Integrity Issue')) {
+                        $heldInv = DB::table('invoices')->where('id', (int) $heldInvId)->first();
+                        if ($heldInv) {
+                            $this->recordDataIntegrityBlockedNotification($heldInv, $channels, $webhookType, (string) $heldReason, (int) $user->id);
+                        }
+                    }
+                }
+                throw new RuntimeException('Dispatch blocked: Selected invoice(s) have unverified financial data-integrity discrepancies requiring staff review.');
+            }
+
             return [
                 'batch_id' => null,
                 'status' => 'empty',
@@ -818,6 +912,11 @@ class BatchDeliveryService
             throw new RuntimeException("Batch {$batchId} not found.");
         }
 
+        $consolidatedBuilder = app(ConsolidatedInvoiceBuilder::class);
+        if (($batch->webhook_type ?? 'monthly') === 'monthly' && !$consolidatedBuilder->canDispatchFullFamilyStatement($user)) {
+            throw new RuntimeException('Unauthorized: Restricted staff cannot dispatch unrestricted full-family consolidated fee statements.');
+        }
+
         $failedNotifications = DB::table('notifications')
             ->where('batch_id', $batchId)
             ->where('status', 'failed')
@@ -844,6 +943,12 @@ class BatchDeliveryService
                 continue;
             }
             $failureReason = WebhookSettingService::evaluateContactEligibility($family, $channels);
+            if (($batch->webhook_type ?? 'monthly') === 'monthly' && $invoice) {
+                $elig = $consolidatedBuilder->evaluateFamilyDispatchEligibility((int) $invoice->family_id, $batch->billing_period ?? null, $user);
+                if (!$elig['can_dispatch']) {
+                    $failureReason = $elig['block_reason'];
+                }
+            }
             if (($batch->webhook_type ?? 'monthly') === 'paid' && (!$invoice || !PaidInvoiceEligibility::eligible((int) $notif->invoice_id))) {
                 $failureReason = 'Paid invoice no longer qualifies for receipt delivery.';
             }
@@ -855,6 +960,19 @@ class BatchDeliveryService
                 DB::table('notifications')->where('id', $notif->id)->update([
                     'status' => 'blocked',
                     'error' => $failureReason,
+                    'updated_at' => now(),
+                ]);
+                DB::table('audit_logs')->insert([
+                    'actor_id' => $user->id,
+                    'action' => 'notification.retry_blocked',
+                    'subject_type' => 'notification',
+                    'subject_id' => $notif->id,
+                    'metadata' => json_encode([
+                        'batch_id' => $batchId,
+                        'invoice_id' => $notif->invoice_id,
+                        'reason' => $failureReason,
+                    ]),
+                    'created_at' => now(),
                     'updated_at' => now(),
                 ]);
             } else {
@@ -884,6 +1002,69 @@ class BatchDeliveryService
             'retried_count' => $retriedCount,
             'message' => "Retried {$retriedCount} failed recipient(s) in Batch {$batchId}.",
         ];
+    }
+
+    /**
+     * Record a blocked notification and audit log entry when a financial data-integrity hold
+     * prevents outbound dispatch, without modifying any financial ledger records.
+     */
+    private function recordDataIntegrityBlockedNotification(
+        object $invoice,
+        array $channels,
+        string $webhookType,
+        string $reason,
+        int $actorId
+    ): void {
+        $channelsStr = implode(',', array_values(array_unique($channels)));
+        $existing = DB::table('notifications')
+            ->where('invoice_id', $invoice->id)
+            ->where('channel', $channelsStr)
+            ->where('kind', $webhookType)
+            ->first();
+
+        if ($existing) {
+            if (!in_array($existing->status, ['submitted', 'delivered', 'read'], true)) {
+                DB::table('notifications')->where('id', $existing->id)->update([
+                    'status' => 'blocked',
+                    'error' => $reason,
+                    'approved_by' => $actorId,
+                    'updated_at' => now(),
+                ]);
+            }
+            $notifId = $existing->id;
+        } else {
+            $notifId = DB::table('notifications')->insertGetId([
+                'invoice_id' => $invoice->id,
+                'channel' => $channelsStr,
+                'kind' => $webhookType,
+                'webhook_type' => $webhookType,
+                'event_type' => "invoice.{$webhookType}",
+                'channels' => json_encode(array_values(array_unique($channels))),
+                'idempotency_key' => "inv-{$invoice->id}-{$webhookType}-blocked-" . Str::random(10),
+                'event_id' => (string) Str::uuid(),
+                'status' => 'blocked',
+                'error' => $reason,
+                'approved_by' => $actorId,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        DB::table('audit_logs')->insert([
+            'actor_id' => $actorId,
+            'action' => 'notification.blocked_financial_integrity',
+            'subject_type' => 'notification',
+            'subject_id' => $notifId,
+            'metadata' => json_encode([
+                'invoice_id' => $invoice->id,
+                'invoice_number' => $invoice->invoice_number ?? null,
+                'family_id' => $invoice->family_id ?? null,
+                'webhook_type' => $webhookType,
+                'reason' => $reason,
+            ]),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     private function enqueueDispatch(string $batchId, ?array $notificationIds, string $webhookType): void

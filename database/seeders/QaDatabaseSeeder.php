@@ -50,8 +50,8 @@ class QaDatabaseSeeder extends Seeder
                 [
                     'display_name' => 'IQRA Virtual School (QA)',
                     'payment_instructions' => 'QA Test Portal - Simulated payments only.',
-                    'footer_email' => 'qa_support@iqra.test',
-                    'footer_phone' => '+920000000000',
+                    'footer_email' => 'acivs2021@gmail.com',
+                    'footer_phone' => '+923255245551',
                     'updated_at' => $now,
                     'created_at' => $now,
                 ]

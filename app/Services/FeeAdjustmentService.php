@@ -387,28 +387,20 @@ final class FeeAdjustmentService
                     : null;
                 $historicalMap = app(\App\Services\Migration\HistoricalOpeningBalanceService::class)
                     ->buildHistoricalObligationMap([$grNumber]);
-                $histCheck = \App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
+                $voidedEval = \App\Services\Migration\HistoricalOpeningBalanceService::evaluateVoidedImportedObligation(
+                    DB::connection(),
                     $historicalMap,
+                    $item,
                     $grNumber,
                     $feeTypeCode,
                     $periodStart,
                     $currency,
                     $subjectName
                 );
-                if ($histCheck === null && !in_array($feeTypeCode, ['monthly', 'tuition'], true)) {
-                    $histCheck = \App\Services\Migration\HistoricalOpeningBalanceService::checkHistoricalObligation(
-                        $historicalMap,
-                        $grNumber,
-                        $feeTypeCode,
-                        'ONE_TIME',
-                        $currency,
-                        $subjectName
-                    );
-                }
-                if ($histCheck !== null && ($histCheck['blocks_billing'] ?? true)) {
-                    $msg = !empty($histCheck['is_settled'])
-                        ? 'Payment has already been received for this fee and period.'
-                        : 'This fee period is already represented in historical MySkool records and cannot be recreated.';
+                if (!$voidedEval['can_recreate']) {
+                    $msg = $voidedEval['recreate_block_reason']
+                        ?? $voidedEval['reason']
+                        ?? 'This fee period is already represented in historical MySkool records and cannot be recreated.';
                     throw ValidationException::withMessages([
                         'fee_type_ids' => $msg,
                         'item' => $msg,
@@ -423,7 +415,131 @@ final class FeeAdjustmentService
                 ]);
             }
 
-            DB::table('invoice_items')->where('id', $invoiceItemId)->update([
+            // Ensure we never silently unvoid the original invoice header or attach replacement items to an opening_balance invoice.
+            $previousInvoice = DB::table('invoices')->where('id', $previousInvoiceId)->lockForUpdate()->first();
+            $targetInvoice = $targetInvoiceId === $previousInvoiceId
+                ? $previousInvoice
+                : DB::table('invoices')->where('id', $targetInvoiceId)->lockForUpdate()->first();
+
+            $targetRunFreq = $targetInvoice && !empty($targetInvoice->billing_run_id)
+                ? (string) (DB::table('billing_runs')->where('id', $targetInvoice->billing_run_id)->value('frequency') ?? '')
+                : '';
+
+            if (
+                !$targetInvoice
+                || in_array((string) ($targetInvoice->status ?? ''), ['void', 'voided'], true)
+                || strtoupper(trim((string) ($targetInvoice->currency ?? ''))) !== $currency
+                || $targetRunFreq === 'opening_balance'
+            ) {
+                $runPeriodKey = "monthly:{$periodStart}..{$periodEnd}";
+                $familyId = (int) ($previousInvoice->family_id ?? DB::table('students')->where('id', $studentId)->value('family_id'));
+                $campusId = (int) ($previousInvoice->campus_id ?? 1);
+                $departmentId = (int) ($previousInvoice->department_id ?? 1);
+
+                $activeTargetInvoice = DB::table('invoices as i')
+                    ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+                    ->where('b.frequency', '!=', 'opening_balance')
+                    ->where('b.period_key', $runPeriodKey)
+                    ->where('i.family_id', $familyId)
+                    ->where('i.campus_id', $campusId)
+                    ->where('i.department_id', $departmentId)
+                    ->where('i.currency', $currency)
+                    ->whereNotIn('i.status', ['void', 'voided'])
+                    ->select('i.*')
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($activeTargetInvoice) {
+                    $targetInvoiceId = (int) $activeTargetInvoice->id;
+                } else {
+                    $billingRunId = (int) ($previousInvoice->billing_run_id ?? 0);
+                    $run = $billingRunId > 0 ? DB::table('billing_runs')->where('id', $billingRunId)->first() : null;
+                    if (!$run || ($run->frequency ?? '') === 'opening_balance') {
+                        $run = DB::table('billing_runs')
+                            ->where('campus_id', $campusId)
+                            ->where('department_id', $departmentId)
+                            ->where('frequency', 'monthly')
+                            ->where('period_key', $runPeriodKey)
+                            ->first();
+                    }
+                    if (!$run) {
+                        $issuedOn = BillingPeriod::resolveIssueDate();
+                        $dueDate = BillingPeriod::calculateDueDate(
+                            (int) substr($periodStart, 0, 4),
+                            (int) substr($periodStart, 5, 2),
+                            BillingPeriod::DEFAULT_DUE_DAY,
+                            $issuedOn
+                        );
+                        $billingRunId = DB::table('billing_runs')->insertGetId([
+                            'campus_id' => $campusId,
+                            'department_id' => $departmentId,
+                            'frequency' => 'monthly',
+                            'period_key' => $runPeriodKey,
+                            'period_start' => $periodStart,
+                            'period_end' => $periodEnd,
+                            'due_date' => $dueDate,
+                            'status' => 'generated',
+                            'created_by' => (int) $actorId,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    } else {
+                        $billingRunId = (int) $run->id;
+                    }
+
+                    $deptCode = DB::table('departments')->where('id', $departmentId)->value('code') ?? 'SCH';
+                    $issuedOn = BillingPeriod::resolveIssueDate();
+                    $dueDate = BillingPeriod::calculateDueDate(
+                        (int) substr($periodStart, 0, 4),
+                        (int) substr($periodStart, 5, 2),
+                        BillingPeriod::DEFAULT_DUE_DAY,
+                        $issuedOn
+                    );
+
+                    $invoiceInsert = [
+                        'billing_run_id' => $billingRunId,
+                        'family_id' => $familyId,
+                        'campus_id' => $campusId,
+                        'department_id' => $departmentId,
+                        'currency' => $currency,
+                        'invoice_number' => 'PENDING-' . \Illuminate\Support\Str::uuid(),
+                        'issued_on' => $issuedOn,
+                        'due_date' => $dueDate,
+                        'total_minor' => 0,
+                        'paid_minor' => 0,
+                        'previous_dues_snapshot_minor' => 0,
+                        'status' => 'generated',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ];
+                    if (
+                        $previousInvoice
+                        && in_array((string) ($previousInvoice->status ?? ''), ['void', 'voided'], true)
+                        && \Illuminate\Support\Facades\Schema::hasColumn('invoices', 'replaces_invoice_id')
+                    ) {
+                        $invoiceInsert['replaces_invoice_id'] = $previousInvoiceId;
+                    }
+
+                    $targetInvoiceId = (int) DB::table('invoices')->insertGetId($invoiceInsert);
+                    DB::table('invoices')->where('id', $targetInvoiceId)->update([
+                        'invoice_number' => strtoupper(substr((string) $deptCode, 0, 3)) . '-' . substr($periodStart, 0, 4) . '-' . str_pad((string) $targetInvoiceId, 7, '0', STR_PAD_LEFT),
+                    ]);
+
+                    if (
+                        $previousInvoice
+                        && in_array((string) ($previousInvoice->status ?? ''), ['void', 'voided'], true)
+                        && \Illuminate\Support\Facades\Schema::hasColumn('invoices', 'replaced_by_invoice_id')
+                    ) {
+                        DB::table('invoices')->where('id', $previousInvoiceId)->update([
+                            'replaced_by_invoice_id' => $targetInvoiceId,
+                            'updated_at' => now(),
+                        ]);
+                    }
+                }
+            }
+
+            // Insert a NEW active replacement invoice_items row while preserving the original voided item for audit.
+            $newItemPayload = [
                 'invoice_id' => $targetInvoiceId,
                 'student_id' => $studentId,
                 'enrollment_id' => $enrollmentId,
@@ -440,8 +556,30 @@ final class FeeAdjustmentService
                 'net_minor' => $netMinor,
                 'paid_minor' => 0,
                 'status' => 'active',
+                'created_at' => now(),
                 'updated_at' => now(),
-            ]);
+            ];
+            if (\Illuminate\Support\Facades\Schema::hasColumn('invoice_items', 'replaces_invoice_item_id')) {
+                $newItemPayload['replaces_invoice_item_id'] = $invoiceItemId;
+            }
+            $newItemId = (int) DB::table('invoice_items')->insertGetId($newItemPayload);
+
+            // Preserve original voided item in status='voided', net_minor=0, and link it to the replacement item.
+            $voidedUpdate = [
+                'status' => 'voided',
+                'net_minor' => 0,
+                'updated_at' => now(),
+            ];
+            if (\Illuminate\Support\Facades\Schema::hasColumn('invoice_items', 'replaced_by_invoice_item_id')) {
+                $voidedUpdate['replaced_by_invoice_item_id'] = $newItemId;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('invoice_items', 'replaced_at')) {
+                $voidedUpdate['replaced_at'] = now();
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('invoice_items', 'replacement_reason')) {
+                $voidedUpdate['replacement_reason'] = $reason;
+            }
+            DB::table('invoice_items')->where('id', $invoiceItemId)->update($voidedUpdate);
 
             DB::table('fee_installments')
                 ->where('invoice_item_id', $invoiceItemId)
@@ -452,15 +590,28 @@ final class FeeAdjustmentService
                 ]);
 
             DB::table('fee_adjustments')->insert([
-                'invoice_item_id' => $invoiceItemId,
-                'user_id' => (int) $actorId,
-                'kind' => 'recreated',
-                'amount_minor' => $netMinor,
-                'previous_amount_minor' => 0,
-                'new_amount_minor' => $netMinor,
-                'reason' => $reason,
-                'created_at' => now(),
-                'updated_at' => now(),
+                [
+                    'invoice_item_id' => $invoiceItemId,
+                    'user_id' => (int) $actorId,
+                    'kind' => 'recreated',
+                    'amount_minor' => $netMinor,
+                    'previous_amount_minor' => 0,
+                    'new_amount_minor' => $netMinor,
+                    'reason' => $reason . " (Replaced by invoice item #{$newItemId})",
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ],
+                [
+                    'invoice_item_id' => $newItemId,
+                    'user_id' => (int) $actorId,
+                    'kind' => 'recreated',
+                    'amount_minor' => $netMinor,
+                    'previous_amount_minor' => 0,
+                    'new_amount_minor' => $netMinor,
+                    'reason' => $reason . " (Replaces voided invoice item #{$invoiceItemId})",
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ],
             ]);
 
             $invoiceSvc = new InvoiceService();
@@ -473,10 +624,14 @@ final class FeeAdjustmentService
                 'actor_id' => $actorId,
                 'action' => 'fee_recreated',
                 'subject_type' => 'invoice_item',
-                'subject_id' => $invoiceItemId,
+                'subject_id' => $newItemId,
                 'metadata' => json_encode([
+                    'original_voided_item_id' => $invoiceItemId,
+                    'replacement_item_id' => $newItemId,
                     'invoice_id' => $targetInvoiceId,
                     'previous_invoice_id' => $previousInvoiceId,
+                    'original_currency' => $item->currency,
+                    'original_amount_minor' => (int) $item->amount_minor,
                     'fee_plan_item_id' => $feePlanItemId,
                     'period_key' => $periodKey,
                     'amount_minor' => $amountMinor,
@@ -489,7 +644,7 @@ final class FeeAdjustmentService
                 'updated_at' => now(),
             ]);
 
-            return DB::table('invoice_items')->where('id', $invoiceItemId)->first();
+            return DB::table('invoice_items')->where('id', $newItemId)->first();
         }, 3);
     }
 

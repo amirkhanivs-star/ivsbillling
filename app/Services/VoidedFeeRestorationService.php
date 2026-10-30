@@ -62,17 +62,21 @@ class VoidedFeeRestorationService
             return [
                 'exists' => false,
                 'is_safe_to_restore' => false,
+                'is_safe_to_recreate_current' => false,
+                'recreate_block_reason' => "Invoice item #{$invoiceItemId} not found.",
                 'safety_status' => self::SAFETY_BLOCKED_INSUFFICIENT_EVIDENCE,
                 'error' => "Invoice item #{$invoiceItemId} not found.",
             ];
         }
 
         // 1. Verify item voided status
-        if ($item->status !== 'voided') {
+        if (!in_array((string) $item->status, ['void', 'voided'], true)) {
             return [
                 'exists' => true,
                 'invoice_item_id' => $invoiceItemId,
                 'is_safe_to_restore' => false,
+                'is_safe_to_recreate_current' => false,
+                'recreate_block_reason' => "Invoice item #{$invoiceItemId} is not in voided status (current status: '{$item->status}'). Only voided items can be recreated.",
                 'safety_status' => self::SAFETY_BLOCKED_ALREADY_ACTIVE,
                 'error' => "Invoice item #{$invoiceItemId} is not in voided status (current status: '{$item->status}'). Only voided items can be restored.",
                 'item' => $item,
@@ -114,6 +118,8 @@ class VoidedFeeRestorationService
                 'exists' => true,
                 'invoice_item_id' => $invoiceItemId,
                 'is_safe_to_restore' => false,
+                'is_safe_to_recreate_current' => false,
+                'recreate_block_reason' => "Could not verify original approved financial value for item #{$invoiceItemId}. Refusing unsafe recreation.",
                 'safety_status' => self::SAFETY_BLOCKED_INSUFFICIENT_EVIDENCE,
                 'error' => "Could not verify original approved financial value for item #{$invoiceItemId}. Refusing unsafe restoration.",
                 'item' => $item,
@@ -141,10 +147,15 @@ class VoidedFeeRestorationService
 
         $activeDuplicate = $duplicateQuery->select('ii.id', 'inv.invoice_number', 'ii.status', 'ii.net_minor', 'ii.paid_minor')->first();
         if ($activeDuplicate) {
+            $currentResolved = $this->resolveCurrentSettingsForItem($db, $item, $approvedNetMinor, $conn);
             return [
                 'exists' => true,
                 'invoice_item_id' => $invoiceItemId,
                 'is_safe_to_restore' => false,
+                'is_safe_to_recreate_current' => false,
+                'recreate_block_reason' => "Cannot recreate item #{$invoiceItemId}: an active invoice item (#{$activeDuplicate->id} on {$activeDuplicate->invoice_number}) already exists for this fee obligation and period.",
+                'has_settings_changed' => $currentResolved['has_settings_changed'],
+                'current_approved_settings' => $currentResolved['current_approved_settings'],
                 'safety_status' => self::SAFETY_BLOCKED_DUPLICATE_ACTIVE,
                 'error' => "Cannot restore item #{$invoiceItemId}: an active invoice item (#{$activeDuplicate->id} on {$activeDuplicate->invoice_number}) already exists for this fee obligation and period.",
                 'active_duplicate' => $activeDuplicate,
@@ -168,10 +179,15 @@ class VoidedFeeRestorationService
             ->get();
 
         if ($activeAllocations->isNotEmpty() || (!$existingSettlement && (int) $item->paid_minor > 0)) {
+            $currentResolved = $this->resolveCurrentSettingsForItem($db, $item, $approvedNetMinor, $conn);
             return [
                 'exists' => true,
                 'invoice_item_id' => $invoiceItemId,
                 'is_safe_to_restore' => false,
+                'is_safe_to_recreate_current' => false,
+                'recreate_block_reason' => "Cannot recreate item #{$invoiceItemId}: active cashier payment allocations or paid balances exist on this item. Intervening cashier receipts must be resolved first.",
+                'has_settings_changed' => $currentResolved['has_settings_changed'],
+                'current_approved_settings' => $currentResolved['current_approved_settings'],
                 'safety_status' => self::SAFETY_BLOCKED_INTERVENING_PAYMENTS,
                 'error' => "Cannot restore item #{$invoiceItemId}: active cashier payment allocations or paid balances exist on this item. Intervening cashier receipts must be resolved first.",
                 'item' => $item,
@@ -227,13 +243,16 @@ class VoidedFeeRestorationService
 
         if ($hasStagedCurrencyConflict || $crossCurrencyCollections->isNotEmpty()) {
             $conflictCurr = $crossCurrencyCollections->pluck('currency')->unique()->implode(', ');
+            $blockErr = "Cannot restore item #{$invoiceItemId}: cross-currency conflict detected between invoice item ({$item->currency}) and historical MySkool records ({$conflictCurr}).";
             return [
                 'exists' => true,
                 'invoice_item_id' => $invoiceItemId,
                 'is_safe_to_restore' => false,
+                'is_safe_to_recreate_current' => false,
+                'recreate_block_reason' => $blockErr,
                 'safety_status' => self::SAFETY_BLOCKED_CURRENCY_CONFLICT,
                 'action_description' => 'Restoration blocked due to cross-currency conflict with historical MySkool records.',
-                'error' => "Cannot restore item #{$invoiceItemId}: cross-currency conflict detected between invoice item ({$item->currency}) and historical MySkool records ({$conflictCurr}).",
+                'error' => $blockErr,
                 'original_approved_values' => [
                     'amount_minor' => $amountMinor,
                     'discount_minor' => $discountMinor,
@@ -262,12 +281,15 @@ class VoidedFeeRestorationService
 
         // Check if any matched source collection row has already been consumed by another invoice item
         if ($hasSettlementsTable && !empty($postCutoffCollectionIds) && $this->hasConsumedCollectionIds($db, $invoiceItemId, $postCutoffCollectionIds)) {
+            $blockErr = 'CRITICAL INTEGRITY VIOLATION: Historical source collection has already been consumed by another invoice item.';
             return [
                 'exists' => true,
                 'invoice_item_id' => $invoiceItemId,
                 'is_safe_to_restore' => false,
+                'is_safe_to_recreate_current' => false,
+                'recreate_block_reason' => $blockErr,
                 'safety_status' => self::SAFETY_BLOCKED_CONSTRAINT_CONFLICT,
-                'error' => 'CRITICAL INTEGRITY VIOLATION: Historical source collection has already been consumed by another invoice item.',
+                'error' => $blockErr,
                 'item' => $item,
             ];
         }
@@ -282,12 +304,15 @@ class VoidedFeeRestorationService
 
         if ($settledMinor === 0 && !$existingSettlement) {
             if ($preCutoffPaidMinor > 0 && (!$isOpeningBalanceItem || (!$stagedDueRow && $preCutoffPaidMinor >= $approvedNetMinor))) {
+                $blockErr = "Cannot restore item #{$invoiceItemId} as unpaid: this fee period already has pre-cutoff historical MySkool payment evidence ({$item->currency} " . number_format($preCutoffPaidMinor / 100, 2) . ").";
                 return [
                     'exists' => true,
                     'invoice_item_id' => $invoiceItemId,
                     'is_safe_to_restore' => false,
+                    'is_safe_to_recreate_current' => false,
+                    'recreate_block_reason' => $blockErr,
                     'safety_status' => self::SAFETY_BLOCKED_CONSTRAINT_CONFLICT,
-                    'error' => "Cannot restore item #{$invoiceItemId} as unpaid: this fee period already has pre-cutoff historical MySkool payment evidence ({$item->currency} " . number_format($preCutoffPaidMinor / 100, 2) . ").",
+                    'error' => $blockErr,
                     'item' => $item,
                 ];
             }
@@ -297,7 +322,7 @@ class VoidedFeeRestorationService
                 $subjectName = $item->fee_plan_item_id
                     ? $db->table('fee_plan_items')->where('id', $item->fee_plan_item_id)->value('subject_name')
                     : null;
-                $historicalMap = app(HistoricalOpeningBalanceService::class)->buildHistoricalObligationMap([(string) $item->gr_number]);
+                $historicalMap = app(HistoricalOpeningBalanceService::class)->buildHistoricalObligationMap([(string) $item->gr_number], null, $conn);
                 $histCheck = HistoricalOpeningBalanceService::checkHistoricalObligation(
                     $historicalMap,
                     (string) $item->gr_number,
@@ -307,15 +332,30 @@ class VoidedFeeRestorationService
                     $subjectName
                 );
                 if ($histCheck !== null && ($histCheck['blocks_billing'] ?? true)) {
-                    $isCurrConflict = ($histCheck['status'] ?? '') === 'cross_currency_conflict';
-                    return [
-                        'exists' => true,
-                        'invoice_item_id' => $invoiceItemId,
-                        'is_safe_to_restore' => false,
-                        'safety_status' => $isCurrConflict ? self::SAFETY_BLOCKED_CURRENCY_CONFLICT : self::SAFETY_BLOCKED_CONSTRAINT_CONFLICT,
-                        'error' => "Cannot restore item #{$invoiceItemId}: this fee period is already represented in historical MySkool records (" . ($histCheck['reason'] ?? 'historical obligation protection') . ").",
-                        'item' => $item,
-                    ];
+                    $voidedEval = HistoricalOpeningBalanceService::evaluateVoidedImportedObligation(
+                        $db,
+                        $historicalMap,
+                        $item,
+                        (string) $item->gr_number,
+                        $feeTypeCode,
+                        (string) $item->period_start,
+                        (string) $item->currency,
+                        $subjectName
+                    );
+                    if (!$voidedEval['can_recreate']) {
+                        $isCurrConflict = ($histCheck['status'] ?? '') === 'cross_currency_conflict';
+                        $blockErr = "Cannot restore item #{$invoiceItemId}: this fee period is already represented in historical MySkool records (" . ($histCheck['reason'] ?? 'historical obligation protection') . ").";
+                        return [
+                            'exists' => true,
+                            'invoice_item_id' => $invoiceItemId,
+                            'is_safe_to_restore' => false,
+                            'is_safe_to_recreate_current' => false,
+                            'recreate_block_reason' => $voidedEval['recreate_block_reason'] ?? $voidedEval['reason'] ?? $blockErr,
+                            'safety_status' => $isCurrConflict ? self::SAFETY_BLOCKED_CURRENCY_CONFLICT : self::SAFETY_BLOCKED_CONSTRAINT_CONFLICT,
+                            'error' => $blockErr,
+                            'item' => $item,
+                        ];
+                    }
                 }
             }
         }
@@ -349,10 +389,62 @@ class VoidedFeeRestorationService
             $actionDescription = "Atomic restoration with partial historical settlement ({$item->currency} " . number_format($settledMinor / 100, 2) . "). Remaining balance ({$item->currency} " . number_format($remainingCollectibleMinor / 100, 2) . ") preserved" . ($requiresConcessionReview ? ' under concession review.' : '.');
         }
 
+        // Resolve student's current approved currency and fee settings
+        $currentResolved = $this->resolveCurrentSettingsForItem($db, $item, $approvedNetMinor, $conn);
+        $currentSettings = $currentResolved['current_approved_settings'];
+        $hasSettingsChanged = $currentResolved['has_settings_changed'];
+
+        $isSafeToRecreateCurrent = true;
+        $recreateBlockReason = null;
+
+        if ($settledMinor > 0 || $existingSettlement || $preCutoffPaidMinor > 0 || $historicalCollections->isNotEmpty() || $crossCurrencyCollections->isNotEmpty()) {
+            $isSafeToRecreateCurrent = false;
+            $totalHistPaid = max($settledMinor, $preCutoffPaidMinor, (int) $historicalCollections->sum('amount_minor'));
+            if ($totalHistPaid > 0 && $totalHistPaid < $approvedNetMinor) {
+                $recreateBlockReason = 'Obligation has partial historical MySkool payment evidence. Preserve the settled portion and use safe reconciliation rather than recreating the full amount.';
+            } else {
+                $recreateBlockReason = 'Obligation has historical MySkool settlement or payment evidence and cannot be recreated with altered settings.';
+            }
+        } elseif (!$currentResolved['is_student_eligible']) {
+            $isSafeToRecreateCurrent = false;
+            $recreateBlockReason = $currentResolved['block_reason'] ?: 'Student is not eligible for active fee recreation.';
+        } elseif ((int) ($currentSettings['amount_minor'] ?? 0) <= 0) {
+            $isSafeToRecreateCurrent = false;
+            $recreateBlockReason = 'No valid current approved fee rate found for this student and fee type.';
+        } else {
+            $feeTypeCode = (string) ($item->fee_type_code ?: 'monthly');
+            $subjectName = $currentSettings['subject_name'] ?? ($item->fee_plan_item_id
+                ? $db->table('fee_plan_items')->where('id', $item->fee_plan_item_id)->value('subject_name')
+                : null);
+            $historicalMap = !empty($item->gr_number)
+                ? app(HistoricalOpeningBalanceService::class)->buildHistoricalObligationMap([(string) $item->gr_number], null, $conn)
+                : [];
+            $voidedEval = HistoricalOpeningBalanceService::evaluateVoidedImportedObligation(
+                $db,
+                $historicalMap,
+                $item,
+                (string) ($item->gr_number ?? ''),
+                $feeTypeCode,
+                (string) $item->period_start,
+                (string) $currentSettings['currency'],
+                $subjectName
+            );
+            if (!$voidedEval['can_recreate']) {
+                $isSafeToRecreateCurrent = false;
+                $recreateBlockReason = $voidedEval['recreate_block_reason']
+                    ?? $voidedEval['reason']
+                    ?? 'Cannot recreate obligation: this period is protected by historical MySkool records.';
+            }
+        }
+
         return [
             'exists' => true,
             'invoice_item_id' => $invoiceItemId,
             'is_safe_to_restore' => $isSafe,
+            'is_safe_to_recreate_current' => $isSafeToRecreateCurrent,
+            'recreate_block_reason' => $recreateBlockReason,
+            'has_settings_changed' => $hasSettingsChanged,
+            'current_approved_settings' => $currentSettings,
             'safety_status' => $safetyStatus,
             'action_description' => $actionDescription,
             'original_approved_values' => [
@@ -735,5 +827,457 @@ class VoidedFeeRestorationService
         }
 
         return false;
+    }
+
+    /**
+     * Resolve the student's current approved currency and fee settings for a voided invoice item.
+     */
+    protected function resolveCurrentSettingsForItem($db, object $item, int $originalApprovedNetMinor, ?string $conn = null): array
+    {
+        $studentRow = $db->table('students')->where('id', (int) $item->student_id)->first();
+        $enrollment = $db->table('enrollments')
+            ->where('student_id', (int) $item->student_id)
+            ->where('status', 'active')
+            ->orderBy('id')
+            ->first()
+            ?? ($item->enrollment_id ? $db->table('enrollments')->where('id', (int) $item->enrollment_id)->first() : null);
+
+        $feeType = $item->fee_type_id
+            ? $db->table('fee_types')->where('id', (int) $item->fee_type_id)->first()
+            : $db->table('fee_types')->where('code', 'monthly')->first();
+
+        $isStudentEligible = true;
+        $blockReason = null;
+        if (!$studentRow) {
+            $isStudentEligible = false;
+            $blockReason = 'Student record not found.';
+        } elseif (in_array((string) ($studentRow->status ?? 'active'), ['review_hold', 'historical_hold', 'suspended', 'left'], true)) {
+            $isStudentEligible = false;
+            $blockReason = "Student is in '{$studentRow->status}' status and cannot be billed.";
+        } elseif (!$enrollment) {
+            $isStudentEligible = false;
+            $blockReason = 'No active enrollment found for student.';
+        }
+
+        if ($enrollment && $feeType) {
+            $resolved = InvoiceService::resolveFeeAndCurrency($enrollment, $feeType, $conn);
+        } else {
+            $resolved = [
+                'currency' => (string) ($item->currency ?? 'SAR'),
+                'amount_minor' => (int) ($item->amount_minor ?? 0),
+                'discount_minor' => (int) ($item->discount_minor ?? 0),
+                'net_minor' => $originalApprovedNetMinor,
+                'rate_source' => 'Original Item Fallback',
+                'plan_item' => null,
+            ];
+        }
+
+        $curr = strtoupper(trim((string) ($resolved['currency'] ?? $item->currency ?? 'SAR')));
+        $amtMinor = (int) ($resolved['amount_minor'] ?? 0);
+        $discMinor = (int) ($resolved['discount_minor'] ?? 0);
+        $netMinor = (int) ($resolved['net_minor'] ?? max(0, $amtMinor - $discMinor));
+        $planItem = $resolved['plan_item'] ?? null;
+
+        $hasSettingsChanged = (
+            strtoupper(trim((string) $item->currency)) !== $curr
+            || $originalApprovedNetMinor !== $netMinor
+            || (int) $item->amount_minor !== $amtMinor
+        );
+
+        return [
+            'is_student_eligible' => $isStudentEligible,
+            'block_reason' => $blockReason,
+            'has_settings_changed' => $hasSettingsChanged,
+            'enrollment' => $enrollment,
+            'fee_type' => $feeType,
+            'current_approved_settings' => [
+                'currency' => $curr,
+                'amount_minor' => $amtMinor,
+                'discount_minor' => $discMinor,
+                'net_minor' => $netMinor,
+                'net_formatted' => number_format($netMinor / 100, 2, '.', ''),
+                'formatted' => $curr . ' ' . number_format($netMinor / 100, 2, '.', ''),
+                'rate_source' => (string) ($resolved['rate_source'] ?? 'Student Fee Plan'),
+                'plan_item_id' => $planItem?->id,
+                'subject_name' => $planItem?->subject_name ?? null,
+                'has_settings_changed' => $hasSettingsChanged,
+            ],
+        ];
+    }
+
+    /**
+     * Recreate a previously voided, unpaid fee obligation using the student's current approved
+     * currency and monthly fee settings.
+     *
+     * Preserves the original invoice and voided item in 'voided' status for audit trail,
+     * creates a new replacement obligation for the same billing period, and links both records.
+     */
+    public function recreateWithCurrentSettings(int $invoiceItemId, array $options, ?int $userId = null, ?string $conn = null): array
+    {
+        $conn = $conn ?: config('database.default', 'mysql');
+        $db = DB::connection($conn);
+
+        $reason = trim((string) ($options['reason'] ?? ''));
+        if ($reason === '') {
+            throw ValidationException::withMessages([
+                'reason' => 'A mandatory administrative reason is required to recreate a voided fee using current settings.',
+            ]);
+        }
+
+        $explicitRole = $options['user_role'] ?? (auth()->user()?->role ?? null);
+        if ($explicitRole && !in_array($explicitRole, ['super_admin', 'finance_admin', 'admin'], true)) {
+            abort(403, 'Unauthorized access: Only administrators can recreate voided financial obligations.');
+        }
+
+        $candidateActor = $userId ?: ($options['actor_id'] ?? ($options['user_id'] ?? auth()->id()));
+        if ($candidateActor === null || $candidateActor === '') {
+            throw new RuntimeException(
+                'CRITICAL AUTHORIZATION ERROR: Voided fee recreation requires an explicitly authenticated or specified administrator (actor_id / user_id).'
+            );
+        }
+
+        $actorQuery = $db->table('users');
+        if (is_numeric($candidateActor)) {
+            $actorQuery->where('id', (int) $candidateActor);
+        } else {
+            $actorQuery->where('email', trim((string) $candidateActor));
+        }
+        $actorUser = $actorQuery->first();
+
+        if (!$actorUser) {
+            throw new RuntimeException("CRITICAL AUTHORIZATION ERROR: Specified administrator '{$candidateActor}' does not exist.");
+        }
+        if (property_exists($actorUser, 'is_active') && !$actorUser->is_active) {
+            throw new RuntimeException("CRITICAL AUTHORIZATION ERROR: Administrator #{$actorUser->id} ({$actorUser->email}) is inactive.");
+        }
+        if (!in_array((string) ($actorUser->role ?? ''), ['super_admin', 'finance_admin', 'admin'], true)) {
+            abort(403, 'Unauthorized access: Only administrators can recreate voided financial obligations.');
+        }
+
+        $actorId = (int) $actorUser->id;
+
+        return $db->transaction(function () use ($db, $invoiceItemId, $reason, $actorId, $conn) {
+            $inspection = $this->inspect($invoiceItemId, $conn, true);
+
+            if (!$inspection['exists']) {
+                throw ValidationException::withMessages([
+                    'invoice_item_id' => $inspection['error'] ?? "Invoice item #{$invoiceItemId} not found.",
+                ]);
+            }
+
+            if (empty($inspection['is_safe_to_recreate_current'])) {
+                throw ValidationException::withMessages([
+                    'invoice_item_id' => $inspection['recreate_block_reason']
+                        ?? $inspection['error']
+                        ?? "Invoice item #{$invoiceItemId} cannot be recreated using current settings.",
+                ]);
+            }
+
+            $item = $inspection['item'];
+            $origValues = $inspection['original_approved_values'];
+            $currentSettings = $inspection['current_approved_settings'];
+
+            $newCurrency = strtoupper(trim((string) $currentSettings['currency']));
+            $newAmountMinor = (int) $currentSettings['amount_minor'];
+            $newDiscountMinor = (int) $currentSettings['discount_minor'];
+            $newNetMinor = (int) $currentSettings['net_minor'];
+            $newPlanItemId = $currentSettings['plan_item_id'] ?? $item->fee_plan_item_id;
+
+            $previousInvoiceId = (int) $item->invoice_id;
+            $previousInvoice = $db->table('invoices')->where('id', $previousInvoiceId)->lockForUpdate()->first();
+
+            $beforeState = [
+                'invoice_item' => [
+                    'id' => (int) $item->id,
+                    'invoice_id' => $previousInvoiceId,
+                    'status' => (string) $item->status,
+                    'currency' => (string) $item->currency,
+                    'amount_minor' => (int) $item->amount_minor,
+                    'discount_minor' => (int) $item->discount_minor,
+                    'exemption_minor' => (int) $item->exemption_minor,
+                    'net_minor' => (int) $item->net_minor,
+                    'paid_minor' => (int) $item->paid_minor,
+                ],
+                'parent_invoice' => $inspection['parent_invoice'],
+            ];
+
+            $periodStart = (string) $item->period_start;
+            $periodEnd = (string) $item->period_end;
+            $runPeriodKey = "monthly:{$periodStart}..{$periodEnd}";
+            $familyId = (int) ($previousInvoice->family_id ?? $item->family_id);
+            $campusId = (int) ($previousInvoice->campus_id ?? 1);
+            $departmentId = (int) ($previousInvoice->department_id ?? 1);
+
+            // Find an existing ACTIVE (non-voided) regular family invoice in the target currency for this period.
+            // Never reuse a voided invoice header and never attach to an opening_balance invoice.
+            $activeTargetInvoice = $db->table('invoices as i')
+                ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+                ->where('b.frequency', '!=', 'opening_balance')
+                ->where('b.period_key', $runPeriodKey)
+                ->where('i.family_id', $familyId)
+                ->where('i.campus_id', $campusId)
+                ->where('i.department_id', $departmentId)
+                ->where('i.currency', $newCurrency)
+                ->whereNotIn('i.status', ['void', 'voided'])
+                ->select('i.*')
+                ->lockForUpdate()
+                ->first();
+
+            if ($activeTargetInvoice) {
+                $targetInvoiceId = (int) $activeTargetInvoice->id;
+            } else {
+                $billingRunId = (int) ($previousInvoice->billing_run_id ?? 0);
+                $run = $billingRunId > 0 ? $db->table('billing_runs')->where('id', $billingRunId)->first() : null;
+                if (!$run || ($run->frequency ?? '') === 'opening_balance') {
+                    $run = $db->table('billing_runs')
+                        ->where('campus_id', $campusId)
+                        ->where('department_id', $departmentId)
+                        ->where('frequency', 'monthly')
+                        ->where('period_key', $runPeriodKey)
+                        ->first();
+                }
+                if (!$run) {
+                    $issuedOn = BillingPeriod::resolveIssueDate();
+                    $dueDate = BillingPeriod::calculateDueDate(
+                        (int) substr($periodStart, 0, 4),
+                        (int) substr($periodStart, 5, 2),
+                        BillingPeriod::DEFAULT_DUE_DAY,
+                        $issuedOn
+                    );
+                    $billingRunId = (int) $db->table('billing_runs')->insertGetId([
+                        'campus_id' => $campusId,
+                        'department_id' => $departmentId,
+                        'frequency' => 'monthly',
+                        'period_key' => $runPeriodKey,
+                        'period_start' => $periodStart,
+                        'period_end' => $periodEnd,
+                        'due_date' => $dueDate,
+                        'status' => 'generated',
+                        'created_by' => $actorId,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                } else {
+                    $billingRunId = (int) $run->id;
+                }
+
+                $deptCode = $db->table('departments')->where('id', $departmentId)->value('code') ?? 'SCH';
+                $issuedOn = BillingPeriod::resolveIssueDate();
+                $dueDate = BillingPeriod::calculateDueDate(
+                    (int) substr($periodStart, 0, 4),
+                    (int) substr($periodStart, 5, 2),
+                    BillingPeriod::DEFAULT_DUE_DAY,
+                    $issuedOn
+                );
+
+                $invoiceInsert = [
+                    'billing_run_id' => $billingRunId,
+                    'family_id' => $familyId,
+                    'campus_id' => $campusId,
+                    'department_id' => $departmentId,
+                    'currency' => $newCurrency,
+                    'invoice_number' => 'PENDING-' . \Illuminate\Support\Str::uuid(),
+                    'issued_on' => $issuedOn,
+                    'due_date' => $dueDate,
+                    'total_minor' => 0,
+                    'paid_minor' => 0,
+                    'previous_dues_snapshot_minor' => 0,
+                    'status' => 'generated',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+                if (
+                    $previousInvoice
+                    && in_array((string) ($previousInvoice->status ?? ''), ['void', 'voided'], true)
+                    && Schema::connection($conn)->hasColumn('invoices', 'replaces_invoice_id')
+                ) {
+                    $invoiceInsert['replaces_invoice_id'] = $previousInvoiceId;
+                }
+
+                $targetInvoiceId = (int) $db->table('invoices')->insertGetId($invoiceInsert);
+                $db->table('invoices')->where('id', $targetInvoiceId)->update([
+                    'invoice_number' => strtoupper(substr((string) $deptCode, 0, 3)) . '-' . substr($periodStart, 0, 4) . '-' . str_pad((string) $targetInvoiceId, 7, '0', STR_PAD_LEFT),
+                ]);
+
+                if (
+                    $previousInvoice
+                    && in_array((string) ($previousInvoice->status ?? ''), ['void', 'voided'], true)
+                    && Schema::connection($conn)->hasColumn('invoices', 'replaced_by_invoice_id')
+                ) {
+                    $db->table('invoices')->where('id', $previousInvoiceId)->update([
+                        'replaced_by_invoice_id' => $targetInvoiceId,
+                        'updated_at' => now(),
+                    ]);
+                }
+            }
+
+            $enrollment = $db->table('enrollments')
+                ->where('student_id', (int) $item->student_id)
+                ->where('status', 'active')
+                ->orderBy('id')
+                ->first();
+
+            // Create new active replacement invoice_item
+            $newItemPayload = [
+                'invoice_id' => $targetInvoiceId,
+                'student_id' => (int) $item->student_id,
+                'enrollment_id' => $enrollment ? (int) $enrollment->id : $item->enrollment_id,
+                'fee_plan_item_id' => $newPlanItemId,
+                'fee_type_id' => $item->fee_type_id,
+                'description' => (string) $item->description,
+                'period_key' => (string) $item->period_key,
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
+                'currency' => $newCurrency,
+                'amount_minor' => $newAmountMinor,
+                'discount_minor' => $newDiscountMinor,
+                'exemption_minor' => 0,
+                'net_minor' => $newNetMinor,
+                'paid_minor' => 0,
+                'status' => 'active',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+            if (Schema::connection($conn)->hasColumn('invoice_items', 'replaces_invoice_item_id')) {
+                $newItemPayload['replaces_invoice_item_id'] = $invoiceItemId;
+            }
+            $newItemId = (int) $db->table('invoice_items')->insertGetId($newItemPayload);
+
+            // Preserve original voided item as status='voided' and link to replacement
+            $voidedUpdate = [
+                'status' => 'voided',
+                'net_minor' => 0,
+                'updated_at' => now(),
+            ];
+            if (Schema::connection($conn)->hasColumn('invoice_items', 'replaced_by_invoice_item_id')) {
+                $voidedUpdate['replaced_by_invoice_item_id'] = $newItemId;
+            }
+            if (Schema::connection($conn)->hasColumn('invoice_items', 'replaced_at')) {
+                $voidedUpdate['replaced_at'] = now();
+            }
+            if (Schema::connection($conn)->hasColumn('invoice_items', 'replacement_reason')) {
+                $voidedUpdate['replacement_reason'] = $reason;
+            }
+            $db->table('invoice_items')->where('id', $invoiceItemId)->update($voidedUpdate);
+
+            // Record fee adjustments on both original voided item and new replacement item
+            $db->table('fee_adjustments')->insert([
+                [
+                    'invoice_item_id' => $invoiceItemId,
+                    'user_id' => $actorId,
+                    'kind' => 'recreated',
+                    'amount_minor' => $newNetMinor,
+                    'previous_amount_minor' => 0,
+                    'new_amount_minor' => $newNetMinor,
+                    'reason' => "Recreated using current settings ({$newCurrency} " . number_format($newNetMinor / 100, 2) . ") as replacement item #{$newItemId}: {$reason}",
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ],
+                [
+                    'invoice_item_id' => $newItemId,
+                    'user_id' => $actorId,
+                    'kind' => 'recreated',
+                    'amount_minor' => $newNetMinor,
+                    'previous_amount_minor' => 0,
+                    'new_amount_minor' => $newNetMinor,
+                    'reason' => "Created using current settings ({$newCurrency} " . number_format($newNetMinor / 100, 2) . ") replacing voided item #{$invoiceItemId} ({$origValues['currency']} {$origValues['net_formatted']}): {$reason}",
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ],
+            ]);
+
+            // Recalculate parent invoices and allocate any unallocated prepayments in the target currency
+            $invoiceSvc = new InvoiceService();
+            if ($previousInvoiceId !== $targetInvoiceId) {
+                $invoiceSvc->refreshInvoice($previousInvoiceId, $conn);
+            }
+            $invoiceSvc->refreshInvoice($targetInvoiceId, $conn);
+            if ($conn === config('database.default', 'mysql')) {
+                $invoiceSvc->allocatePrepayments($familyId, $newCurrency, $departmentId, $campusId);
+                $invoiceSvc->refreshInvoice($targetInvoiceId, $conn);
+            }
+
+            $refreshedTargetInvoice = $db->table('invoices')->where('id', $targetInvoiceId)->first();
+            $updatedParentInvoice = [
+                'id' => $targetInvoiceId,
+                'invoice_number' => (string) ($refreshedTargetInvoice->invoice_number ?? ''),
+                'currency' => (string) ($refreshedTargetInvoice->currency ?? $newCurrency),
+                'total_minor' => (int) ($refreshedTargetInvoice->total_minor ?? $newNetMinor),
+                'paid_minor' => (int) ($refreshedTargetInvoice->paid_minor ?? 0),
+                'status' => (string) ($refreshedTargetInvoice->status ?? 'generated'),
+            ];
+
+            $newItemRow = $db->table('invoice_items')->where('id', $newItemId)->first();
+            $originalVoidedRow = $db->table('invoice_items')->where('id', $invoiceItemId)->first();
+
+            $afterState = [
+                'original_voided_item' => [
+                    'id' => (int) $originalVoidedRow->id,
+                    'invoice_id' => (int) $originalVoidedRow->invoice_id,
+                    'status' => (string) $originalVoidedRow->status,
+                    'currency' => (string) $originalVoidedRow->currency,
+                    'net_minor' => (int) $originalVoidedRow->net_minor,
+                    'replaced_by_invoice_item_id' => $originalVoidedRow->replaced_by_invoice_item_id ?? $newItemId,
+                ],
+                'replacement_item' => [
+                    'id' => (int) $newItemRow->id,
+                    'invoice_id' => (int) $newItemRow->invoice_id,
+                    'status' => (string) $newItemRow->status,
+                    'currency' => (string) $newItemRow->currency,
+                    'amount_minor' => (int) $newItemRow->amount_minor,
+                    'discount_minor' => (int) $newItemRow->discount_minor,
+                    'net_minor' => (int) $newItemRow->net_minor,
+                    'paid_minor' => (int) $newItemRow->paid_minor,
+                    'replaces_invoice_item_id' => $newItemRow->replaces_invoice_item_id ?? $invoiceItemId,
+                ],
+                'replacement_parent_invoice' => $updatedParentInvoice,
+            ];
+
+            $db->table('audit_logs')->insert([
+                'actor_id' => $actorId,
+                'action' => 'voided_fee_recreated_current_settings',
+                'subject_type' => 'invoice_item',
+                'subject_id' => $newItemId,
+                'metadata' => json_encode([
+                    'original_voided_item_id' => $invoiceItemId,
+                    'replacement_item_id' => $newItemId,
+                    'original_invoice_id' => $previousInvoiceId,
+                    'replacement_invoice_id' => $targetInvoiceId,
+                    'student_id' => (int) $item->student_id,
+                    'gr_number' => (string) $item->gr_number,
+                    'family_id' => $familyId,
+                    'period_key' => (string) $item->period_key,
+                    'original_currency' => (string) $origValues['currency'],
+                    'original_net_minor' => (int) $origValues['net_minor'],
+                    'new_currency' => $newCurrency,
+                    'new_net_minor' => $newNetMinor,
+                    'reason' => $reason,
+                    'before_state' => $beforeState,
+                    'after_state' => $afterState,
+                ]),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            $formattedNewNet = number_format($newNetMinor / 100, 2, '.', '');
+
+            return [
+                'success' => true,
+                'status' => 'recreated_current_settings',
+                'original_invoice_item_id' => $invoiceItemId,
+                'replacement_invoice_item_id' => $newItemId,
+                'original_invoice_id' => $previousInvoiceId,
+                'replacement_invoice_id' => $targetInvoiceId,
+                'invoice_number' => (string) ($refreshedTargetInvoice->invoice_number ?? ''),
+                'currency' => $newCurrency,
+                'amount_minor' => $newAmountMinor,
+                'discount_minor' => $newDiscountMinor,
+                'net_minor' => $newNetMinor,
+                'parent_invoice' => $updatedParentInvoice,
+                'before_state' => $beforeState,
+                'after_state' => $afterState,
+                'message' => "Successfully recreated fee obligation using current approved settings ({$newCurrency} {$formattedNewNet}) on invoice " . ($refreshedTargetInvoice->invoice_number ?? "#{$targetInvoiceId}") . ". Original invoice item #{$invoiceItemId} ({$origValues['currency']} {$origValues['net_formatted']}) remains voided for audit.",
+            ];
+        }, 3);
     }
 }

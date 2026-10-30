@@ -61,12 +61,22 @@ class InvoiceDeliveryQueueService
 
         // Filter: Grade / Class
         if (!empty($filters['grade'])) {
-            $q->whereExists(function ($sub) use ($filters) {
+            $grade = $filters['grade'];
+            $q->whereExists(function ($sub) use ($grade) {
                 $sub->select(DB::raw(1))
                     ->from('invoice_items as sub_ii')
-                    ->join('enrollments as sub_en', 'sub_en.id', '=', 'sub_ii.enrollment_id')
+                    ->leftJoin('enrollments as sub_en', 'sub_en.id', '=', 'sub_ii.enrollment_id')
                     ->whereColumn('sub_ii.invoice_id', 'n.invoice_id')
-                    ->where('sub_en.grade_label', $filters['grade']);
+                    ->where(function ($gq) use ($grade) {
+                        $gq->where('sub_en.grade_label', $grade)
+                            ->orWhereExists(function ($eq) use ($grade) {
+                                $eq->select(DB::raw(1))
+                                    ->from('enrollments as active_en')
+                                    ->whereColumn('active_en.student_id', 'sub_ii.student_id')
+                                    ->where('active_en.status', 'active')
+                                    ->where('active_en.grade_label', $grade);
+                            });
+                    });
             });
         }
 
@@ -190,6 +200,7 @@ class InvoiceDeliveryQueueService
             'n.response_code',
             'n.submitted_at',
             'n.delivered_at',
+            'n.payload',
             'n.created_at as notification_created_at',
             'n.created_at',
             'n.updated_at as notification_updated_at',
@@ -321,8 +332,15 @@ class InvoiceDeliveryQueueService
             }
         }
 
+        $queuePeriod = !empty($filters['period'])
+            ? (string) $filters['period']
+            : ($items->first()?->billing_period ? substr((string) $items->first()->billing_period, 0, 7) : date('Y-m'));
+        $consolidatedSummaries = !empty($familyIds)
+            ? app(ConsolidatedInvoiceBuilder::class)->summarizeFamiliesOutstanding($familyIds, $queuePeriod, $user)
+            : [];
+
         // 4. Enrich each row
-        $enriched = $items->map(function ($row) use ($studentsByInvoice, $siblingsByFamily, $previousDuesMap) {
+        $enriched = $items->map(function ($row) use ($studentsByInvoice, $siblingsByFamily, $previousDuesMap, $consolidatedSummaries, $user) {
             $stList = $studentsByInvoice->get($row->invoice_id, collect());
             $sibList = $siblingsByFamily->get($row->family_id, collect());
 
@@ -330,12 +348,55 @@ class InvoiceDeliveryQueueService
             $prevDuesMinor = (int)($previousDuesMap->get($key, 0));
 
             $remainingBalanceMinor = (int)max(0, $row->total_minor - $row->paid_minor);
+            $laterPeriodMinor = 0;
             $totalPayableMinor = $remainingBalanceMinor + $prevDuesMinor;
 
-            // Generate permanent signed PDF URLs
+            $famSummary = $row->family_id ? ($consolidatedSummaries[(int) $row->family_id] ?? null) : null;
+            $isMonthly = (($row->kind ?? 'monthly') !== 'paid');
+            $hasDataIntegrityIssue = false;
+            $isPayableVerified = true;
+            $dataIntegrityMessage = null;
+
+            if ($isMonthly && $famSummary !== null) {
+                $hasDataIntegrityIssue = (bool) ($famSummary['has_data_integrity_issue'] ?? false);
+                $isPayableVerified = (bool) ($famSummary['is_payable_verified'] ?? true);
+                $dataIntegrityMessage = $famSummary['data_integrity_message'] ?? null;
+
+                if ($hasDataIntegrityIssue || !$isPayableVerified) {
+                    $prevDuesMinor = 0;
+                    $remainingBalanceMinor = 0;
+                    $laterPeriodMinor = 0;
+                    $totalPayableMinor = 0;
+                } elseif (isset($famSummary['currencies_map'][$row->currency])) {
+                    $cSum = $famSummary['currencies_map'][$row->currency];
+                    $prevDuesMinor = (int) $cSum['previous_dues_minor'];
+                    $remainingBalanceMinor = (int) $cSum['selected_month_minor'];
+                    $laterPeriodMinor = (int) $cSum['later_period_minor'];
+                    $totalPayableMinor = (int) $cSum['total_payable_minor'];
+                }
+            }
+
+            $dispatchedPayload = !empty($row->payload) && is_string($row->payload)
+                ? json_decode($row->payload, true)
+                : null;
+            $dispatchedEntry = $dispatchedPayload;
+            if (is_array($dispatchedPayload) && !empty($dispatchedPayload['invoices']) && is_array($dispatchedPayload['invoices'])) {
+                foreach ($dispatchedPayload['invoices'] as $candInv) {
+                    if ((int) ($candInv['invoice_id'] ?? 0) === (int) $row->invoice_id) {
+                        $dispatchedEntry = $candInv;
+                        break;
+                    }
+                }
+            }
+            $dispatchedCalculatedAt = $dispatchedEntry['statement_metadata']['calculated_at']
+                ?? ($dispatchedEntry['timestamp'] ?? ($dispatchedPayload['timestamp'] ?? null));
+            $dispatchedTotalsByCurrency = $dispatchedEntry['statement_metadata']['dispatched_totals_by_currency']
+                ?? ($dispatchedEntry['invoice']['currencies_breakdown'] ?? null);
+
+            // Generate scope-aware PDF URLs
             $pdfService = app(\App\Services\PdfAccessService::class);
-            $invoicePdfUrl = $pdfService->getInvoicePdfUrl((int)$row->invoice_id);
-            $consolidatedChallanUrl = $row->family_id ? $pdfService->getFamilyChallanPdfUrl((int)$row->family_id) : null;
+            $invoicePdfUrl = $pdfService->getInvoicePdfUrl((int)$row->invoice_id, $user);
+            $consolidatedChallanUrl = $row->family_id ? $pdfService->getFamilyChallanPdfUrl((int)$row->family_id, null, $user) : null;
 
             // Computed Webhook Submission Status
             $webhookStatus = match ($row->notification_status) {
@@ -366,10 +427,19 @@ class InvoiceDeliveryQueueService
             $row->siblings_list = $sibList;
             $row->previous_dues_minor = $prevDuesMinor;
             $row->remaining_balance_minor = $remainingBalanceMinor;
+            $row->later_period_minor = $laterPeriodMinor;
             $row->total_payable_minor = $totalPayableMinor;
             $row->formatted_previous_dues = Money::format($prevDuesMinor);
             $row->formatted_balance = Money::format($remainingBalanceMinor);
+            $row->formatted_later_period = Money::format($laterPeriodMinor);
             $row->formatted_total_payable = Money::format($totalPayableMinor);
+            $row->is_multi_currency = (bool) ($famSummary['is_multi_currency'] ?? false);
+            $row->currencies_map = $famSummary['currencies_map'] ?? [];
+            $row->has_data_integrity_issue = $hasDataIntegrityIssue;
+            $row->is_payable_verified = $isPayableVerified;
+            $row->data_integrity_message = $dataIntegrityMessage;
+            $row->dispatched_calculated_at = $dispatchedCalculatedAt;
+            $row->dispatched_totals_by_currency = $dispatchedTotalsByCurrency;
             $row->invoice_pdf_url = $invoicePdfUrl;
             $row->consolidated_challan_url = $consolidatedChallanUrl;
             $row->webhook_submission_status = $webhookStatus;
@@ -862,9 +932,18 @@ class InvoiceDeliveryQueueService
             $q->whereExists(function ($sub) use ($grade) {
                 $sub->select(DB::raw(1))
                     ->from('invoice_items as sub_ii')
-                    ->join('enrollments as sub_e', 'sub_e.id', '=', 'sub_ii.enrollment_id')
+                    ->leftJoin('enrollments as sub_e', 'sub_e.id', '=', 'sub_ii.enrollment_id')
                     ->whereColumn('sub_ii.invoice_id', 'i.id')
-                    ->where('sub_e.grade_label', $grade);
+                    ->where(function ($gq) use ($grade) {
+                        $gq->where('sub_e.grade_label', $grade)
+                            ->orWhereExists(function ($eq) use ($grade) {
+                                $eq->select(DB::raw(1))
+                                    ->from('enrollments as active_e')
+                                    ->whereColumn('active_e.student_id', 'sub_ii.student_id')
+                                    ->where('active_e.status', 'active')
+                                    ->where('active_e.grade_label', $grade);
+                            });
+                    });
             });
         }
 
@@ -991,38 +1070,24 @@ class InvoiceDeliveryQueueService
             ->get()
             ->groupBy('invoice_id');
 
-        // All active siblings for these families across other grades
+        // All active siblings for these families across other grades (scoped to user's authorized campus/department)
         $siblingsByFamily = DB::table('students as s')
             ->join('enrollments as e', 'e.student_id', '=', 's.id')
             ->whereIn('s.family_id', $pagedFamilyIds)
             ->where('s.status', 'active')
             ->where('e.status', 'active')
+            ->when(!in_array($user->role, ['super_admin', 'finance_admin'], true), function ($sq) use ($user) {
+                $sq->where('e.campus_id', $user->campus_id)
+                    ->when(!empty($user->department_id), fn($dq) => $dq->where('e.department_id', $user->department_id));
+            })
             ->select('s.family_id', 's.id as student_id', 's.name', 's.gr_number', 'e.grade_label')
             ->distinct()
             ->get()
             ->groupBy('family_id');
 
-        // Previous unpaid dues across prior months for each family and currency
-        $earliestPeriod = $invoices->min('billing_period') ?: ($period . '-01');
-        $duesRows = DB::table('invoices as old_inv')
-            ->join('invoice_items as old_item', 'old_item.invoice_id', '=', 'old_inv.id')
-            ->join('billing_runs as ob', 'ob.id', '=', 'old_inv.billing_run_id')
-            ->whereIn('old_inv.family_id', $pagedFamilyIds)
-            ->where('ob.period_start', '<', $earliestPeriod)
-            ->whereRaw('old_item.net_minor > old_item.paid_minor')
-            ->whereNotIn('old_item.status', ['void', 'voided', 'paid', 'exempted'])
-            ->whereNotIn('old_inv.status', ['void', 'voided', 'paid'])
-            ->select(
-                'old_inv.family_id',
-                'old_inv.currency',
-                DB::raw("SUBSTRING(ob.period_start, 1, 7) as period_month"),
-                DB::raw('SUM(old_item.net_minor - old_item.paid_minor) as dues_minor')
-            )
-            ->groupBy('old_inv.family_id', 'old_inv.currency', 'period_month')
-            ->orderBy('period_month')
-            ->get();
-
-        $duesByFamily = $duesRows->groupBy('family_id');
+        // Canonical batched outstanding calculation across all applicable unpaid obligations (previous, selected-month, later-period)
+        $consolidatedBuilder = app(\App\Services\ConsolidatedInvoiceBuilder::class);
+        $outstandingSummaries = $consolidatedBuilder->summarizeFamiliesOutstanding($pagedFamilyIds, $period, $user);
 
         $familyRows = collect();
         foreach ($pagedFamilyIds as $famId) {
@@ -1032,8 +1097,9 @@ class InvoiceDeliveryQueueService
             $primaryInv = $famInvoices->first();
             $invIds = $famInvoices->pluck('invoice_id')->all();
             $invNumbers = $famInvoices->pluck('invoice_number')->all();
+            $famSummary = $outstandingSummaries[$famId] ?? null;
 
-            // Students
+            // Students across selected-month invoices and all applicable unpaid obligations in the family
             $famStudents = collect();
             foreach ($invIds as $iId) {
                 $stList = $studentsByInvoice->get($iId, collect());
@@ -1041,79 +1107,44 @@ class InvoiceDeliveryQueueService
                     $famStudents->push($st);
                 }
             }
-            $uniqueStudents = $famStudents->unique('gr_number')->values();
-            $familySiblings = $siblingsByFamily->get($famId, collect());
-
-            // Previous dues for this family
-            $famDuesRows = $duesByFamily->get($famId, collect());
-            $duesByMonth = $famDuesRows->map(function ($pRow) {
-                return [
-                    'month' => $pRow->period_month,
-                    'currency' => $pRow->currency,
-                    'dues_minor' => (int)$pRow->dues_minor,
-                    'formatted' => $pRow->currency . ' ' . Money::format($pRow->dues_minor),
-                ];
-            })->all();
-
-            $prevDuesByCurr = [];
-            foreach ($famDuesRows as $dr) {
-                $prevDuesByCurr[$dr->currency] = ($prevDuesByCurr[$dr->currency] ?? 0) + (int)$dr->dues_minor;
-            }
-
-            // Currency breakdown
-            $byCurr = $famInvoices->groupBy('currency');
-            $currencyBreakdowns = [];
-            $totalCurrentMinor = 0;
-            $totalPrevMinor = 0;
-            $currenciesMap = [];
-
-            foreach ($byCurr as $curr => $currInvs) {
-                $currFee = $currInvs->sum(fn($ci) => max(0, (int)$ci->total_minor - (int)$ci->paid_minor));
-                $prevDues = (int)($prevDuesByCurr[$curr] ?? 0);
-                $totalPayable = $currFee + $prevDues;
-
-                $breakdownItem = [
-                    'currency' => $curr,
-                    'current_fee_minor' => $currFee,
-                    'formatted_current_fee' => $curr . ' ' . Money::format($currFee),
-                    'previous_dues_minor' => $prevDues,
-                    'formatted_previous_dues' => $curr . ' ' . Money::format($prevDues),
-                    'total_payable_minor' => $totalPayable,
-                    'formatted_total_payable' => $curr . ' ' . Money::format($totalPayable),
-                    'formatted' => $curr . ' ' . Money::format($totalPayable),
-                ];
-
-                $currencyBreakdowns[] = $breakdownItem;
-                $currenciesMap[$curr] = $breakdownItem;
-                $totalCurrentMinor += $currFee;
-                $totalPrevMinor += $prevDues;
-            }
-
-            // Include any currencies that only have previous dues
-            foreach ($prevDuesByCurr as $pCurr => $pAmount) {
-                if (!isset($currenciesMap[$pCurr])) {
-                    $breakdownItem = [
-                        'currency' => $pCurr,
-                        'current_fee_minor' => 0,
-                        'formatted_current_fee' => $pCurr . ' ' . Money::format(0),
-                        'previous_dues_minor' => $pAmount,
-                        'formatted_previous_dues' => $pCurr . ' ' . Money::format($pAmount),
-                        'total_payable_minor' => $pAmount,
-                        'formatted_total_payable' => $pCurr . ' ' . Money::format($pAmount),
-                        'formatted' => $pCurr . ' ' . Money::format($pAmount),
-                    ];
-                    $currencyBreakdowns[] = $breakdownItem;
-                    $currenciesMap[$pCurr] = $breakdownItem;
-                    $totalPrevMinor += $pAmount;
+            if (!empty($famSummary['students'])) {
+                foreach ($famSummary['students'] as $st) {
+                    $famStudents->push($st);
                 }
             }
+            $uniqueStudents = $famStudents->unique(fn($s) => $s->student_id ?? $s->gr_number)->values();
+            $familySiblings = $siblingsByFamily->get($famId, collect());
+
+            $currenciesMap = $famSummary['currencies_map'] ?? [];
+            $currencyBreakdowns = $famSummary['currencies'] ?? [];
+            $duesByMonth = $famSummary['dues_by_month'] ?? [];
+            $laterDuesByMonth = $famSummary['later_dues_by_month'] ?? [];
+
+            $hasDataIntegrityIssue = (bool)($famSummary['has_data_integrity_issue'] ?? empty($currenciesMap));
+            $isPayableVerified = !$hasDataIntegrityIssue && !empty($currenciesMap);
+            $dataIntegrityStatus = $famSummary['data_integrity_status'] ?? ($hasDataIntegrityIssue ? 'data_integrity_issue' : 'verified');
+            $dataIntegrityIssues = $famSummary['data_integrity_issues'] ?? [];
+            $dataIntegrityMessage = $famSummary['data_integrity_message'] ?? ($hasDataIntegrityIssue
+                ? sprintf(
+                    'Data Integrity Issue: Invoice %s header indicates an unpaid balance, but no matching valid unpaid invoice items were found. Flagged for staff review.',
+                    $primaryInv->invoice_number
+                )
+                : null);
 
             $primaryCurrency = $primaryInv->currency;
             $primaryCurrBreakdown = $currenciesMap[$primaryCurrency] ?? ($currencyBreakdowns[0] ?? null);
+            $effectiveCurrency = $primaryCurrBreakdown['currency'] ?? $primaryCurrency;
+
+            $prevMinor = (int)($primaryCurrBreakdown['previous_dues_minor'] ?? 0);
+            $selectedMonthMinor = (int)($primaryCurrBreakdown['selected_month_minor'] ?? 0);
+            $laterMinor = (int)($primaryCurrBreakdown['later_period_minor'] ?? 0);
+            $totalPayableMinor = (int)($primaryCurrBreakdown['total_payable_minor'] ?? ($prevMinor + $selectedMonthMinor + $laterMinor));
+
+            $isUnverifiedWithoutItems = $hasDataIntegrityIssue && empty($currenciesMap);
 
             $pdfService = app(\App\Services\PdfAccessService::class);
-            $signedChallanUrl = $pdfService->getFamilyChallanPdfUrl((int)$famId);
-            $invoicePdfUrl = $pdfService->getInvoicePdfUrl((int)$primaryInv->invoice_id);
+            $signedChallanUrl = $pdfService->getFamilyChallanPdfUrl((int)$famId, $period, $user);
+            $invoicePdfUrl = $pdfService->getInvoicePdfUrl((int)$primaryInv->invoice_id, $user);
 
             $rowObj = (object)[
                 'family_id' => $famId,
@@ -1131,27 +1162,55 @@ class InvoiceDeliveryQueueService
                 'invoice_numbers' => $invNumbers,
                 'invoice_number' => $primaryInv->invoice_number,
                 'billing_period' => $primaryInv->billing_period,
+                'selected_period' => $period,
                 'due_date' => $primaryInv->due_date,
                 'invoice_status' => $primaryInv->invoice_status,
                 'campus_name' => $primaryInv->campus_name,
                 'department_name' => $primaryInv->department_name,
-                'currency' => $primaryCurrency,
-                'total_minor' => (int)$primaryInv->total_minor,
+                'currency' => $effectiveCurrency,
+                'total_minor' => $isUnverifiedWithoutItems ? 0 : (int)$primaryInv->total_minor,
                 'paid_minor' => (int)$primaryInv->paid_minor,
+                'header_total_minor' => (int)$primaryInv->total_minor,
+                'header_paid_minor' => (int)$primaryInv->paid_minor,
+                'has_data_integrity_issue' => $hasDataIntegrityIssue,
+                'is_payable_verified' => $isPayableVerified,
+                'data_integrity_status' => $dataIntegrityStatus,
+                'data_integrity_error' => $dataIntegrityMessage,
+                'data_integrity_message' => $dataIntegrityMessage,
+                'data_integrity_issues' => $dataIntegrityIssues,
                 'is_multi_currency' => count($currencyBreakdowns) > 1,
                 'currencies' => $currencyBreakdowns,
                 'currencies_map' => $currenciesMap,
-                'current_fee_minor' => $primaryCurrBreakdown['current_fee_minor'] ?? $totalCurrentMinor,
-                'formatted_current_fee' => $primaryCurrBreakdown['formatted_current_fee'] ?? ($primaryCurrency . ' ' . Money::format($totalCurrentMinor)),
-                'prev_dues_minor' => $primaryCurrBreakdown['previous_dues_minor'] ?? $totalPrevMinor,
-                'formatted_prev_dues' => $primaryCurrBreakdown['formatted_previous_dues'] ?? ($primaryCurrency . ' ' . Money::format($totalPrevMinor)),
-                'remaining_balance_minor' => $primaryCurrBreakdown['current_fee_minor'] ?? $totalCurrentMinor,
-                'formatted_remaining_balance' => $primaryCurrBreakdown['formatted_current_fee'] ?? ($primaryCurrency . ' ' . Money::format($totalCurrentMinor)),
-                'total_payable_minor' => $primaryCurrBreakdown['total_payable_minor'] ?? ($totalCurrentMinor + $totalPrevMinor),
-                'formatted_total_payable' => $primaryCurrBreakdown['formatted_total_payable'] ?? ($primaryCurrency . ' ' . Money::format($totalCurrentMinor + $totalPrevMinor)),
+                'previous_outstanding_minor' => $prevMinor,
+                'formatted_previous_outstanding' => $primaryCurrBreakdown['formatted_previous_outstanding'] ?? ($effectiveCurrency . ' ' . Money::format($prevMinor)),
+                'prev_dues_minor' => $prevMinor,
+                'formatted_prev_dues' => $primaryCurrBreakdown['formatted_previous_dues'] ?? ($effectiveCurrency . ' ' . Money::format($prevMinor)),
+                'selected_month_minor' => $selectedMonthMinor,
+                'formatted_selected_month' => $isUnverifiedWithoutItems
+                    ? 'UNVERIFIED (Data Integrity Review Required)'
+                    : ($primaryCurrBreakdown['formatted_selected_month'] ?? ($effectiveCurrency . ' ' . Money::format($selectedMonthMinor))),
+                'current_fee_minor' => $selectedMonthMinor,
+                'formatted_current_fee' => $isUnverifiedWithoutItems
+                    ? 'UNVERIFIED (Data Integrity Review Required)'
+                    : ($primaryCurrBreakdown['formatted_current_fee'] ?? ($effectiveCurrency . ' ' . Money::format($selectedMonthMinor))),
+                'remaining_balance_minor' => $selectedMonthMinor,
+                'formatted_remaining_balance' => $isUnverifiedWithoutItems
+                    ? 'UNVERIFIED (Data Integrity Review Required)'
+                    : ($primaryCurrBreakdown['formatted_selected_month'] ?? ($effectiveCurrency . ' ' . Money::format($selectedMonthMinor))),
+                'later_period_minor' => $laterMinor,
+                'formatted_later_period' => $primaryCurrBreakdown['formatted_later_period'] ?? ($effectiveCurrency . ' ' . Money::format($laterMinor)),
+                'total_payable_minor' => $totalPayableMinor,
+                'total_outstanding_payable_minor' => $totalPayableMinor,
+                'formatted_total_payable' => $isUnverifiedWithoutItems
+                    ? 'UNVERIFIED — Staff Review Required'
+                    : ($primaryCurrBreakdown['formatted_total_payable'] ?? ($effectiveCurrency . ' ' . Money::format($totalPayableMinor))),
+                'formatted_total_outstanding_payable' => $isUnverifiedWithoutItems
+                    ? 'UNVERIFIED — Staff Review Required'
+                    : ($primaryCurrBreakdown['formatted_total_outstanding_payable'] ?? ($effectiveCurrency . ' ' . Money::format($totalPayableMinor))),
                 'invoice_students' => $uniqueStudents,
                 'family_siblings' => $familySiblings,
                 'dues_by_month' => $duesByMonth,
+                'later_dues_by_month' => $laterDuesByMonth,
                 'consolidated_challan_url' => $signedChallanUrl,
                 'signed_challan_url' => $signedChallanUrl,
                 'invoice_pdf_url' => $invoicePdfUrl,
@@ -1274,7 +1333,7 @@ class InvoiceDeliveryQueueService
             ->whereIn('id', $paginator->pluck('authoritative_notification_id')->filter()->all())
             ->get()->keyBy('id');
 
-        $enriched = $paginator->getCollection()->map(function ($row) use ($studentsRaw, $receiptsByInvoice, $notifs) {
+        $enriched = $paginator->getCollection()->map(function ($row) use ($studentsRaw, $receiptsByInvoice, $notifs, $user) {
             $rowStudents = $studentsRaw->get($row->id, collect());
             $rowReceipts = array_values($receiptsByInvoice[$row->id] ?? []);
             $rowNotif = $notifs->get($row->authoritative_notification_id);
@@ -1292,7 +1351,7 @@ class InvoiceDeliveryQueueService
             [$row->delivery_status, $row->delivery_error] = $this->paidDisplayState($row);
             $row->delivery_batch_id = $rowNotif?->batch_id;
             $row->delivery_submitted_at = $rowNotif?->submitted_at;
-            $row->invoice_pdf_url = app(\App\Services\PdfAccessService::class)->getInvoicePdfUrl((int)$row->id);
+            $row->invoice_pdf_url = app(\App\Services\PdfAccessService::class)->getInvoicePdfUrl((int)$row->id, $user);
 
             return $row;
         });

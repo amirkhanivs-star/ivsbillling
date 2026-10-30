@@ -148,11 +148,20 @@
                @endif
                @if($receipt->is_reversed)
                  <span style="font-size: 9px; background: #fee2e2; color: #991b1b; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">REVERSED</span>
+               @elseif(!empty($receipt->is_partially_reversed))
+                 <span style="font-size: 9px; background: #fef3c7; color: #92400e; padding: 1px 6px; border-radius: 10px; font-weight: 700; display: inline-block; margin-left: 2px;">PARTIALLY REVERSED</span>
                @endif
              </td>
              <td style="padding: 8px 10px;">{{ $receipt->fee_types_str }}</td>
              <td style="padding: 8px 10px;"><span style="background: #ede9fe; color: #6d28d9; padding: 1px 6px; border-radius: 4px; font-size: 11px;">{{ $receipt->months_str }}</span></td>
-             <td style="padding: 8px 10px; font-weight: bold; color: #1e293b;">{{ $receipt->currency }} {{ number_format($receipt->amount, 2) }}</td>
+             <td style="padding: 8px 10px; font-weight: bold; color: #1e293b;">
+               {{ $receipt->currency }} {{ number_format($receipt->amount, 2) }}
+               @if((int) ($receipt->reversed_amount_minor ?? 0) > 0)
+                 <div style="font-size: 10px; font-weight: normal; color: #b45309;">
+                   Orig: {{ $receipt->currency }} {{ number_format((float) ($receipt->original_amount ?? $receipt->amount), 2) }} &bull; Rev: {{ number_format((float) ($receipt->reversed_amount ?? 0), 2) }}
+                 </div>
+               @endif
+             </td>
              <td style="padding: 8px 10px;">{{ $receipt->received_on_formatted }}</td>
              <td style="padding: 8px 10px;">
                <div style="font-size: 11px; color: #475569;">{{ $receipt->received_by_name ?? '—' }}</div>
@@ -203,7 +212,7 @@
 </div>
 
 {{-- RECEIPT ITEMIZATION DETAILS DIALOG --}}
-<dialog id="receipt-details-dialog" style="border:none;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.3);padding:0;max-width:650px;width:95%;margin:auto;font-family:inherit;">
+<dialog id="receipt-details-dialog" style="border:none;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.3);padding:0;max-width:820px;width:96%;margin:auto;font-family:inherit;">
  <div style="background:#7367f0;color:#fff;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-top-left-radius:8px;border-top-right-radius:8px;">
   <strong style="font-size:16px;display:flex;align-items:center;gap:8px;">
     <span>Receipt Slip #<span id="rd-slip"></span></span>
@@ -211,12 +220,14 @@
   </strong>
   <button type="button" onclick="document.getElementById('receipt-details-dialog').close()" style="background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;">&times;</button>
  </div>
- <div style="padding:20px;font-size:13px;color:#5e5873;max-height:80vh;overflow-y:auto;">
+ <div style="padding:20px;font-size:13px;color:#5e5873;max-height:82vh;overflow-y:auto;">
   
   {{-- META GRID --}}
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:12px;margin-bottom:14px;">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:12px;margin-bottom:14px;">
     <div><small style="color:#64748b;display:block;">Payment Date</small><strong id="rd-date">—</strong></div>
-    <div><small style="color:#64748b;display:block;">Total Amount</small><strong id="rd-total" style="color:#7367f0;">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Original Receipt Total</small><strong id="rd-total" style="color:#7367f0;">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Total Amount Reversed</small><strong id="rd-reversed-total" style="color:#b45309;">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Remaining Effective Paid</small><strong id="rd-effective-total" style="color:#166534;">—</strong></div>
     <div><small style="color:#64748b;display:block;">Discount</small><strong id="rd-discount">0</strong></div>
     <div><small style="color:#64748b;display:block;">Method</small><strong id="rd-method">Cash</strong></div>
     <div><small style="color:#64748b;display:block;">Received By</small><strong id="rd-received-by">—</strong></div>
@@ -227,18 +238,23 @@
 
   {{-- ITEMS TABLE --}}
   <div style="font-weight:600;margin:12px 0 6px;color:#334155;">Underlying Item Allocations:</div>
-  <table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid #ebe9f1;border-radius:4px;overflow:hidden;">
-    <thead>
-      <tr style="background:#f1f5f9;color:#475569;text-align:left;">
-        <th style="padding:8px 10px;">Student</th>
-        <th style="padding:8px 10px;">Fee Particular</th>
-        <th style="padding:8px 10px;">Month</th>
-        <th style="padding:8px 10px;text-align:right;">Amount</th>
-      </tr>
-    </thead>
-    <tbody id="rd-items-tbody">
-    </tbody>
-  </table>
+  <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid #ebe9f1;border-radius:4px;overflow:hidden;">
+      <thead>
+        <tr style="background:#f1f5f9;color:#475569;text-align:left;">
+          <th style="padding:8px 10px;">Student</th>
+          <th style="padding:8px 10px;">Fee Particular</th>
+          <th style="padding:8px 10px;">Month</th>
+          <th style="padding:8px 10px;text-align:right;">Original Paid</th>
+          <th style="padding:8px 10px;text-align:right;">Reversed</th>
+          <th style="padding:8px 10px;text-align:right;">Effective Paid</th>
+          <th style="padding:8px 10px;">Status</th>
+        </tr>
+      </thead>
+      <tbody id="rd-items-tbody">
+      </tbody>
+    </table>
+  </div>
 
   {{-- FOOTER BUTTONS --}}
   <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding-top:14px;border-top:1px solid #ebe9f1;">
@@ -257,7 +273,9 @@ window.showReceiptDetails = function(payload) {
     if (!payload) return;
     document.getElementById('rd-slip').textContent = payload.slip_number || '—';
     document.getElementById('rd-date').textContent = payload.received_on || '—';
-    document.getElementById('rd-total').textContent = payload.total_amount || '—';
+    document.getElementById('rd-total').textContent = payload.original_total_amount || payload.total_amount || '—';
+    document.getElementById('rd-reversed-total').textContent = payload.total_reversed_amount || ((payload.currency ? payload.currency + ' ' : '') + '0.00');
+    document.getElementById('rd-effective-total').textContent = payload.remaining_effective_amount || payload.total_amount || '—';
     document.getElementById('rd-discount').textContent = payload.discount || '0';
     document.getElementById('rd-method').textContent = payload.payment_method || 'Cash';
     document.getElementById('rd-received-by').textContent = payload.received_by || '—';
@@ -276,7 +294,7 @@ window.showReceiptDetails = function(payload) {
 
     var noticeBox = document.getElementById('rd-notice-container');
     if (payload.is_historical) {
-        noticeBox.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:8px 12px;margin:10px 0;font-size:11px;color:#92400e;line-height:1.4;"><strong>Historical MySkool Payment Record — Reconstructed from Imported Data</strong><br>This payment record was reconstructed from verified MySkool import data. It reflects legacy fee collections received prior to portal migration without mutating current ledger balances.</div>';
+        noticeBox.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:8px 12px;margin:10px 0;font-size:11px;color:#92400e;line-height:1.4;"><strong>Historical MySkool Payment Record</strong><br>Original imported MySkool source records are permanently preserved while any individual payment restorations are reflected in the effective paid totals and student obligations.</div>';
     } else {
         noticeBox.innerHTML = '';
     }
@@ -286,14 +304,22 @@ window.showReceiptDetails = function(payload) {
     if (payload.items && payload.items.length > 0) {
         payload.items.forEach(function(it) {
             var tr = document.createElement('tr');
+            var currPrefix = it.currency ? it.currency + ' ' : '';
+            var origPaid = it.original_amount || it.amount || '0.00';
+            var revAmt = it.reversed_amount || '0.00';
+            var effPaid = it.effective_paid_amount !== undefined ? it.effective_paid_amount : (it.amount || '0.00');
+            var stLabel = it.allocation_status_label || 'Paid';
             tr.innerHTML = '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><strong>' + (it.student_name || '—') + '</strong><br><small style="color:#64748b;">GR: ' + (it.gr_number || '—') + '</small></td>' +
                 '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;">' + (it.fee_particular || 'Monthly Fee') + '</td>' +
                 '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><span style="background:#ede9fe;color:#6d28d9;padding:1px 6px;border-radius:4px;font-size:11px;">' + (it.period || '—') + '</span></td>' +
-                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:700;">' + (it.currency ? it.currency + ' ' : '') + it.amount + '</td>';
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:600;">' + currPrefix + origPaid + '</td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;color:#b45309;font-weight:600;">' + (Number(it.reversed_amount_minor || 0) > 0 ? currPrefix + revAmt : '—') + '</td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:700;color:#166534;">' + currPrefix + effPaid + '</td>' +
+                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><span style="background:#f1f5f9;color:#334155;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700;">' + stLabel + '</span></td>';
             tbody.appendChild(tr);
         });
     } else {
-        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:12px;color:#94a3b8;">No itemized details recorded.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:12px;color:#94a3b8;">No itemized details recorded.</td></tr>';
     }
 
     var printBtn = document.getElementById('rd-print-btn');

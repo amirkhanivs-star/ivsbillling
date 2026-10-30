@@ -78,21 +78,49 @@ class PdfAccessService
     }
 
     /**
-     * Generate permanent public URL for an invoice PDF.
+     * Determine whether a user is a scope-restricted staff member (not a global administrator).
      */
-    public function getInvoicePdfUrl(int $invoiceId): string
+    public function isRestrictedStaff(?object $user): bool
     {
+        return $user !== null && !in_array($user->role ?? null, ['super_admin', 'finance_admin'], true);
+    }
+
+    /**
+     * Generate URL for an invoice PDF.
+     * Restricted staff receive the authenticated, scope-aware preview route;
+     * authorized administrators and parent-facing payloads receive the public token URL.
+     */
+    public function getInvoicePdfUrl(int $invoiceId, ?object $user = null): string
+    {
+        if ($this->isRestrictedStaff($user)) {
+            return url("/invoices/{$invoiceId}/pdf");
+        }
+
         $token = $this->getSecurePathToken('invoice', $invoiceId);
         return url("/public/invoices/{$invoiceId}/{$token}/Monthly-Fee-Invoice.pdf");
     }
 
     /**
-     * Generate permanent public URL for a family consolidated challan PDF.
+     * Generate URL for a family consolidated challan PDF.
+     * Restricted staff receive the authenticated, scope-aware preview route;
+     * authorized administrators and parent-facing payloads receive the public token URL.
      */
-    public function getFamilyChallanPdfUrl(int $familyId): string
+    public function getFamilyChallanPdfUrl(int $familyId, ?string $period = null, ?object $user = null): string
     {
+        if ($this->isRestrictedStaff($user)) {
+            $url = url("/families/{$familyId}/challan/pdf");
+            if ($period !== null && trim($period) !== '') {
+                $url .= '?period=' . urlencode(trim($period));
+            }
+            return $url;
+        }
+
         $token = $this->getSecurePathToken('family', $familyId);
-        return url("/public/challans/{$familyId}/{$token}/Monthly-Fee-Invoice.pdf");
+        $url = url("/public/challans/{$familyId}/{$token}/Monthly-Fee-Invoice.pdf");
+        if ($period !== null && trim($period) !== '') {
+            $url .= '?period=' . urlencode(trim($period));
+        }
+        return $url;
     }
 
     /**

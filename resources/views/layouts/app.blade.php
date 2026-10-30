@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>@yield('title','IQRA Billing') · IQRA</title><link rel="stylesheet" href="{{ asset('assets/myskool.css') }}"></head><body>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="{{ csrf_token() }}"><title>@yield('title','IQRA Billing') · IQRA</title><link rel="stylesheet" href="{{ asset('assets/myskool.css') }}"></head><body>
 <aside class="sidebar"><div class="logo" title="IQRA"><img alt="IQRA" src="{{asset('assets/myskool-mark.svg')}}" width="47" height="47"></div>
 <a class="nav-icon {{ request()->is('dashboard','manage-branches','manage-classes')?'active':'' }}" href="/dashboard" title="Dashboard">⌂</a>
 <a class="nav-icon {{ request()->is('manage-student*')?'active':'' }}" href="/manage-student" title="Students">♙</a>

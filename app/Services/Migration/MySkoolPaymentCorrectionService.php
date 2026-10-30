@@ -20,6 +20,8 @@ class MySkoolPaymentCorrectionService
 
     // Supported correction actions
     public const ACTION_REVERSE_SETTLEMENT = 'reverse_settlement';
+    public const ACTION_RESTORE_PAYMENT = 'restore_payment';
+    public const ACTION_RECONCILE_LINEAGE = 'reconcile_lineage';
     public const ACTION_REAPPLY_SETTLEMENT = 'reapply_settlement';
     public const ACTION_MARK_UNDER_REVIEW = 'mark_under_review';
     public const ACTION_MARK_DISPUTED = 'mark_disputed';
@@ -29,6 +31,7 @@ class MySkoolPaymentCorrectionService
 
     // Resulting statuses
     public const STATUS_RECONCILED = 'reconciled';
+    public const STATUS_PARTIALLY_REVERSED = 'partially_reversed';
     public const STATUS_REVERSED = 'reversed';
     public const STATUS_REAPPLIED = 'reapplied';
     public const STATUS_UNDER_REVIEW = 'under_review';
@@ -41,6 +44,7 @@ class MySkoolPaymentCorrectionService
     public const SAFETY_SAFE_REVERSIBLE = 'SAFE_TO_REVERSE';
     public const SAFETY_SAFE_REAPPLICABLE = 'SAFE_TO_REAPPLY';
     public const SAFETY_SAFE_REVIEW_ONLY = 'MANUAL_REVIEW_ONLY';
+    public const SAFETY_REQUIRES_RECONCILIATION = 'REQUIRES_RECONCILIATION';
     public const SAFETY_BLOCKED_PRE_CUTOFF_SNAPSHOT = 'BLOCKED_PRE_CUTOFF_SNAPSHOT';
     public const SAFETY_BLOCKED_CURRENCY_CONFLICT = 'BLOCKED_CURRENCY_CONFLICT';
     public const SAFETY_BLOCKED_INTERVENING_PORTAL_PAYMENT = 'BLOCKED_INTERVENING_PORTAL_PAYMENT';
@@ -223,6 +227,7 @@ class MySkoolPaymentCorrectionService
         // 4. Inspect immutable correction audit trail from qa_myskool_payment_corrections
         $correctionHistory = [];
         $latestCorrection = null;
+        $trackedReversedMinorFromHistory = 0;
         if ($hasCorrectionsTable) {
             $corrRows = $db->table('qa_myskool_payment_corrections as mc')
                 ->leftJoin('users as u', 'u.id', '=', 'mc.acted_by')
@@ -233,12 +238,40 @@ class MySkoolPaymentCorrectionService
                 ->get();
 
             foreach ($corrRows as $cr) {
+                $beforeSt = json_decode((string) $cr->before_state_json, true) ?: [];
+                $afterSt = json_decode((string) $cr->after_state_json, true) ?: [];
+                $crReversedMinor = isset($cr->reversed_amount_minor) && (int) $cr->reversed_amount_minor > 0
+                    ? (int) $cr->reversed_amount_minor
+                    : 0;
+                $crAct = (string) $cr->action_type;
+                if (in_array($crAct, [self::ACTION_REVERSE_SETTLEMENT, self::ACTION_RESTORE_PAYMENT], true)) {
+                    if ($crReversedMinor <= 0) {
+                        $crReversedMinor = isset($beforeSt['item_paid_minor'], $afterSt['item_paid_minor'])
+                            ? max(0, (int) $beforeSt['item_paid_minor'] - (int) $afterSt['item_paid_minor'])
+                            : $colAmountMinor;
+                    }
+                    $trackedReversedMinorFromHistory = isset($cr->cumulative_reversed_minor) && (int) $cr->cumulative_reversed_minor > 0
+                        ? (int) $cr->cumulative_reversed_minor
+                        : min($colAmountMinor, $trackedReversedMinorFromHistory + $crReversedMinor);
+                } elseif (in_array($crAct, [self::ACTION_REAPPLY_SETTLEMENT, self::ACTION_RECONCILE_LINEAGE], true)) {
+                    $trackedReversedMinorFromHistory = 0;
+                }
+
                 $entry = [
                     'id' => (int) $cr->id,
                     'correction_id' => (string) $cr->correction_id,
                     'sequence_no' => (int) $cr->sequence_no,
-                    'action_type' => (string) $cr->action_type,
+                    'action_type' => $crAct,
                     'resulting_status' => (string) $cr->resulting_status,
+                    'restoration_mode' => $cr->restoration_mode ?? null,
+                    'reversed_amount_minor' => $crReversedMinor,
+                    'reversed_amount_formatted' => number_format($crReversedMinor / 100, 2, '.', ''),
+                    'cumulative_reversed_minor' => $trackedReversedMinorFromHistory,
+                    'cumulative_reversed_formatted' => number_format($trackedReversedMinorFromHistory / 100, 2, '.', ''),
+                    'remaining_paid_minor' => isset($cr->remaining_paid_minor) && $cr->remaining_paid_minor !== null
+                        ? (int) $cr->remaining_paid_minor
+                        : max(0, $colAmountMinor - $trackedReversedMinorFromHistory),
+                    'idempotency_key' => $cr->idempotency_key ?? null,
                     'case_classification' => (string) $cr->case_classification,
                     'reconciliation_id' => $cr->reconciliation_id ? (string) $cr->reconciliation_id : null,
                     'invoice_item_id' => $cr->invoice_item_id ? (int) $cr->invoice_item_id : null,
@@ -251,15 +284,15 @@ class MySkoolPaymentCorrectionService
                     'actor_name' => (string) ($cr->actor_name ?: ('User #' . $cr->acted_by)),
                     'actor_role' => (string) ($cr->actor_role ?: 'admin'),
                     'acted_at' => (string) $cr->acted_at,
-                    'before_state' => json_decode((string) $cr->before_state_json, true) ?: [],
-                    'after_state' => json_decode((string) $cr->after_state_json, true) ?: [],
+                    'before_state' => $beforeSt,
+                    'after_state' => $afterSt,
                 ];
                 $correctionHistory[] = $entry;
                 $latestCorrection = $entry;
             }
         }
 
-        // 5. Inspect shared-slip sibling allocations (Case C: e.g. Slip 27328 for GR 5929 and GR 5930)
+        // 5. Inspect shared-slip sibling allocations (Case C: e.g. Slip 27328 for GR 5929 and GR 5930, or Slip 24083)
         $sharedSlipAllocations = [];
         if ($slipNumber !== '' && $slipNumber !== '0') {
             $familyGrs = [];
@@ -293,6 +326,8 @@ class MySkoolPaymentCorrectionService
             foreach ($slipRows as $sr) {
                 $srId = (int) $sr->id;
                 $srGr = trim((string) ($sr->gr_number ?? ''));
+                $srOrigMinor = (int) ($sr->amount_minor ?? 0);
+                $srCurrency = strtoupper(trim((string) ($sr->currency ?? $colCurrency)));
                 $srStudentName = $srGr === $studentGr
                     ? $studentName
                     : ($schema->hasTable('students')
@@ -302,6 +337,7 @@ class MySkoolPaymentCorrectionService
                 $srSettlementStatus = 'unreconciled';
                 $srReconId = null;
                 $srItemId = null;
+                $srSettledMinor = 0;
                 if ($hasSettlementColsTable) {
                     $srAlloc = $db->table('qa_historical_settlement_collections')
                         ->where('qa_staged_collection_id', $srId)
@@ -311,6 +347,11 @@ class MySkoolPaymentCorrectionService
                         $srSettlementStatus = (string) $srAlloc->status;
                         $srReconId = (string) $srAlloc->reconciliation_id;
                         $srItemId = (int) $srAlloc->invoice_item_id;
+                        if ($hasSettlementsTable && $srAlloc->settlement_id) {
+                            $srSettledMinor = (int) $db->table('qa_historical_settlements')
+                                ->where('id', $srAlloc->settlement_id)
+                                ->value('settled_amount_minor');
+                        }
                     }
                 } elseif ($hasSettlementsTable) {
                     $srSet = $db->table('qa_historical_settlements')
@@ -320,16 +361,59 @@ class MySkoolPaymentCorrectionService
                         $srSettlementStatus = (string) $srSet->status;
                         $srReconId = (string) $srSet->reconciliation_id;
                         $srItemId = (int) $srSet->invoice_item_id;
+                        $srSettledMinor = (int) $srSet->settled_amount_minor;
                     }
                 }
 
                 $srCorrStatus = null;
+                $srReversedMinor = 0;
                 if ($hasCorrectionsTable) {
-                    $srCorrStatus = $db->table('qa_myskool_payment_corrections')
+                    $srCorrs = $db->table('qa_myskool_payment_corrections')
                         ->where('qa_staged_collection_id', $srId)
-                        ->orderByDesc('sequence_no')
-                        ->orderByDesc('id')
-                        ->value('resulting_status');
+                        ->orderBy('sequence_no')
+                        ->orderBy('id')
+                        ->get();
+                    foreach ($srCorrs as $sc) {
+                        $srCorrStatus = (string) $sc->resulting_status;
+                        $scAct = (string) $sc->action_type;
+                        if (in_array($scAct, [self::ACTION_REVERSE_SETTLEMENT, self::ACTION_RESTORE_PAYMENT], true)) {
+                            $scRev = isset($sc->reversed_amount_minor) && (int) $sc->reversed_amount_minor > 0
+                                ? (int) $sc->reversed_amount_minor
+                                : $srOrigMinor;
+                            $srReversedMinor = isset($sc->cumulative_reversed_minor) && (int) $sc->cumulative_reversed_minor > 0
+                                ? (int) $sc->cumulative_reversed_minor
+                                : min($srOrigMinor, $srReversedMinor + $scRev);
+                        } elseif (in_array($scAct, [self::ACTION_REAPPLY_SETTLEMENT, self::ACTION_RECONCILE_LINEAGE], true)) {
+                            $srReversedMinor = 0;
+                        }
+                    }
+                }
+
+                if ($srSettlementStatus === 'reversed' && $srReversedMinor === 0) {
+                    $srReversedMinor = $srOrigMinor;
+                } elseif ($srSettlementStatus === 'applied' && $srSettledMinor > 0 && $srSettledMinor < $srOrigMinor) {
+                    $srReversedMinor = max($srReversedMinor, $srOrigMinor - $srSettledMinor);
+                }
+
+                $srEffectivePaidMinor = max(0, $srOrigMinor - $srReversedMinor);
+                $srIsCredited = ($srSettlementStatus === 'applied' && $srEffectivePaidMinor > 0);
+                $srHasConflict = !empty($sr->is_currency_unresolved) || !empty($sr->has_currency_conflict);
+
+                if ($srReversedMinor >= $srOrigMinor && $srOrigMinor > 0) {
+                    $srAllocStatus = 'fully_reversed';
+                    $srAllocLabel = 'Fully Reversed';
+                } elseif ($srReversedMinor > 0) {
+                    $srAllocStatus = 'partially_reversed';
+                    $srAllocLabel = 'Partially Reversed';
+                } elseif ($srHasConflict || $srCorrStatus === self::STATUS_DISPUTED) {
+                    $srAllocStatus = 'requires_review';
+                    $srAllocLabel = 'Requires Review';
+                } elseif ($srIsCredited) {
+                    $srAllocStatus = 'paid';
+                    $srAllocLabel = 'Paid';
+                } else {
+                    $srAllocStatus = 'requires_reconciliation';
+                    $srAllocLabel = 'Requires Reconciliation';
                 }
 
                 $sharedSlipAllocations[] = [
@@ -339,9 +423,20 @@ class MySkoolPaymentCorrectionService
                     'student_gr' => $srGr,
                     'student_name' => $srStudentName,
                     'fee_particular' => (string) ($sr->fee_particular ?? ''),
-                    'currency' => strtoupper(trim((string) ($sr->currency ?? $colCurrency))),
-                    'amount_minor' => (int) ($sr->amount_minor ?? 0),
-                    'amount_formatted' => number_format(((int) ($sr->amount_minor ?? 0)) / 100, 2, '.', ''),
+                    'currency' => $srCurrency,
+                    'amount_minor' => $srOrigMinor,
+                    'amount_formatted' => number_format($srOrigMinor / 100, 2, '.', ''),
+                    'original_paid_minor' => $srOrigMinor,
+                    'original_paid_formatted' => number_format($srOrigMinor / 100, 2, '.', ''),
+                    'reversed_amount_minor' => $srReversedMinor,
+                    'reversed_amount_formatted' => number_format($srReversedMinor / 100, 2, '.', ''),
+                    'effective_paid_minor' => $srEffectivePaidMinor,
+                    'effective_paid_formatted' => number_format($srEffectivePaidMinor / 100, 2, '.', ''),
+                    'remaining_reversible_minor' => $srIsCredited ? $srEffectivePaidMinor : 0,
+                    'remaining_reversible_formatted' => number_format(($srIsCredited ? $srEffectivePaidMinor : 0) / 100, 2, '.', ''),
+                    'is_credited_in_ledger' => $srIsCredited,
+                    'allocation_status' => $srAllocStatus,
+                    'allocation_status_label' => $srAllocLabel,
                     'settlement_status' => $srSettlementStatus,
                     'reconciliation_id' => $srReconId,
                     'invoice_item_id' => $srItemId,
@@ -384,6 +479,7 @@ class MySkoolPaymentCorrectionService
                 ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
                 ->leftJoin('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
                 ->where('ii.student_id', $studentId)
+                ->where('ii.status', '!=', 'voided')
                 ->whereNotIn('inv.status', ['void', 'voided'])
                 ->select('ii.*', 'br.frequency as billing_run_frequency');
 
@@ -398,9 +494,14 @@ class MySkoolPaymentCorrectionService
                     break;
                 }
             }
-            // Fallback to opening balance item if period is pre-cutoff or Oct-2026
+            // Fallback to opening balance item only when the OB candidate matches the period (or has no specific period)
             if (!$item && $studentItems->isNotEmpty()) {
-                $obCandidate = $studentItems->first(fn($c) => ($c->billing_run_frequency ?? '') === 'opening_balance');
+                $obCandidate = $studentItems->first(function ($c) use ($periodStart) {
+                    if (($c->billing_run_frequency ?? '') !== 'opening_balance') {
+                        return false;
+                    }
+                    return empty($periodStart) || empty($c->period_start) || (string) $c->period_start === (string) $periodStart;
+                });
                 if ($obCandidate && ($isPreCutoff || $periodStart === '2026-10-01')) {
                     $item = $obCandidate;
                 }
@@ -414,11 +515,44 @@ class MySkoolPaymentCorrectionService
             }
         }
 
-        // 7. Compute student & family total outstanding balances and currency expectations
+        // 7. Compute student & family total outstanding balances and period-aware currency expectations
         $studentExpectedCurrency = null;
+        $periodHistoricalCurrency = null;
         $studentTotalOutstandingMinor = 0;
         $familyTotalOutstandingMinor = 0;
         $portalReceiptsCount = 0;
+
+        // Check period-specific historical fee plan currency first (e.g. when enrollment currency changed in a later month)
+        if ($studentId && $schema->hasTable('fee_plan_items') && $schema->hasTable('enrollments')) {
+            $fpRows = $db->table('fee_plan_items as fpi')
+                ->join('enrollments as e', 'e.id', '=', 'fpi.enrollment_id')
+                ->where('e.student_id', $studentId)
+                ->orderBy('fpi.id')
+                ->select('fpi.currency', 'fpi.effective_from', 'fpi.effective_to')
+                ->get();
+            foreach ($fpRows as $fpr) {
+                $fpCurr = strtoupper(trim((string) ($fpr->currency ?? '')));
+                if ($fpCurr === '') {
+                    continue;
+                }
+                if ($periodStart) {
+                    $fromOk = empty($fpr->effective_from) || ((string) $fpr->effective_from <= (string) $periodStart);
+                    $toOk = empty($fpr->effective_to) || ((string) $fpr->effective_to >= (string) $periodStart);
+                    if ($fromOk && $toOk) {
+                        $periodHistoricalCurrency = $fpCurr;
+                        if ($studentExpectedCurrency === null) {
+                            $studentExpectedCurrency = $fpCurr;
+                        }
+                        if ($fpCurr === $colCurrency) {
+                            break;
+                        }
+                    }
+                }
+                if ($studentExpectedCurrency === null) {
+                    $studentExpectedCurrency = $fpCurr;
+                }
+            }
+        }
 
         if ($studentId && $schema->hasTable('invoice_items') && $schema->hasTable('invoices')) {
             $stuActiveItems = $db->table('invoice_items as ii')
@@ -429,17 +563,24 @@ class MySkoolPaymentCorrectionService
                 ->get(['ii.currency', 'ii.net_minor', 'ii.paid_minor']);
 
             foreach ($stuActiveItems as $sai) {
-                if ($studentExpectedCurrency === null && !empty($sai->currency)) {
-                    $studentExpectedCurrency = strtoupper(trim((string) $sai->currency));
+                $saiCurr = strtoupper(trim((string) ($sai->currency ?? '')));
+                if ($studentExpectedCurrency === null && $saiCurr !== '') {
+                    $studentExpectedCurrency = $saiCurr;
                 }
-                $studentTotalOutstandingMinor += max(0, (int) $sai->net_minor - (int) $sai->paid_minor);
+                if ($saiCurr === $colCurrency) {
+                    $studentTotalOutstandingMinor += max(0, (int) $sai->net_minor - (int) $sai->paid_minor);
+                }
             }
         }
 
-        if ($studentExpectedCurrency === null && $studentId && $schema->hasTable('fee_plan_items')) {
-            $fpCurr = $db->table('fee_plan_items')->where('student_id', $studentId)->value('currency');
-            if ($fpCurr) {
-                $studentExpectedCurrency = strtoupper(trim((string) $fpCurr));
+        if ($periodHistoricalCurrency !== null && empty($col->has_currency_conflict) && empty($col->is_currency_unresolved)) {
+            $studentExpectedCurrency = $periodHistoricalCurrency;
+        }
+
+        if ($studentExpectedCurrency === null && $studentId && $schema->hasTable('enrollments')) {
+            $enrCurr = $db->table('enrollments')->where('student_id', $studentId)->value('currency');
+            if ($enrCurr) {
+                $studentExpectedCurrency = strtoupper(trim((string) $enrCurr));
             }
         }
 
@@ -454,6 +595,7 @@ class MySkoolPaymentCorrectionService
             $famItems = $db->table('invoice_items as ii')
                 ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
                 ->where('inv.family_id', $familyId)
+                ->where('ii.currency', $colCurrency)
                 ->where('ii.status', '!=', 'voided')
                 ->whereNotIn('inv.status', ['void', 'voided'])
                 ->get(['ii.net_minor', 'ii.paid_minor']);
@@ -469,7 +611,7 @@ class MySkoolPaymentCorrectionService
             }
         }
 
-        // 8. Check currency conflict (Rule 9 & Task 6 GR 8620)
+        // 8. Check currency conflict (Rule 9 & Task 6 GR 8620 / GR 8240)
         $itemCurrency = $item ? strtoupper(trim((string) $item->currency)) : $studentExpectedCurrency;
         $hasCurrencyConflict = !empty($col->is_currency_unresolved)
             || !empty($col->has_currency_conflict)
@@ -508,16 +650,44 @@ class MySkoolPaymentCorrectionService
             }
         }
 
-        // 10. Determine current receipt status & case classification (Cases A - E)
+        // 10. Determine current receipt status, partial/full reversal amounts & case classification (Cases A - E)
         $isReconciled = ($activeSettlement !== null);
         $currentReceiptStatus = self::STATUS_UNRECONCILED_POST_CUTOFF;
         $currentStatusLabel = 'Unreconciled (Post-Cutoff)';
+
+        $previouslyReversedMinor = $trackedReversedMinorFromHistory;
+        if (!$isReconciled && ($reversedSettlement !== null || ($latestCorrection && (string) $latestCorrection['resulting_status'] === self::STATUS_REVERSED))) {
+            $previouslyReversedMinor = max($previouslyReversedMinor, $colAmountMinor);
+        } elseif ($isReconciled && $activeSettlementColCount <= 1) {
+            $settledMinorNow = (int) $activeSettlement->settled_amount_minor;
+            if ($settledMinorNow < $colAmountMinor && $trackedReversedMinorFromHistory > 0) {
+                $previouslyReversedMinor = max($trackedReversedMinorFromHistory, $colAmountMinor - $settledMinorNow);
+            }
+        }
+        $previouslyReversedMinor = min($colAmountMinor, max(0, $previouslyReversedMinor));
+        $effectivePaidMinor = max(0, $colAmountMinor - $previouslyReversedMinor);
+
+        $isCreditedInLedger = $isReconciled
+            && $item !== null
+            && !$hasCurrencyConflict
+            && (int) $item->paid_minor > 0
+            && $effectivePaidMinor > 0;
+
+        $remainingReversibleMinor = 0;
+        if ($isCreditedInLedger && $activeSettlement) {
+            $activeSettledCap = (int) $activeSettlement->settled_amount_minor;
+            $itemPaidCap = $item ? max(0, (int) $item->paid_minor - $interveningPortalAmountMinor) : 0;
+            $remainingReversibleMinor = max(0, min($effectivePaidMinor, $activeSettledCap, $itemPaidCap));
+        }
 
         if ($latestCorrection) {
             $corrResult = (string) $latestCorrection['resulting_status'];
             if ($corrResult === self::STATUS_REVERSED && !$isReconciled) {
                 $currentReceiptStatus = self::STATUS_REVERSED;
                 $currentStatusLabel = 'Reversed';
+            } elseif ($corrResult === self::STATUS_PARTIALLY_REVERSED && $isReconciled) {
+                $currentReceiptStatus = self::STATUS_PARTIALLY_REVERSED;
+                $currentStatusLabel = 'Partially Reversed';
             } elseif ($corrResult === self::STATUS_DISPUTED) {
                 $currentReceiptStatus = self::STATUS_DISPUTED;
                 $currentStatusLabel = 'Disputed';
@@ -528,13 +698,15 @@ class MySkoolPaymentCorrectionService
                 $currentReceiptStatus = self::STATUS_CORRECTED;
                 $currentStatusLabel = 'Corrected';
             } elseif ($isReconciled) {
-                $currentReceiptStatus = self::STATUS_RECONCILED;
-                $currentStatusLabel = $corrResult === self::STATUS_REAPPLIED ? 'Reconciled (Reapplied)' : 'Reconciled';
+                $currentReceiptStatus = $previouslyReversedMinor > 0 ? self::STATUS_PARTIALLY_REVERSED : self::STATUS_RECONCILED;
+                $currentStatusLabel = $previouslyReversedMinor > 0
+                    ? 'Partially Reversed'
+                    : ($corrResult === self::STATUS_REAPPLIED ? 'Reconciled (Reapplied)' : 'Reconciled');
             }
         } else {
             if ($isReconciled) {
-                $currentReceiptStatus = self::STATUS_RECONCILED;
-                $currentStatusLabel = 'Reconciled';
+                $currentReceiptStatus = $previouslyReversedMinor > 0 ? self::STATUS_PARTIALLY_REVERSED : self::STATUS_RECONCILED;
+                $currentStatusLabel = $previouslyReversedMinor > 0 ? 'Partially Reversed' : 'Reconciled';
             } elseif ($reversedSettlement) {
                 $currentReceiptStatus = self::STATUS_REVERSED;
                 $currentStatusLabel = 'Reversed';
@@ -546,6 +718,34 @@ class MySkoolPaymentCorrectionService
                 $currentStatusLabel = 'Pre-Cutoff Historical (Reflected in OB)';
             }
         }
+
+        // Individual allocation status (Task 4: Paid, Partially Reversed, Fully Reversed, Requires Review, or Requires Reconciliation)
+        if ($previouslyReversedMinor >= $colAmountMinor && $colAmountMinor > 0) {
+            $allocationStatus = 'fully_reversed';
+            $allocationStatusLabel = 'Fully Reversed';
+        } elseif ($previouslyReversedMinor > 0 && $previouslyReversedMinor < $colAmountMinor) {
+            $allocationStatus = 'partially_reversed';
+            $allocationStatusLabel = 'Partially Reversed';
+        } elseif ($hasCurrencyConflict || $currentReceiptStatus === self::STATUS_DISPUTED) {
+            $allocationStatus = 'requires_review';
+            $allocationStatusLabel = 'Requires Review';
+        } elseif ($isCreditedInLedger) {
+            $allocationStatus = 'paid';
+            $allocationStatusLabel = 'Paid';
+        } else {
+            $allocationStatus = 'requires_reconciliation';
+            $allocationStatusLabel = 'Requires Reconciliation';
+        }
+
+        $requiresReconciliation = ($allocationStatus === 'requires_reconciliation');
+        $canReconcileLineage = $requiresReconciliation
+            && !$hasCurrencyConflict
+            && $studentId !== null
+            && $familyId !== null
+            && !empty($periodKey)
+            && !empty($periodStart)
+            && $colAmountMinor > 0
+            && !$consumedElsewhere;
 
         // Case classification
         if ($isReconciled && $isSharedSlip) {
@@ -562,7 +762,7 @@ class MySkoolPaymentCorrectionService
             $caseClassification = self::CASE_B_UNRECONCILED_POST_CUTOFF;
         }
 
-        // 11. Evaluate safety rules for reversal, reapplication, and review/dispute actions
+        // 11. Evaluate safety rules for reversal, restoration, reapplication, and review/dispute actions
         $blockedReasons = [];
         $availableActions = [];
         $isSafeToReverse = false;
@@ -587,14 +787,22 @@ class MySkoolPaymentCorrectionService
                 $blockedReasons[] = $reasonMsg;
                 $safetyExplanation = $reasonMsg;
                 $availableActions = [self::ACTION_MARK_UNDER_REVIEW];
+            } elseif ($remainingReversibleMinor <= 0) {
+                $safetyStatus = self::SAFETY_BLOCKED_ALREADY_REVERSED;
+                $reasonMsg = "No remaining reversible amount on MySkool collection row #{$stagedCollectionId}.";
+                $blockedReasons[] = $reasonMsg;
+                $safetyExplanation = $reasonMsg;
+                $availableActions = [self::ACTION_MARK_UNDER_REVIEW];
             } else {
                 $isSafeToReverse = true;
                 $safetyStatus = self::SAFETY_SAFE_REVERSIBLE;
                 $safetyExplanation = $isSharedSlip
-                    ? "Safe to reverse this individual source allocation (Row #{$stagedCollectionId} for GR {$studentGr}) without affecting sibling allocations on shared slip #{$slipNumber}."
-                    : "Safe to reverse historical settlement '{$activeSettlement->reconciliation_id}' and restore the unpaid invoice balance on {$invoice->invoice_number}.";
+                    ? "Safe to restore up to {$colCurrency} " . number_format($remainingReversibleMinor / 100, 2) . " on this individual source allocation (Row #{$stagedCollectionId} for GR {$studentGr}) without affecting sibling allocations on shared slip #{$slipNumber}."
+                    : "Safe to restore up to {$colCurrency} " . number_format($remainingReversibleMinor / 100, 2) . " from historical settlement '{$activeSettlement->reconciliation_id}' to outstanding dues on {$invoice->invoice_number}.";
                 $availableActions = [
                     self::ACTION_REVERSE_SETTLEMENT,
+                    self::ACTION_RESTORE_PAYMENT,
+                    self::ACTION_MARK_DISPUTED,
                     self::ACTION_MARK_UNDER_REVIEW,
                 ];
             }
@@ -623,7 +831,7 @@ class MySkoolPaymentCorrectionService
             } else {
                 $itemUnpaid = max(0, (int) $item->net_minor - (int) $item->paid_minor);
                 $reapplyCandidateMinor = $reversedSettlement
-                    ? min($colAmountMinor, (int) $reversedSettlement->settled_amount_minor)
+                    ? min($colAmountMinor, max((int) $reversedSettlement->settled_amount_minor, $previouslyReversedMinor))
                     : min($colAmountMinor, $itemUnpaid);
                 if ($itemUnpaid <= 0 || $reapplyCandidateMinor <= 0 || ((int) $item->paid_minor + $reapplyCandidateMinor > (int) $item->net_minor)) {
                     $safetyStatus = self::SAFETY_BLOCKED_OVERPAYMENT;
@@ -647,29 +855,31 @@ class MySkoolPaymentCorrectionService
                 self::ACTION_MARK_UNDER_REVIEW,
             ]));
         } elseif ($isPreCutoff) {
-            // Case B (Pre-Cutoff): already accounted for in the opening-balance snapshot
+            // Case B (Pre-Cutoff): not yet reconciled as an active ledger credit
             $safetyStatus = self::SAFETY_BLOCKED_PRE_CUTOFF_SNAPSHOT;
-            $reasonMsg = "Pre-cutoff receipt ({$paymentDate} <= cutoff {$cutoffDate}): This payment was already netted into the opening-balance snapshot compilation before the migration cutoff. Direct settlement reversal or blind modification of invoice_items.paid_minor is blocked. Use the manual-review or pre-cutoff compensation proposal workflow after verifying original MySkool dues.";
+            $reasonMsg = "Requires Reconciliation: Pre-cutoff receipt ({$paymentDate} <= cutoff {$cutoffDate}) has not been posted as an active paid credit in the ledger. Reconcile its original fee obligation and source lineage first before restoring any balance, or use the manual-review workflow.";
             $blockedReasons[] = $reasonMsg;
             $safetyExplanation = $reasonMsg;
-            $availableActions = [
+            $availableActions = array_values(array_filter([
+                $canReconcileLineage ? self::ACTION_RECONCILE_LINEAGE : null,
                 self::ACTION_MARK_UNDER_REVIEW,
                 self::ACTION_MARK_DISPUTED,
                 self::ACTION_PROPOSE_PRE_CUTOFF_COMPENSATION,
                 self::ACTION_PROPOSE_REASSIGNMENT,
-            ];
+            ]));
         } else {
             // Case B (Post-Cutoff Unreconciled) or Case D
             $safetyStatus = self::SAFETY_SAFE_REVIEW_ONLY;
-            $reasonMsg = "This post-cutoff MySkool receipt is not currently reconciled to an active invoice settlement. Direct settlement reversal is not applicable; you may mark it Under Review, Disputed, Corrected, or propose reassignment.";
+            $reasonMsg = "Requires Reconciliation: This MySkool receipt is not currently reconciled to an active invoice settlement in the ledger. Reconcile its fee obligation first before executing a balance-changing restoration.";
             $blockedReasons[] = $reasonMsg;
             $safetyExplanation = $reasonMsg;
-            $availableActions = [
+            $availableActions = array_values(array_filter([
+                $canReconcileLineage ? self::ACTION_RECONCILE_LINEAGE : null,
                 self::ACTION_MARK_UNDER_REVIEW,
                 self::ACTION_MARK_DISPUTED,
                 self::ACTION_MARK_CORRECTED,
                 self::ACTION_PROPOSE_REASSIGNMENT,
-            ];
+            ]));
         }
 
         // 12. Build current financial balances & before/after effect previews
@@ -683,12 +893,14 @@ class MySkoolPaymentCorrectionService
         $invBalanceMinor = max(0, $invTotalMinor - $invPaidMinor);
         $invStatus = $invoice ? (string) $invoice->status : 'N/A';
 
-        // Reversal delta calculation (supports both single-collection and multi-collection settlements)
+        // Reversal delta calculation (supports full or remaining reversible amount on single/multi-collection settlements)
         $reversalDeltaMinor = 0;
         if ($activeSettlement) {
-            $reversalDeltaMinor = $activeSettlementColCount > 1
-                ? min($colAmountMinor, (int) $activeSettlement->settled_amount_minor)
-                : (int) $activeSettlement->settled_amount_minor;
+            $reversalDeltaMinor = $remainingReversibleMinor > 0
+                ? $remainingReversibleMinor
+                : ($activeSettlementColCount > 1
+                    ? min($colAmountMinor, (int) $activeSettlement->settled_amount_minor)
+                    : (int) $activeSettlement->settled_amount_minor);
         }
 
         $afterRevItemPaidMinor = max(0, $itemPaidMinor - $reversalDeltaMinor);
@@ -712,7 +924,7 @@ class MySkoolPaymentCorrectionService
         if ($reversedSettlement && $item) {
             $reapplyDeltaMinor = min(
                 $colAmountMinor,
-                (int) $reversedSettlement->settled_amount_minor,
+                max((int) $reversedSettlement->settled_amount_minor, $previouslyReversedMinor),
                 max(0, $itemNetMinor - $itemPaidMinor)
             );
         } elseif ($item) {
@@ -739,6 +951,8 @@ class MySkoolPaymentCorrectionService
                 'delta_formatted' => number_format($reversalDeltaMinor / 100, 2, '.', ''),
                 'before' => [
                     'receipt_status' => $currentStatusLabel,
+                    'allocation_effective_paid_minor' => $effectivePaidMinor,
+                    'allocation_effective_paid_formatted' => number_format($effectivePaidMinor / 100, 2, '.', ''),
                     'item_paid_minor' => $itemPaidMinor,
                     'item_paid_formatted' => number_format($itemPaidMinor / 100, 2, '.', ''),
                     'item_balance_minor' => $itemBalanceMinor,
@@ -752,6 +966,8 @@ class MySkoolPaymentCorrectionService
                 ],
                 'after' => [
                     'receipt_status' => 'Reversed',
+                    'allocation_effective_paid_minor' => 0,
+                    'allocation_effective_paid_formatted' => '0.00',
                     'item_paid_minor' => $afterRevItemPaidMinor,
                     'item_paid_formatted' => number_format($afterRevItemPaidMinor / 100, 2, '.', ''),
                     'item_balance_minor' => $afterRevItemBalanceMinor,
@@ -762,6 +978,82 @@ class MySkoolPaymentCorrectionService
                     'invoice_balance_minor' => $afterRevInvBalanceMinor,
                     'invoice_balance_formatted' => number_format($afterRevInvBalanceMinor / 100, 2, '.', ''),
                     'invoice_status' => $afterRevInvStatus,
+                ],
+                'preserves_staged_collection' => true,
+                'preserves_sibling_allocations' => true,
+                'zero_cashier_impact' => true,
+            ],
+            self::ACTION_RESTORE_PAYMENT => [
+                'action_label' => 'Restore Selected Amount to Outstanding Dues',
+                'is_permitted' => $isSafeToReverse,
+                'delta_minor' => $reversalDeltaMinor,
+                'delta_formatted' => number_format($reversalDeltaMinor / 100, 2, '.', ''),
+                'max_reversible_minor' => $remainingReversibleMinor,
+                'max_reversible_formatted' => number_format($remainingReversibleMinor / 100, 2, '.', ''),
+                'before' => [
+                    'receipt_status' => $currentStatusLabel,
+                    'allocation_effective_paid_minor' => $effectivePaidMinor,
+                    'allocation_effective_paid_formatted' => number_format($effectivePaidMinor / 100, 2, '.', ''),
+                    'item_paid_minor' => $itemPaidMinor,
+                    'item_paid_formatted' => number_format($itemPaidMinor / 100, 2, '.', ''),
+                    'item_balance_minor' => $itemBalanceMinor,
+                    'item_balance_formatted' => number_format($itemBalanceMinor / 100, 2, '.', ''),
+                    'item_status' => $itemStatus,
+                    'invoice_paid_minor' => $invPaidMinor,
+                    'invoice_paid_formatted' => number_format($invPaidMinor / 100, 2, '.', ''),
+                    'invoice_balance_minor' => $invBalanceMinor,
+                    'invoice_balance_formatted' => number_format($invBalanceMinor / 100, 2, '.', ''),
+                    'invoice_status' => $invStatus,
+                ],
+                'after' => [
+                    'receipt_status' => 'Fully Reversed',
+                    'allocation_effective_paid_minor' => 0,
+                    'allocation_effective_paid_formatted' => '0.00',
+                    'item_paid_minor' => $afterRevItemPaidMinor,
+                    'item_paid_formatted' => number_format($afterRevItemPaidMinor / 100, 2, '.', ''),
+                    'item_balance_minor' => $afterRevItemBalanceMinor,
+                    'item_balance_formatted' => number_format($afterRevItemBalanceMinor / 100, 2, '.', ''),
+                    'item_status' => $afterRevItemStatus,
+                    'invoice_paid_minor' => $afterRevInvPaidMinor,
+                    'invoice_paid_formatted' => number_format($afterRevInvPaidMinor / 100, 2, '.', ''),
+                    'invoice_balance_minor' => $afterRevInvBalanceMinor,
+                    'invoice_balance_formatted' => number_format($afterRevInvBalanceMinor / 100, 2, '.', ''),
+                    'invoice_status' => $afterRevInvStatus,
+                ],
+                'preserves_staged_collection' => true,
+                'preserves_sibling_allocations' => true,
+                'zero_cashier_impact' => true,
+            ],
+            self::ACTION_RECONCILE_LINEAGE => [
+                'action_label' => 'Reconcile Original Fee Obligation & Lineage (Zero Debt Impact)',
+                'is_permitted' => $canReconcileLineage,
+                'delta_minor' => 0,
+                'delta_formatted' => '0.00',
+                'before' => [
+                    'receipt_status' => $currentStatusLabel,
+                    'item_paid_minor' => $itemPaidMinor,
+                    'item_paid_formatted' => number_format($itemPaidMinor / 100, 2, '.', ''),
+                    'item_balance_minor' => $itemBalanceMinor,
+                    'item_balance_formatted' => number_format($itemBalanceMinor / 100, 2, '.', ''),
+                    'item_status' => $itemStatus,
+                    'invoice_paid_minor' => $invPaidMinor,
+                    'invoice_paid_formatted' => number_format($invPaidMinor / 100, 2, '.', ''),
+                    'invoice_balance_minor' => $invBalanceMinor,
+                    'invoice_balance_formatted' => number_format($invBalanceMinor / 100, 2, '.', ''),
+                    'invoice_status' => $invStatus,
+                ],
+                'after' => [
+                    'receipt_status' => 'Reconciled (Paid)',
+                    'item_paid_minor' => $colAmountMinor,
+                    'item_paid_formatted' => number_format($colAmountMinor / 100, 2, '.', ''),
+                    'item_balance_minor' => 0,
+                    'item_balance_formatted' => '0.00',
+                    'item_status' => 'paid',
+                    'invoice_paid_minor' => $invPaidMinor + $colAmountMinor,
+                    'invoice_paid_formatted' => number_format(($invPaidMinor + $colAmountMinor) / 100, 2, '.', ''),
+                    'invoice_balance_minor' => $invBalanceMinor,
+                    'invoice_balance_formatted' => number_format($invBalanceMinor / 100, 2, '.', ''),
+                    'invoice_status' => $invBalanceMinor > 0 ? 'partial' : 'paid',
                 ],
                 'preserves_staged_collection' => true,
                 'preserves_sibling_allocations' => true,
@@ -979,6 +1271,33 @@ class MySkoolPaymentCorrectionService
             ],
         ];
 
+        $alreadyUnpaidInvoiceExists = !$isCreditedInLedger
+            && $previouslyReversedMinor === 0
+            && $item !== null
+            && (int) $item->net_minor > 0
+            && (int) $item->paid_minor === 0;
+
+        $canAutoReconcileOnRestore = !$isCreditedInLedger
+            && $canReconcileLineage
+            && !$alreadyUnpaidInvoiceExists
+            && !$hasInterveningPortalPayments
+            && $previouslyReversedMinor === 0;
+
+        $restorableAmountMinor = $isCreditedInLedger
+            ? $remainingReversibleMinor
+            : ($canAutoReconcileOnRestore ? $colAmountMinor : 0);
+
+        $requiresFinanceReview = $hasCurrencyConflict
+            || ($isReconciled && $hasInterveningPortalPayments)
+            || (!$isCreditedInLedger && !$canAutoReconcileOnRestore && !$alreadyUnpaidInvoiceExists && $previouslyReversedMinor === 0);
+
+        $cleanFeeTypeLabel = str_ends_with(strtolower($feeTypeLabel), 'fee')
+            ? $feeTypeLabel
+            : ($feeTypeLabel . ' Fee');
+        $cleanBillingMonth = $periodStart
+            ? date('F Y', strtotime($periodStart))
+            : ($periodLabel ?: 'N/A');
+
         return [
             'exists' => true,
             // 1. Original MySkool slip number
@@ -997,8 +1316,10 @@ class MySkoolPaymentCorrectionService
             'guardian_name' => $guardianName,
             // 5. Fee type and billing period
             'fee_particular' => $feeParticular,
+            'fee_type' => $cleanFeeTypeLabel,
             'fee_type_code' => $feeTypeCode,
             'fee_type_label' => $feeTypeLabel,
+            'billing_month' => $cleanBillingMonth,
             'period_key' => $periodKey ?: 'N/A',
             'period_start' => $periodStart,
             'period_label' => $periodLabel,
@@ -1006,9 +1327,19 @@ class MySkoolPaymentCorrectionService
             'currency' => $colCurrency,
             'student_expected_currency' => $studentExpectedCurrency ?: $colCurrency,
             'has_currency_conflict' => $hasCurrencyConflict,
-            // 7. Original receipt amount
+            // 7. Original receipt amount & Phase 3 partial/full restoration breakdown
             'amount_minor' => $colAmountMinor,
             'amount_formatted' => number_format($colAmountMinor / 100, 2, '.', ''),
+            'original_paid_minor' => $colAmountMinor,
+            'original_paid_formatted' => number_format($colAmountMinor / 100, 2, '.', ''),
+            'previously_reversed_minor' => $previouslyReversedMinor,
+            'previously_reversed_formatted' => number_format($previouslyReversedMinor / 100, 2, '.', ''),
+            'remaining_reversible_minor' => $remainingReversibleMinor,
+            'remaining_reversible_formatted' => number_format($remainingReversibleMinor / 100, 2, '.', ''),
+            'restorable_amount_minor' => $restorableAmountMinor,
+            'restorable_amount_formatted' => number_format($restorableAmountMinor / 100, 2, '.', ''),
+            'effective_paid_minor' => $effectivePaidMinor,
+            'effective_paid_formatted' => number_format($effectivePaidMinor / 100, 2, '.', ''),
             // 8. Historical payment date
             'payment_date' => $paymentDate,
             'payment_date_formatted' => !empty($col->payment_date_parsed)
@@ -1016,8 +1347,17 @@ class MySkoolPaymentCorrectionService
                 : $paymentDate,
             'cutoff_date' => $cutoffDate,
             'is_pre_cutoff' => $isPreCutoff,
-            // 9. Whether the receipt is already reconciled to an invoice
+            // 9. Whether the receipt is already reconciled and actively credited in the ledger
             'is_reconciled' => $isReconciled,
+            'is_credited_in_ledger' => $isCreditedInLedger,
+            'requires_reconciliation' => $requiresReconciliation,
+            'can_reconcile_lineage' => $canReconcileLineage,
+            'can_auto_reconcile_on_restore' => $canAutoReconcileOnRestore,
+            'already_unpaid_invoice_exists' => $alreadyUnpaidInvoiceExists,
+            'requires_finance_review' => $requiresFinanceReview,
+            'finance_review_message' => 'Finance review required. This payment needs verification before restoration.',
+            'allocation_status' => $allocationStatus,
+            'allocation_status_label' => $allocationStatusLabel,
             'reconciliation_id' => $activeSettlement
                 ? (string) $activeSettlement->reconciliation_id
                 : ($reversedSettlement ? (string) $reversedSettlement->reconciliation_id : null),
@@ -1076,8 +1416,38 @@ class MySkoolPaymentCorrectionService
     }
 
     /**
+     * Phase 3: Restore full or partial paid amount of a single MySkool receipt allocation to outstanding dues.
+     */
+    public function restorePayment(
+        int $stagedCollectionId,
+        array $input,
+        ?int $userId = null,
+        ?string $conn = null
+    ): array {
+        $input['action_type'] = self::ACTION_RESTORE_PAYMENT;
+        return $this->executeCorrection($stagedCollectionId, $input, $userId, $conn);
+    }
+
+    /**
+     * Phase 3: Reconcile the original fee obligation and source lineage for an unreconciled historical collection
+     * without creating artificial debt (net_minor = paid_minor = verified historical payment amount).
+     */
+    public function reconcileHistoricalAllocation(
+        int $stagedCollectionId,
+        array $input,
+        ?int $userId = null,
+        ?string $conn = null
+    ): array {
+        $input['action_type'] = self::ACTION_RECONCILE_LINEAGE;
+        if (empty($input['reason'])) {
+            $input['reason'] = 'Reconciling original MySkool fee obligation and payment lineage from verified historical source.';
+        }
+        return $this->executeCorrection($stagedCollectionId, $input, $userId, $conn);
+    }
+
+    /**
      * Execute an authorized, audited correction or reversal on a MySkool staged collection row.
-     * Enforces all 15 financial safety rules from Task 4.
+     * Enforces all 15 financial safety rules from Task 4 + Phase 3 partial/full restoration rules.
      */
     public function executeCorrection(
         int $stagedCollectionId,
@@ -1109,6 +1479,8 @@ class MySkoolPaymentCorrectionService
         $actionType = trim((string) ($input['action_type'] ?? self::ACTION_REVERSE_SETTLEMENT));
         $validActions = [
             self::ACTION_REVERSE_SETTLEMENT,
+            self::ACTION_RESTORE_PAYMENT,
+            self::ACTION_RECONCILE_LINEAGE,
             self::ACTION_REAPPLY_SETTLEMENT,
             self::ACTION_MARK_UNDER_REVIEW,
             self::ACTION_MARK_DISPUTED,
@@ -1147,6 +1519,22 @@ class MySkoolPaymentCorrectionService
 
         try {
             return $db->transaction(function () use ($db, $schema, $conn, $stagedCollectionId, $actionType, $reason, $input, $actorId) {
+                // Idempotency protection check inside locked transaction
+                $idempotencyKey = isset($input['idempotency_key']) && trim((string) $input['idempotency_key']) !== ''
+                    ? trim((string) $input['idempotency_key'])
+                    : null;
+                if ($idempotencyKey !== null && $schema->hasColumn('qa_myskool_payment_corrections', 'idempotency_key')) {
+                    $existingIdem = $db->table('qa_myskool_payment_corrections')
+                        ->where('idempotency_key', $idempotencyKey)
+                        ->lockForUpdate()
+                        ->first();
+                    if ($existingIdem) {
+                        throw ValidationException::withMessages([
+                            'idempotency_key' => ['Duplicate restoration request blocked by idempotency protection.'],
+                        ]);
+                    }
+                }
+
                 // Re-inspect under row-level FOR UPDATE locks
                 $inspection = $this->inspect($stagedCollectionId, $conn, true);
                 if (empty($inspection['exists'])) {
@@ -1167,6 +1555,34 @@ class MySkoolPaymentCorrectionService
                 $prevCorrectionId = $lastCorr ? (string) $lastCorr->correction_id : null;
 
                 // Validate action-specific financial safety rules
+                if ($actionType === self::ACTION_RESTORE_PAYMENT) {
+                    return $this->performRestorePayment(
+                        $db,
+                        $schema,
+                        $conn,
+                        $inspection,
+                        $input,
+                        $nextSeq,
+                        $prevCorrectionId,
+                        $reason,
+                        $actorId,
+                        $idempotencyKey
+                    );
+                }
+
+                if ($actionType === self::ACTION_RECONCILE_LINEAGE) {
+                    return $this->performReconcileLineage(
+                        $db,
+                        $schema,
+                        $inspection,
+                        $nextSeq,
+                        $prevCorrectionId,
+                        $reason,
+                        $actorId,
+                        $idempotencyKey
+                    );
+                }
+
                 if ($actionType === self::ACTION_REVERSE_SETTLEMENT) {
                     if (!$inspection['is_safe_to_reverse']) {
                         $blockMsg = !empty($inspection['blocked_reasons'])
@@ -1184,7 +1600,8 @@ class MySkoolPaymentCorrectionService
                         $nextSeq,
                         $prevCorrectionId,
                         $reason,
-                        $actorId
+                        $actorId,
+                        $idempotencyKey
                     );
                 }
 
@@ -1244,6 +1661,771 @@ class MySkoolPaymentCorrectionService
     }
 
     /**
+     * Phase 3 (Tasks 2, 3, 4 & 5): Restore full or partial amount of a verified MySkool payment allocation
+     * back to the student's outstanding obligation in its original currency.
+     */
+    protected function performRestorePayment(
+        $db,
+        $schema,
+        string $conn,
+        array $inspection,
+        array $input,
+        int $nextSeq,
+        ?string $prevCorrectionId,
+        string $reason,
+        int $actorId,
+        ?string $idempotencyKey = null
+    ): array {
+        $stagedCollectionId = (int) $inspection['qa_staged_collection_id'];
+        $colCurrency = (string) $inspection['currency'];
+        $origPaidMinor = (int) $inspection['original_paid_minor'];
+        $prevReversedMinor = (int) $inspection['previously_reversed_minor'];
+        $remReversibleMinor = (int) $inspection['remaining_reversible_minor'];
+
+        // 1. Check currency conflict first
+        if (!empty($inspection['has_currency_conflict'])) {
+            throw ValidationException::withMessages([
+                'currency' => [
+                    "Finance review required. This payment needs verification before restoration. Cross-currency conflict detected between receipt currency ({$colCurrency}) and student obligation currency ({$inspection['student_expected_currency']}). Restoration is blocked to prevent cross-currency mixing."
+                ],
+            ]);
+        }
+
+        // 2. Check if already fully reversed
+        if ($prevReversedMinor >= $origPaidMinor && $origPaidMinor > 0) {
+            throw ValidationException::withMessages([
+                'restore_amount' => [
+                    "This allocation (Row #{$stagedCollectionId}) has already been fully reversed ({$colCurrency} {$inspection['original_paid_formatted']}). Double reversal is blocked."
+                ],
+            ]);
+        }
+
+        // 2b. For already unpaid fees, Restore must not create another outstanding charge
+        if (!empty($inspection['already_unpaid_invoice_exists'])) {
+            $invNum = $inspection['invoice_number'] ?: ('#' . $inspection['invoice_id']);
+            throw ValidationException::withMessages([
+                'restore_amount' => [
+                    "An outstanding invoice ({$invNum}) already exists for this fee ({$colCurrency} {$inspection['item_balance_formatted']} unpaid). Restore must not create another outstanding charge."
+                ],
+            ]);
+        }
+
+        // 3. Internally reconcile historical links when verifiably safe and requested by the Restore workflow
+        if (
+            empty($inspection['is_credited_in_ledger'])
+            && !empty($input['auto_reconcile'])
+            && !empty($inspection['can_reconcile_lineage'])
+            && empty($inspection['already_unpaid_invoice_exists'])
+        ) {
+            $reconRes = $this->performReconcileLineage(
+                $db,
+                $schema,
+                $inspection,
+                $nextSeq,
+                $prevCorrectionId,
+                'Internal safe lineage reconciliation prior to payment restoration: ' . $reason,
+                $actorId,
+                null
+            );
+            $nextSeq++;
+            $prevCorrectionId = (string) $reconRes['correction_id'];
+            $inspection = $this->inspect($stagedCollectionId, $conn, true);
+            $origPaidMinor = (int) $inspection['original_paid_minor'];
+            $prevReversedMinor = (int) $inspection['previously_reversed_minor'];
+            $remReversibleMinor = (int) $inspection['remaining_reversible_minor'];
+        }
+
+        // 3b. Check if still unreconciled / not safe to restore
+        if (empty($inspection['is_credited_in_ledger']) || empty($inspection['is_safe_to_reverse'])) {
+            $blockMsg = !empty($inspection['requires_reconciliation'])
+                ? "Requires Reconciliation: Historical payment row #{$stagedCollectionId} has not been credited in the authoritative ledger. Cannot execute a balance-changing restoration or create artificial debt before reconciling its original fee obligation."
+                : (!empty($inspection['blocked_reasons']) ? implode(' ', $inspection['blocked_reasons']) : 'Finance review required. This payment needs verification before restoration.');
+            throw ValidationException::withMessages([
+                'reconciliation' => [$blockMsg],
+            ]);
+        }
+
+        // 4. Parse and validate restoration mode and amount
+        $mode = strtolower(trim((string) ($input['restoration_mode'] ?? 'full')));
+        if (!in_array($mode, ['full', 'partial'], true)) {
+            throw ValidationException::withMessages([
+                'restoration_mode' => ["Invalid restoration mode '{$mode}'. Must be 'full' or 'partial'."],
+            ]);
+        }
+
+        $requestedMinor = null;
+        if (isset($input['restore_amount_minor']) && $input['restore_amount_minor'] !== '' && $input['restore_amount_minor'] !== null) {
+            if (!is_numeric($input['restore_amount_minor'])) {
+                throw ValidationException::withMessages([
+                    'restore_amount' => ['Restoration amount must be a valid positive number.'],
+                ]);
+            }
+            $requestedMinor = (int) round((float) $input['restore_amount_minor']);
+        } elseif (isset($input['restore_amount']) && $input['restore_amount'] !== '' && $input['restore_amount'] !== null) {
+            if (!is_numeric($input['restore_amount'])) {
+                throw ValidationException::withMessages([
+                    'restore_amount' => ['Restoration amount must be a valid positive number.'],
+                ]);
+            }
+            $requestedMinor = (int) round(((float) $input['restore_amount']) * 100);
+        }
+
+        if ($mode === 'full') {
+            if ($requestedMinor !== null && $requestedMinor !== $remReversibleMinor) {
+                throw ValidationException::withMessages([
+                    'restore_amount' => [
+                        "Full restoration amount must equal the remaining reversible amount ({$colCurrency} " . number_format($remReversibleMinor / 100, 2) . ")."
+                    ],
+                ]);
+            }
+            $restoreMinor = $remReversibleMinor;
+        } else {
+            if ($requestedMinor === null) {
+                throw ValidationException::withMessages([
+                    'restore_amount' => ['Please enter a valid partial restoration amount greater than zero.'],
+                ]);
+            }
+            $restoreMinor = $requestedMinor;
+        }
+
+        if ($restoreMinor <= 0) {
+            throw ValidationException::withMessages([
+                'restore_amount' => ['Restoration amount must be greater than zero.'],
+            ]);
+        }
+
+        if ($restoreMinor > $remReversibleMinor) {
+            throw ValidationException::withMessages([
+                'restore_amount' => [
+                    "Restoration amount ({$colCurrency} " . number_format($restoreMinor / 100, 2) . ") cannot exceed the remaining reversible allocation ({$colCurrency} " . number_format($remReversibleMinor / 100, 2) . ")."
+                ],
+            ]);
+        }
+
+        $reconId = (string) $inspection['reconciliation_id'];
+        $itemId = (int) $inspection['invoice_item_id'];
+        $invoiceId = (int) $inspection['invoice_id'];
+
+        $settlement = $db->table('qa_historical_settlements')
+            ->where('reconciliation_id', $reconId)
+            ->where('status', 'applied')
+            ->lockForUpdate()
+            ->first();
+
+        if (!$settlement) {
+            throw ValidationException::withMessages([
+                'reconciliation_id' => ["Active applied settlement '{$reconId}' not found or already reversed."],
+            ]);
+        }
+
+        $item = $db->table('invoice_items')->where('id', $itemId)->lockForUpdate()->first();
+        $invoice = $db->table('invoices')->where('id', $invoiceId)->lockForUpdate()->first();
+
+        if (!$item || !$invoice) {
+            throw ValidationException::withMessages([
+                'invoice_item_id' => ["Target invoice item #{$itemId} or invoice #{$invoiceId} not found."],
+            ]);
+        }
+
+        // Verify strict currency match on item and invoice
+        if (strtoupper(trim((string) $item->currency)) !== $colCurrency || strtoupper(trim((string) $invoice->currency)) !== $colCurrency) {
+            throw ValidationException::withMessages([
+                'currency' => ['Cross-currency mismatch between MySkool allocation and target invoice obligation.'],
+            ]);
+        }
+
+        $beforeState = [
+            'receipt_status' => $inspection['allocation_status_label'],
+            'allocation_effective_paid_minor' => (int) $inspection['effective_paid_minor'],
+            'allocation_effective_paid_formatted' => $inspection['effective_paid_formatted'],
+            'previously_reversed_minor' => $prevReversedMinor,
+            'previously_reversed_formatted' => $inspection['previously_reversed_formatted'],
+            'remaining_reversible_minor' => $remReversibleMinor,
+            'remaining_reversible_formatted' => $inspection['remaining_reversible_formatted'],
+            'item_paid_minor' => (int) $item->paid_minor,
+            'item_paid_formatted' => number_format(((int) $item->paid_minor) / 100, 2, '.', ''),
+            'item_balance_minor' => max(0, (int) $item->net_minor - (int) $item->paid_minor),
+            'item_balance_formatted' => number_format(max(0, (int) $item->net_minor - (int) $item->paid_minor) / 100, 2, '.', ''),
+            'item_status' => (string) $item->status,
+            'invoice_paid_minor' => (int) $invoice->paid_minor,
+            'invoice_paid_formatted' => number_format(((int) $invoice->paid_minor) / 100, 2, '.', ''),
+            'invoice_balance_minor' => max(0, (int) $invoice->total_minor - (int) $invoice->paid_minor),
+            'invoice_balance_formatted' => number_format(max(0, (int) $invoice->total_minor - (int) $invoice->paid_minor) / 100, 2, '.', ''),
+            'invoice_status' => (string) $invoice->status,
+        ];
+
+        $newCumulativeReversedMinor = $prevReversedMinor + $restoreMinor;
+        $newRemainingForCol = max(0, $origPaidMinor - $newCumulativeReversedMinor);
+        $isNowFullyReversedForCol = ($newRemainingForCol === 0);
+        $activeColCount = (int) ($inspection['active_settlement_col_count'] ?? 1);
+
+        if ($isNowFullyReversedForCol && $activeColCount <= 1 && $restoreMinor === (int) $settlement->settled_amount_minor) {
+            // Complete reversal of a single-collection settlement: delegate to HistoricalPaymentReconciliationService::reverse()
+            app(HistoricalPaymentReconciliationService::class)->reverse($reconId, $actorId, $conn);
+        } else {
+            // Partial restoration or multi-collection restoration
+            $newItemPaidMinor = max(0, (int) $item->paid_minor - $restoreMinor);
+            $newItemStatus = ($newItemPaidMinor >= (int) $item->net_minor && (int) $item->net_minor > 0)
+                ? 'paid'
+                : ($newItemPaidMinor > 0 ? 'partial' : (string) ($settlement->previous_item_status ?: 'active'));
+
+            $db->table('invoice_items')->where('id', $itemId)->update([
+                'paid_minor' => $newItemPaidMinor,
+                'status' => $newItemStatus,
+                'updated_at' => now(),
+            ]);
+
+            $itemTotals = $db->table('invoice_items')
+                ->where('invoice_id', $invoiceId)
+                ->selectRaw("COALESCE(SUM(paid_minor), 0) as total_paid, COALESCE(SUM(CASE WHEN status != 'voided' THEN net_minor ELSE 0 END), 0) as total_net")
+                ->first();
+
+            $newInvPaidMinor = (int) $itemTotals->total_paid;
+            $newInvNetMinor = (int) $itemTotals->total_net;
+            $newInvStatus = ($newInvNetMinor > 0 && $newInvPaidMinor >= $newInvNetMinor)
+                ? 'paid'
+                : ($newInvPaidMinor > 0 ? 'partial' : (string) ($settlement->previous_invoice_status ?: 'unpaid'));
+
+            $db->table('invoices')->where('id', $invoiceId)->update([
+                'total_minor' => $newInvNetMinor,
+                'paid_minor' => $newInvPaidMinor,
+                'status' => $newInvStatus,
+                'updated_at' => now(),
+            ]);
+
+            if ($isNowFullyReversedForCol && $schema->hasTable('qa_historical_settlement_collections')) {
+                $db->table('qa_historical_settlement_collections')
+                    ->where('settlement_id', $settlement->id)
+                    ->where('qa_staged_collection_id', $stagedCollectionId)
+                    ->update([
+                        'status' => 'reversed',
+                        'active_staged_collection_id' => null,
+                        'reversed_by' => $actorId,
+                        'reversed_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+            }
+
+            $newSettledMinor = max(0, (int) $settlement->settled_amount_minor - $restoreMinor);
+            $settlementNowFullyReversed = ($newSettledMinor === 0);
+
+            $remainingActiveColId = $settlement->active_primary_collection_id;
+            if ($settlementNowFullyReversed) {
+                $remainingActiveColId = null;
+            } elseif ($isNowFullyReversedForCol && $schema->hasTable('qa_historical_settlement_collections')) {
+                $remainingActiveColId = $db->table('qa_historical_settlement_collections')
+                    ->where('settlement_id', $settlement->id)
+                    ->where('status', 'applied')
+                    ->value('qa_staged_collection_id');
+            }
+
+            $db->table('qa_historical_settlements')
+                ->where('id', $settlement->id)
+                ->update([
+                    'status' => $settlementNowFullyReversed ? 'reversed' : 'applied',
+                    'active_invoice_item_id' => $settlementNowFullyReversed ? null : $itemId,
+                    'active_primary_collection_id' => $remainingActiveColId ? (int) $remainingActiveColId : null,
+                    'settled_amount_minor' => $newSettledMinor,
+                    'remaining_obligation_minor' => max(0, (int) $item->net_minor - $newItemPaidMinor),
+                    'new_item_paid_minor' => $newItemPaidMinor,
+                    'new_item_status' => $newItemStatus,
+                    'new_invoice_paid_minor' => $newInvPaidMinor,
+                    'new_invoice_status' => $newInvStatus,
+                    'reversed_by' => $settlementNowFullyReversed ? $actorId : $settlement->reversed_by,
+                    'reversed_at' => $settlementNowFullyReversed ? now() : $settlement->reversed_at,
+                    'updated_at' => now(),
+                ]);
+
+            if (!empty($settlement->affected_snapshots_json)) {
+                $snapshots = json_decode((string) $settlement->affected_snapshots_json, true) ?: [];
+                foreach ($snapshots as $snap) {
+                    if (!empty($snap['invoice_id'])) {
+                        $subInv = $db->table('invoices')->where('id', (int) $snap['invoice_id'])->lockForUpdate()->first();
+                        if ($subInv) {
+                            $db->table('invoices')
+                                ->where('id', (int) $snap['invoice_id'])
+                                ->update([
+                                    'previous_dues_snapshot_minor' => (int) $subInv->previous_dues_snapshot_minor + $restoreMinor,
+                                    'updated_at' => now(),
+                                ]);
+                        }
+                    }
+                }
+            }
+        }
+
+        $updatedItem = $db->table('invoice_items')->where('id', $itemId)->first();
+        $updatedInvoice = $db->table('invoices')->where('id', $invoiceId)->first();
+
+        $resultingStatus = $isNowFullyReversedForCol ? self::STATUS_REVERSED : self::STATUS_PARTIALLY_REVERSED;
+        $effectiveMode = $isNowFullyReversedForCol && $prevReversedMinor === 0 ? 'full' : $mode;
+
+        $afterState = [
+            'receipt_status' => $isNowFullyReversedForCol ? 'Fully Reversed' : 'Partially Reversed',
+            'restoration_mode' => $effectiveMode,
+            'restored_amount_minor' => $restoreMinor,
+            'restored_amount_formatted' => number_format($restoreMinor / 100, 2, '.', ''),
+            'reversed_amount_minor' => $restoreMinor,
+            'reversed_amount_formatted' => number_format($restoreMinor / 100, 2, '.', ''),
+            'cumulative_reversed_minor' => $newCumulativeReversedMinor,
+            'cumulative_reversed_formatted' => number_format($newCumulativeReversedMinor / 100, 2, '.', ''),
+            'allocation_effective_paid_minor' => $newRemainingForCol,
+            'allocation_effective_paid_formatted' => number_format($newRemainingForCol / 100, 2, '.', ''),
+            'item_paid_minor' => $updatedItem ? (int) $updatedItem->paid_minor : 0,
+            'item_paid_formatted' => number_format(($updatedItem ? (int) $updatedItem->paid_minor : 0) / 100, 2, '.', ''),
+            'item_balance_minor' => $updatedItem ? max(0, (int) $updatedItem->net_minor - (int) $updatedItem->paid_minor) : 0,
+            'item_balance_formatted' => number_format(($updatedItem ? max(0, (int) $updatedItem->net_minor - (int) $updatedItem->paid_minor) : 0) / 100, 2, '.', ''),
+            'item_status' => $updatedItem ? (string) $updatedItem->status : 'active',
+            'invoice_paid_minor' => $updatedInvoice ? (int) $updatedInvoice->paid_minor : 0,
+            'invoice_paid_formatted' => number_format(($updatedInvoice ? (int) $updatedInvoice->paid_minor : 0) / 100, 2, '.', ''),
+            'invoice_balance_minor' => $updatedInvoice ? max(0, (int) $updatedInvoice->total_minor - (int) $updatedInvoice->paid_minor) : 0,
+            'invoice_balance_formatted' => number_format(($updatedInvoice ? max(0, (int) $updatedInvoice->total_minor - (int) $updatedInvoice->paid_minor) : 0) / 100, 2, '.', ''),
+            'invoice_status' => $updatedInvoice ? (string) $updatedInvoice->status : 'unpaid',
+        ];
+
+        $correctionId = $this->insertImmutableCorrectionRecord(
+            $db,
+            $schema,
+            $inspection,
+            $nextSeq,
+            $prevCorrectionId,
+            self::ACTION_RESTORE_PAYMENT,
+            $resultingStatus,
+            (int) $settlement->id,
+            $beforeState,
+            $afterState,
+            $reason,
+            $actorId,
+            null,
+            null,
+            null,
+            null,
+            $effectiveMode,
+            $restoreMinor,
+            $newCumulativeReversedMinor,
+            $newRemainingForCol,
+            $idempotencyKey
+        );
+
+        return [
+            'status' => 'success',
+            'correction_id' => $correctionId,
+            'qa_staged_collection_id' => $stagedCollectionId,
+            'action_type' => self::ACTION_RESTORE_PAYMENT,
+            'restoration_mode' => $effectiveMode,
+            'resulting_status' => $resultingStatus,
+            'allocation_status' => $isNowFullyReversedForCol ? 'fully_reversed' : 'partially_reversed',
+            'allocation_status_label' => $isNowFullyReversedForCol ? 'Fully Reversed' : 'Partially Reversed',
+            'currency' => $colCurrency,
+            'original_paid_minor' => $origPaidMinor,
+            'original_paid_formatted' => number_format($origPaidMinor / 100, 2, '.', ''),
+            'restored_amount_minor' => $restoreMinor,
+            'restored_amount_formatted' => number_format($restoreMinor / 100, 2, '.', ''),
+            'reversed_amount_minor' => $restoreMinor,
+            'reversed_amount_formatted' => number_format($restoreMinor / 100, 2, '.', ''),
+            'cumulative_reversed_minor' => $newCumulativeReversedMinor,
+            'cumulative_reversed_formatted' => number_format($newCumulativeReversedMinor / 100, 2, '.', ''),
+            'remaining_paid_minor' => $newRemainingForCol,
+            'remaining_paid_formatted' => number_format($newRemainingForCol / 100, 2, '.', ''),
+            'remaining_reversible_minor' => $newRemainingForCol,
+            'remaining_reversible_formatted' => number_format($newRemainingForCol / 100, 2, '.', ''),
+            'reconciliation_id' => $reconId,
+            'invoice_item_id' => $itemId,
+            'invoice_id' => $invoiceId,
+            'before_state' => $beforeState,
+            'after_state' => $afterState,
+        ];
+    }
+
+    /**
+     * Phase 3 (Task 3): Reconcile the original fee obligation and source lineage for a verified MySkool collection
+     * whose obligation was missing (e.g. netted prior to export) or unreconciled, without posting duplicate credits
+     * or creating artificial unpaid debt.
+     */
+    protected function performReconcileLineage(
+        $db,
+        $schema,
+        array $inspection,
+        int $nextSeq,
+        ?string $prevCorrectionId,
+        string $reason,
+        int $actorId,
+        ?string $idempotencyKey = null
+    ): array {
+        $stagedCollectionId = (int) $inspection['qa_staged_collection_id'];
+        $colCurrency = (string) $inspection['currency'];
+        $colAmountMinor = (int) $inspection['amount_minor'];
+        $studentId = $inspection['student_id'] ? (int) $inspection['student_id'] : null;
+        $familyId = $inspection['family_id'] ? (int) $inspection['family_id'] : null;
+        $studentGr = (string) $inspection['student_gr'];
+        $periodKey = (string) $inspection['period_key'];
+        $periodStart = $inspection['period_start'] ? (string) $inspection['period_start'] : null;
+
+        if (!empty($inspection['has_currency_conflict'])) {
+            throw ValidationException::withMessages([
+                'currency' => ['Cannot reconcile lineage: cross-currency conflict detected on this allocation.'],
+            ]);
+        }
+
+        if (!empty($inspection['is_credited_in_ledger']) || empty($inspection['can_reconcile_lineage'])) {
+            throw ValidationException::withMessages([
+                'reconciliation' => ['This allocation is either already reconciled in the ledger or not eligible for lineage reconciliation.'],
+            ]);
+        }
+
+        if (!$studentId || !$familyId || !$periodStart || $periodKey === 'N/A') {
+            throw ValidationException::withMessages([
+                'reconciliation' => ['Cannot reconcile lineage: student, family, or billing period could not be resolved.'],
+            ]);
+        }
+
+        if ($schema->hasTable('qa_historical_settlement_collections')) {
+            $alreadyConsumed = $db->table('qa_historical_settlement_collections')
+                ->where('active_staged_collection_id', $stagedCollectionId)
+                ->exists();
+            if ($alreadyConsumed) {
+                throw ValidationException::withMessages([
+                    'reconciliation' => ["Collection row #{$stagedCollectionId} is already consumed by an active settlement."],
+                ]);
+            }
+        }
+
+        $enrollment = $db->table('enrollments')
+            ->where('student_id', $studentId)
+            ->orderByDesc('id')
+            ->first();
+        if (!$enrollment) {
+            throw ValidationException::withMessages([
+                'reconciliation' => ["No enrollment record found for student GR {$studentGr}."],
+            ]);
+        }
+
+        $enrollmentId = (int) $enrollment->id;
+        $campusId = (int) $enrollment->campus_id;
+        $deptId = (int) $enrollment->department_id;
+        $feeTypeId = (int) ($db->table('fee_types')->where('code', $inspection['fee_type_code'] ?: 'monthly')->value('id')
+            ?: $db->table('fee_types')->value('id'));
+        $periodEnd = date('Y-m-t', strtotime($periodStart));
+
+        // Check if an exact matching invoice_items row in $colCurrency already exists for this student, fee type & period
+        $existingItem = $db->table('invoice_items as ii')
+            ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+            ->where('ii.student_id', $studentId)
+            ->where('ii.fee_type_id', $feeTypeId)
+            ->where('ii.currency', $colCurrency)
+            ->where('ii.status', '!=', 'voided')
+            ->whereNotIn('inv.status', ['void', 'voided'])
+            ->where(function ($q) use ($periodKey, $periodStart) {
+                $q->where('ii.period_key', $periodKey)
+                    ->orWhere('ii.period_start', $periodStart);
+            })
+            ->select('ii.*')
+            ->lockForUpdate()
+            ->first();
+
+        $beforeState = [
+            'receipt_status' => $inspection['allocation_status_label'],
+            'item_paid_minor' => $existingItem ? (int) $existingItem->paid_minor : 0,
+            'item_balance_minor' => $existingItem ? max(0, (int) $existingItem->net_minor - (int) $existingItem->paid_minor) : 0,
+        ];
+
+        $now = now();
+        if ($existingItem) {
+            $itemId = (int) $existingItem->id;
+            $invoiceId = (int) $existingItem->invoice_id;
+            $invoice = $db->table('invoices')->where('id', $invoiceId)->lockForUpdate()->first();
+            $prevItemPaid = (int) $existingItem->paid_minor;
+            $prevItemStatus = (string) $existingItem->status;
+            $prevInvPaid = (int) $invoice->paid_minor;
+            $prevInvStatus = (string) $invoice->status;
+
+            $newItemNet = max((int) $existingItem->net_minor, $prevItemPaid + $colAmountMinor);
+            $newItemPaid = $prevItemPaid + $colAmountMinor;
+            $newItemStatus = ($newItemPaid >= $newItemNet && $newItemNet > 0) ? 'paid' : 'partial';
+
+            $db->table('invoice_items')->where('id', $itemId)->update([
+                'amount_minor' => max((int) $existingItem->amount_minor, $newItemNet),
+                'net_minor' => $newItemNet,
+                'paid_minor' => $newItemPaid,
+                'status' => $newItemStatus,
+                'updated_at' => $now,
+            ]);
+        } else {
+            // Reconcile missing historical obligation onto the family's Opening Balance invoice in $colCurrency
+            $obRun = $db->table('billing_runs')
+                ->where('frequency', 'opening_balance')
+                ->where(function ($q) use ($periodStart, $periodKey) {
+                    $q->where('period_start', $periodStart)
+                        ->orWhere('period_key', $periodKey);
+                })
+                ->orderBy('id')
+                ->first();
+
+            if (!$obRun) {
+                $existingFamObInv = $db->table('invoices as inv')
+                    ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
+                    ->where('inv.family_id', $familyId)
+                    ->where('inv.currency', $colCurrency)
+                    ->where('br.frequency', 'opening_balance')
+                    ->whereNotIn('inv.status', ['void', 'voided'])
+                    ->orderBy('inv.id')
+                    ->select('br.*')
+                    ->first();
+                $obRun = $existingFamObInv ?: $db->table('billing_runs')
+                    ->where('frequency', 'opening_balance')
+                    ->orderBy('id')
+                    ->first();
+            }
+
+            $obRunId = $obRun ? (int) $obRun->id : (int) $db->table('billing_runs')->insertGetId([
+                'campus_id' => $campusId,
+                'department_id' => $deptId,
+                'frequency' => 'opening_balance',
+                'period_key' => $periodKey ?: ('monthly:' . $periodStart . '..' . $periodEnd),
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
+                'due_date' => date('Y-m-25', strtotime($periodStart)),
+                'status' => 'generated',
+                'created_by' => $actorId,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            $invoice = $db->table('invoices')
+                ->where('family_id', $familyId)
+                ->where('currency', $colCurrency)
+                ->where('billing_run_id', $obRunId)
+                ->whereNotIn('status', ['void', 'voided'])
+                ->lockForUpdate()
+                ->first();
+
+            if (!$invoice) {
+                $invoice = $db->table('invoices as inv')
+                    ->join('billing_runs as br', 'br.id', '=', 'inv.billing_run_id')
+                    ->where('inv.family_id', $familyId)
+                    ->where('inv.currency', $colCurrency)
+                    ->where('br.frequency', 'opening_balance')
+                    ->whereNotIn('inv.status', ['void', 'voided'])
+                    ->select('inv.*')
+                    ->lockForUpdate()
+                    ->first();
+            }
+
+            if ($invoice) {
+                $invoiceId = (int) $invoice->id;
+                $prevInvPaid = (int) $invoice->paid_minor;
+                $prevInvStatus = (string) $invoice->status;
+            } else {
+                $prevInvPaid = 0;
+                $prevInvStatus = 'unpaid';
+                $invoiceId = (int) $db->table('invoices')->insertGetId([
+                    'billing_run_id' => $obRunId,
+                    'family_id' => $familyId,
+                    'campus_id' => $campusId,
+                    'department_id' => $deptId,
+                    'currency' => $colCurrency,
+                    'invoice_number' => 'SCH-OB-' . $colCurrency . '-' . $familyId . '-' . substr(md5((string) $stagedCollectionId), 0, 6),
+                    'issued_on' => $inspection['payment_date'] ?: '2026-10-01',
+                    'due_date' => '2026-10-25',
+                    'total_minor' => 0,
+                    'paid_minor' => 0,
+                    'previous_dues_snapshot_minor' => 0,
+                    'status' => 'paid',
+                    'approved_to_send' => 0,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+                $invoice = $db->table('invoices')->where('id', $invoiceId)->first();
+            }
+
+            $prevItemPaid = 0;
+            $prevItemStatus = 'active';
+
+            $resolvedAmountMinor = $colAmountMinor;
+            $resolvedDiscountMinor = 0;
+            if ($studentId && $enrollmentId && $feeTypeId && class_exists(\App\Services\InvoiceService::class)) {
+                $studentRec = $db->table('students as s')
+                    ->join('enrollments as e', 'e.student_id', '=', 's.id')
+                    ->where('s.id', $studentId)
+                    ->where('e.id', $enrollmentId)
+                    ->select('s.*', 'e.id as enrollment_id', 'e.campus_id', 'e.department_id', 'e.currency', 'e.grade_label', 'e.monthly_fee_minor')
+                    ->first();
+                if ($studentRec) {
+                    $resolved = \App\Services\InvoiceService::resolveFeeAndCurrency($studentRec, $feeTypeId);
+                    if (!empty($resolved['net_minor']) && (int) $resolved['net_minor'] > 0 && strtoupper(trim((string) $resolved['currency'])) === strtoupper(trim($colCurrency))) {
+                        $resolvedAmountMinor = (int) $resolved['amount_minor'];
+                        $resolvedDiscountMinor = (int) $resolved['discount_minor'];
+                    }
+                }
+            }
+
+            $newItemNet = max(0, $resolvedAmountMinor - $resolvedDiscountMinor);
+            if ($newItemNet <= 0) {
+                $newItemNet = $colAmountMinor;
+                $resolvedAmountMinor = $colAmountMinor;
+                $resolvedDiscountMinor = 0;
+            }
+            $newItemPaid = min($newItemNet, $colAmountMinor);
+            $newItemStatus = ($newItemPaid >= $newItemNet && $newItemNet > 0) ? 'paid' : 'partial';
+
+            $itemId = (int) $db->table('invoice_items')->insertGetId([
+                'invoice_id' => $invoiceId,
+                'student_id' => $studentId,
+                'enrollment_id' => $enrollmentId,
+                'fee_type_id' => $feeTypeId,
+                'description' => $inspection['fee_particular'] ?: ('Monthly Fee - ' . $inspection['period_label']),
+                'period_key' => $periodKey,
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
+                'currency' => $colCurrency,
+                'amount_minor' => $resolvedAmountMinor,
+                'discount_minor' => $resolvedDiscountMinor,
+                'exemption_minor' => 0,
+                'net_minor' => $newItemNet,
+                'paid_minor' => $newItemPaid,
+                'status' => $newItemStatus,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+        }
+
+        // Recalculate parent invoice totals (since both net_minor and paid_minor increased by $colAmountMinor, unpaid balance delta = 0!)
+        $itemTotals = $db->table('invoice_items')
+            ->where('invoice_id', $invoiceId)
+            ->selectRaw("COALESCE(SUM(paid_minor), 0) as total_paid, COALESCE(SUM(CASE WHEN status != 'voided' THEN net_minor ELSE 0 END), 0) as total_net")
+            ->first();
+
+        $newInvPaidMinor = (int) $itemTotals->total_paid;
+        $newInvNetMinor = (int) $itemTotals->total_net;
+        $newInvStatus = ($newInvNetMinor > 0 && $newInvPaidMinor >= $newInvNetMinor)
+            ? 'paid'
+            : ($newInvPaidMinor > 0 ? 'partial' : 'unpaid');
+
+        $db->table('invoices')->where('id', $invoiceId)->update([
+            'total_minor' => $newInvNetMinor,
+            'paid_minor' => $newInvPaidMinor,
+            'status' => $newInvStatus,
+            'updated_at' => $now,
+        ]);
+
+        $reconId = sprintf('HRECON-LIN-I%d-C%d', $itemId, $stagedCollectionId);
+        $batchId = (string) ($inspection['batch_id'] ?: config('imports.active_batch_id', 'BATCH-20261025-FINAL-MYSKOOL'));
+
+        $settlementId = (int) $db->table('qa_historical_settlements')->insertGetId([
+            'reconciliation_id' => $reconId,
+            'batch_id' => $batchId,
+            'cutoff_date' => $inspection['cutoff_date'],
+            'invoice_item_id' => $itemId,
+            'active_invoice_item_id' => $itemId,
+            'invoice_id' => $invoiceId,
+            'student_id' => $studentId,
+            'family_id' => $familyId,
+            'student_gr' => $studentGr,
+            'family_code' => (string) $inspection['family_code'],
+            'currency' => $colCurrency,
+            'fee_description' => (string) $inspection['fee_particular'],
+            'period_key' => $periodKey,
+            'original_obligation_minor' => $newItemNet,
+            'settled_amount_minor' => $colAmountMinor,
+            'remaining_obligation_minor' => max(0, $newItemNet - $newItemPaid),
+            'unmatched_overpayment_minor' => 0,
+            'previous_item_paid_minor' => $prevItemPaid,
+            'new_item_paid_minor' => $newItemPaid,
+            'previous_item_status' => $prevItemStatus,
+            'new_item_status' => $newItemStatus,
+            'previous_invoice_paid_minor' => $prevInvPaid,
+            'new_invoice_paid_minor' => $newInvPaidMinor,
+            'previous_invoice_status' => $prevInvStatus,
+            'new_invoice_status' => $newInvStatus,
+            'qa_staged_due_id' => null,
+            'active_primary_collection_id' => $stagedCollectionId,
+            'qa_staged_collection_ids' => json_encode([$stagedCollectionId]),
+            'myskool_slip_numbers' => (string) $inspection['slip_number'],
+            'reconciliation_classification' => ($newItemPaid >= $newItemNet ? 'A1_SAFE_EXACT' : 'PARTIAL_SETTLEMENT'),
+            'guard_class' => ($newItemPaid >= $newItemNet ? 'A1_SAFE_EXACT' : 'CANDIDATE_PARTIAL_SETTLEMENT'),
+            'status' => 'applied',
+            'applied_by' => $actorId,
+            'applied_at' => $now,
+            'affected_snapshots_json' => null,
+            'notes' => 'Reconciled historical obligation and settlement lineage via MySkoolPaymentCorrectionService.',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        if ($schema->hasTable('qa_historical_settlement_collections')) {
+            $db->table('qa_historical_settlement_collections')->insert([
+                'settlement_id' => $settlementId,
+                'reconciliation_id' => $reconId,
+                'invoice_item_id' => $itemId,
+                'qa_staged_collection_id' => $stagedCollectionId,
+                'active_staged_collection_id' => $stagedCollectionId,
+                'status' => 'applied',
+                'applied_by' => $actorId,
+                'applied_at' => $now,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+        }
+
+        $afterState = [
+            'receipt_status' => 'Paid',
+            'reconciliation_id' => $reconId,
+            'invoice_item_id' => $itemId,
+            'invoice_id' => $invoiceId,
+            'item_paid_minor' => $newItemPaid,
+            'item_paid_formatted' => number_format($newItemPaid / 100, 2, '.', ''),
+            'item_balance_minor' => max(0, $newItemNet - $newItemPaid),
+            'item_balance_formatted' => number_format(max(0, $newItemNet - $newItemPaid) / 100, 2, '.', ''),
+            'item_status' => $newItemStatus,
+        ];
+
+        $refreshedInspection = array_merge($inspection, [
+            'reconciliation_id' => $reconId,
+            'invoice_item_id' => $itemId,
+            'invoice_id' => $invoiceId,
+        ]);
+
+        $correctionId = $this->insertImmutableCorrectionRecord(
+            $db,
+            $schema,
+            $refreshedInspection,
+            $nextSeq,
+            $prevCorrectionId,
+            self::ACTION_RECONCILE_LINEAGE,
+            self::STATUS_RECONCILED,
+            $settlementId,
+            $beforeState,
+            $afterState,
+            $reason,
+            $actorId,
+            null,
+            null,
+            null,
+            null,
+            'reconcile',
+            0,
+            0,
+            $colAmountMinor,
+            $idempotencyKey
+        );
+
+        return [
+            'status' => 'success',
+            'correction_id' => $correctionId,
+            'qa_staged_collection_id' => $stagedCollectionId,
+            'action_type' => self::ACTION_RECONCILE_LINEAGE,
+            'resulting_status' => self::STATUS_RECONCILED,
+            'allocation_status' => 'paid',
+            'allocation_status_label' => 'Paid',
+            'reconciliation_id' => $reconId,
+            'invoice_item_id' => $itemId,
+            'invoice_id' => $invoiceId,
+            'before_state' => $beforeState,
+            'after_state' => $afterState,
+        ];
+    }
+
+    /**
      * Case A & Case C: Reverse a reconciled historical settlement (either full settlement or single row of a multi-row settlement).
      */
     protected function performReverseSettlement(
@@ -1254,13 +2436,16 @@ class MySkoolPaymentCorrectionService
         int $nextSeq,
         ?string $prevCorrectionId,
         string $reason,
-        int $actorId
+        int $actorId,
+        ?string $idempotencyKey = null
     ): array {
         $stagedCollectionId = (int) $inspection['qa_staged_collection_id'];
         $reconId = (string) $inspection['reconciliation_id'];
         $itemId = (int) $inspection['invoice_item_id'];
         $invoiceId = (int) $inspection['invoice_id'];
         $effect = $inspection['proposed_effects'][self::ACTION_REVERSE_SETTLEMENT];
+        $reversalDelta = (int) $effect['delta_minor'];
+        $origPaidMinor = (int) ($inspection['original_paid_minor'] ?? $inspection['amount_minor']);
 
         $settlement = $db->table('qa_historical_settlements')
             ->where('reconciliation_id', $reconId)
@@ -1276,13 +2461,12 @@ class MySkoolPaymentCorrectionService
 
         $activeColCount = (int) ($inspection['active_settlement_col_count'] ?? 1);
 
-        if ($activeColCount <= 1) {
+        if ($activeColCount <= 1 && $reversalDelta === (int) $settlement->settled_amount_minor) {
             // Standard Case A & Case C (where each student/item has its own settlement record):
             // Delegate directly to HistoricalPaymentReconciliationService::reverse()
             app(HistoricalPaymentReconciliationService::class)->reverse($reconId, $actorId, $conn);
         } else {
             // Partial multi-collection reversal on a single invoice item where multiple MySkool slips were combined
-            $reversalDelta = (int) $effect['delta_minor'];
             $item = $db->table('invoice_items')->where('id', $itemId)->lockForUpdate()->first();
             $invoice = $db->table('invoices')->where('id', $invoiceId)->lockForUpdate()->first();
 
@@ -1337,9 +2521,12 @@ class MySkoolPaymentCorrectionService
                 : null;
 
             $newSettledMinor = max(0, (int) $settlement->settled_amount_minor - $reversalDelta);
+            $settlementNowFullyReversed = ($newSettledMinor === 0);
             $db->table('qa_historical_settlements')
                 ->where('id', $settlement->id)
                 ->update([
+                    'status' => $settlementNowFullyReversed ? 'reversed' : 'applied',
+                    'active_invoice_item_id' => $settlementNowFullyReversed ? null : $itemId,
                     'settled_amount_minor' => $newSettledMinor,
                     'remaining_obligation_minor' => max(0, (int) $settlement->original_obligation_minor - $newItemPaidMinor),
                     'new_item_paid_minor' => $newItemPaidMinor,
@@ -1347,6 +2534,8 @@ class MySkoolPaymentCorrectionService
                     'new_invoice_paid_minor' => $newInvPaidMinor,
                     'new_invoice_status' => $newInvStatus,
                     'active_primary_collection_id' => $remainingActiveColId ? (int) $remainingActiveColId : null,
+                    'reversed_by' => $settlementNowFullyReversed ? $actorId : $settlement->reversed_by,
+                    'reversed_at' => $settlementNowFullyReversed ? now() : $settlement->reversed_at,
                     'updated_at' => now(),
                 ]);
 
@@ -1398,7 +2587,16 @@ class MySkoolPaymentCorrectionService
             $effect['before'],
             $afterState,
             $reason,
-            $actorId
+            $actorId,
+            null,
+            null,
+            null,
+            null,
+            'full',
+            $reversalDelta,
+            $origPaidMinor,
+            0,
+            $idempotencyKey
         );
 
         return [
@@ -1678,8 +2876,14 @@ class MySkoolPaymentCorrectionService
                         ->where('status', '!=', 'voided')
                         ->value('currency');
                 }
-                if (!$targetCurrency && $schema->hasTable('fee_plan_items')) {
-                    $targetCurrency = $db->table('fee_plan_items')
+                if (!$targetCurrency && $schema->hasTable('fee_plan_items') && $schema->hasTable('enrollments')) {
+                    $targetCurrency = $db->table('fee_plan_items as fpi')
+                        ->join('enrollments as e', 'e.id', '=', 'fpi.enrollment_id')
+                        ->where('e.student_id', $targetStudent->id)
+                        ->value('fpi.currency');
+                }
+                if (!$targetCurrency && $schema->hasTable('enrollments')) {
+                    $targetCurrency = $db->table('enrollments')
                         ->where('student_id', $targetStudent->id)
                         ->value('currency');
                 }
@@ -1773,7 +2977,12 @@ class MySkoolPaymentCorrectionService
         ?string $proposedStudentGr = null,
         ?string $proposedPeriodKey = null,
         ?string $proposedFeeType = null,
-        ?int $proposedCompensationMinor = null
+        ?int $proposedCompensationMinor = null,
+        ?string $restorationMode = null,
+        int $reversedAmountMinor = 0,
+        int $cumulativeReversedMinor = 0,
+        ?int $remainingPaidMinor = null,
+        ?string $idempotencyKey = null
     ): string {
         $stagedCollectionId = (int) $inspection['qa_staged_collection_id'];
         $correctionId = sprintf(
@@ -1784,7 +2993,7 @@ class MySkoolPaymentCorrectionService
         );
 
         $now = now();
-        $db->table('qa_myskool_payment_corrections')->insert([
+        $insertPayload = [
             'correction_id' => $correctionId,
             'batch_id' => (string) ($inspection['batch_id'] ?: config('imports.active_batch_id', 'BATCH-20261025-FINAL-MYSKOOL')),
             'qa_staged_collection_id' => $stagedCollectionId,
@@ -1818,7 +3027,17 @@ class MySkoolPaymentCorrectionService
             'acted_at' => $now,
             'created_at' => $now,
             'updated_at' => $now,
-        ]);
+        ];
+
+        if ($schema->hasColumn('qa_myskool_payment_corrections', 'restoration_mode')) {
+            $insertPayload['restoration_mode'] = $restorationMode;
+            $insertPayload['reversed_amount_minor'] = $reversedAmountMinor;
+            $insertPayload['cumulative_reversed_minor'] = $cumulativeReversedMinor;
+            $insertPayload['remaining_paid_minor'] = $remainingPaidMinor;
+            $insertPayload['idempotency_key'] = $idempotencyKey;
+        }
+
+        $db->table('qa_myskool_payment_corrections')->insert($insertPayload);
 
         if ($schema->hasTable('audit_logs')) {
             $db->table('audit_logs')->insert([
@@ -1836,6 +3055,10 @@ class MySkoolPaymentCorrectionService
                     'original_amount_minor' => $inspection['amount_minor'],
                     'action_type' => $actionType,
                     'resulting_status' => $resultingStatus,
+                    'restoration_mode' => $restorationMode,
+                    'reversed_amount_minor' => $reversedAmountMinor,
+                    'cumulative_reversed_minor' => $cumulativeReversedMinor,
+                    'remaining_paid_minor' => $remainingPaidMinor,
                     'reconciliation_id' => $inspection['reconciliation_id'],
                     'invoice_item_id' => $inspection['invoice_item_id'],
                     'invoice_id' => $inspection['invoice_id'],
@@ -1853,5 +3076,456 @@ class MySkoolPaymentCorrectionService
         }
 
         return $correctionId;
+    }
+
+    /**
+     * Phase 3E: Inspect an imported MySkool invoice_items entry for Dispute or Restore.
+     * For already unpaid fees, returns already_unpaid_invoice_exists = true with the existing
+     * outstanding invoice details rather than generating a duplicate charge.
+     */
+    public function inspectInvoiceItemForMySkool(int $invoiceItemId, ?string $conn = null): array
+    {
+        $conn = $conn ?: config('database.default', 'mysql');
+        $db = DB::connection($conn);
+        $schema = $db->getSchemaBuilder();
+
+        if (!$schema->hasTable('invoice_items') || !$schema->hasTable('invoices')) {
+            return ['exists' => false, 'error' => 'Billing ledger tables not found.'];
+        }
+
+        $item = $db->table('invoice_items as ii')
+            ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+            ->leftJoin('students as s', 's.id', '=', 'ii.student_id')
+            ->leftJoin('families as f', 'f.id', '=', 'inv.family_id')
+            ->leftJoin('fee_types as ft', 'ft.id', '=', 'ii.fee_type_id')
+            ->where('ii.id', $invoiceItemId)
+            ->select(
+                'ii.*',
+                'inv.invoice_number',
+                'inv.family_id',
+                'inv.total_minor as invoice_total_minor',
+                'inv.paid_minor as invoice_paid_minor',
+                'inv.status as invoice_status',
+                's.name as student_name',
+                's.gr_number as student_gr',
+                'f.family_code',
+                'f.guardian_name',
+                'ft.name as fee_type_name',
+                'ft.code as fee_type_code'
+            )
+            ->first();
+
+        if (!$item) {
+            return ['exists' => false, 'error' => "Invoice item #{$invoiceItemId} not found."];
+        }
+
+        // Check if this item is linked to a MySkool staged collection via qa_historical_settlements
+        if ($schema->hasTable('qa_historical_settlements')) {
+            $settlement = $db->table('qa_historical_settlements')
+                ->where('invoice_item_id', $invoiceItemId)
+                ->orderByDesc('id')
+                ->first();
+            if ($settlement && !empty($settlement->active_primary_collection_id)) {
+                return $this->inspect((int) $settlement->active_primary_collection_id, $conn);
+            }
+        }
+
+        $curr = strtoupper(trim((string) ($item->currency ?: 'SAR')));
+        $netMinor = (int) $item->net_minor;
+        $paidMinor = (int) $item->paid_minor;
+        $balMinor = max(0, $netMinor - $paidMinor);
+        $invTotalMinor = (int) $item->invoice_total_minor;
+        $invPaidMinor = (int) $item->invoice_paid_minor;
+        $invBalMinor = max(0, $invTotalMinor - $invPaidMinor);
+        $periodStart = !empty($item->period_start) ? (string) $item->period_start : null;
+        $billingMonth = $periodStart ? date('F Y', strtotime($periodStart)) : ((string) ($item->period_key ?: 'N/A'));
+        $feeType = (string) ($item->fee_type_name ?: ($item->description ?: 'Monthly Fee'));
+
+        $alreadyUnpaid = ($paidMinor === 0 && $netMinor > 0);
+
+        return [
+            'exists' => true,
+            'source_type' => 'myskool_invoice_item',
+            'qa_staged_collection_id' => null,
+            'invoice_item_id' => (int) $item->id,
+            'invoice_id' => (int) $item->invoice_id,
+            'invoice_number' => (string) $item->invoice_number,
+            'slip_number' => (string) $item->invoice_number,
+            'student_id' => (int) $item->student_id,
+            'student_name' => (string) ($item->student_name ?: 'Unknown Student'),
+            'student_gr' => (string) ($item->student_gr ?: ''),
+            'family_id' => (int) $item->family_id,
+            'family_code' => (string) ($item->family_code ?: ''),
+            'guardian_name' => (string) ($item->guardian_name ?: ''),
+            'fee_particular' => (string) ($item->description ?: $feeType),
+            'fee_type' => $feeType,
+            'fee_type_code' => (string) ($item->fee_type_code ?: 'monthly'),
+            'fee_type_label' => $feeType,
+            'billing_month' => $billingMonth,
+            'period_key' => (string) ($item->period_key ?: 'N/A'),
+            'period_start' => $periodStart,
+            'period_label' => $billingMonth,
+            'currency' => $curr,
+            'student_expected_currency' => $curr,
+            'has_currency_conflict' => false,
+            'amount_minor' => $netMinor,
+            'amount_formatted' => number_format($netMinor / 100, 2, '.', ''),
+            'original_paid_minor' => $paidMinor,
+            'original_paid_formatted' => number_format($paidMinor / 100, 2, '.', ''),
+            'previously_reversed_minor' => 0,
+            'previously_reversed_formatted' => '0.00',
+            'remaining_reversible_minor' => 0,
+            'remaining_reversible_formatted' => '0.00',
+            'restorable_amount_minor' => 0,
+            'restorable_amount_formatted' => '0.00',
+            'effective_paid_minor' => $paidMinor,
+            'effective_paid_formatted' => number_format($paidMinor / 100, 2, '.', ''),
+            'is_reconciled' => false,
+            'is_credited_in_ledger' => $paidMinor > 0,
+            'requires_reconciliation' => false,
+            'can_reconcile_lineage' => false,
+            'can_auto_reconcile_on_restore' => false,
+            'already_unpaid_invoice_exists' => $alreadyUnpaid,
+            'requires_finance_review' => !$alreadyUnpaid,
+            'finance_review_message' => 'Finance review required. This payment needs verification before restoration.',
+            'allocation_status' => $alreadyUnpaid ? 'unpaid' : 'requires_review',
+            'allocation_status_label' => $alreadyUnpaid ? 'Already Unpaid' : 'Requires Review',
+            'item_net_minor' => $netMinor,
+            'item_net_formatted' => number_format($netMinor / 100, 2, '.', ''),
+            'item_paid_minor' => $paidMinor,
+            'item_paid_formatted' => number_format($paidMinor / 100, 2, '.', ''),
+            'item_balance_minor' => $balMinor,
+            'item_balance_formatted' => number_format($balMinor / 100, 2, '.', ''),
+            'invoice_total_minor' => $invTotalMinor,
+            'invoice_total_formatted' => number_format($invTotalMinor / 100, 2, '.', ''),
+            'invoice_paid_minor' => $invPaidMinor,
+            'invoice_paid_formatted' => number_format($invPaidMinor / 100, 2, '.', ''),
+            'invoice_balance_minor' => $invBalMinor,
+            'invoice_balance_formatted' => number_format($invBalMinor / 100, 2, '.', ''),
+            'item_status' => (string) $item->status,
+            'invoice_status' => (string) $item->invoice_status,
+            'is_safe_to_reverse' => false,
+            'safety_status' => $alreadyUnpaid ? 'ALREADY_UNPAID_INVOICE_EXISTS' : self::SAFETY_SAFE_REVIEW_ONLY,
+            'safety_explanation' => $alreadyUnpaid
+                ? "An outstanding invoice ({$item->invoice_number}) already exists for this fee ({$curr} " . number_format($balMinor / 100, 2) . " unpaid). Restore will not generate a duplicate charge."
+                : 'Finance review required. This payment needs verification before restoration.',
+            'blocked_reasons' => [],
+        ];
+    }
+
+    /**
+     * Phase 3E (Task 3): Create a persistent MySkool dispute case for a historical payment allocation
+     * or imported MySkool invoice fee entry. Preserves original records and makes ZERO financial balance changes.
+     */
+    public function submitDispute(array $input, ?int $userId = null, ?string $conn = null): array
+    {
+        $conn = $conn ?: config('database.default', 'mysql');
+        $db = DB::connection($conn);
+        $schema = $db->getSchemaBuilder();
+
+        try {
+            $actorId = app(HistoricalPaymentReconciliationService::class)->resolveAuthorizedActor($db, $userId);
+        } catch (RuntimeException $e) {
+            throw ValidationException::withMessages([
+                'authorization' => [$e->getMessage()],
+            ]);
+        }
+
+        $reason = trim((string) ($input['reason'] ?? ''));
+        if (mb_strlen($reason) < 5) {
+            throw ValidationException::withMessages([
+                'reason' => ['A dispute reason (at least 5 characters) is required.'],
+            ]);
+        }
+
+        $stagedColId = !empty($input['qa_staged_collection_id']) ? (int) $input['qa_staged_collection_id'] : null;
+        $invoiceItemId = !empty($input['invoice_item_id']) ? (int) $input['invoice_item_id'] : null;
+
+        if (!$stagedColId && !$invoiceItemId) {
+            throw ValidationException::withMessages([
+                'record' => ['Either a MySkool payment allocation ID or invoice item ID is required to submit a dispute.'],
+            ]);
+        }
+
+        return $db->transaction(function () use ($db, $schema, $conn, $stagedColId, $invoiceItemId, $reason, $actorId) {
+            $correctionId = null;
+            if ($stagedColId) {
+                $inspection = $this->inspect($stagedColId, $conn, true);
+                if (empty($inspection['exists'])) {
+                    throw ValidationException::withMessages([
+                        'qa_staged_collection_id' => [$inspection['error'] ?? "MySkool collection row #{$stagedColId} not found."],
+                    ]);
+                }
+
+                // Also record immutable mark_disputed entry in qa_myskool_payment_corrections if table exists
+                if ($schema->hasTable('qa_myskool_payment_corrections')) {
+                    $lastCorr = $db->table('qa_myskool_payment_corrections')
+                        ->where('qa_staged_collection_id', $stagedColId)
+                        ->lockForUpdate()
+                        ->orderByDesc('sequence_no')
+                        ->orderByDesc('id')
+                        ->first();
+                    $nextSeq = $lastCorr ? ((int) $lastCorr->sequence_no + 1) : 1;
+                    $prevCorrId = $lastCorr ? (string) $lastCorr->correction_id : null;
+
+                    $stateSnapshot = [
+                        'receipt_status' => $inspection['current_status_label'] ?? 'Paid',
+                        'item_paid_minor' => (int) ($inspection['item_paid_minor'] ?? 0),
+                        'item_paid_formatted' => (string) ($inspection['item_paid_formatted'] ?? '0.00'),
+                        'item_balance_minor' => (int) ($inspection['item_balance_minor'] ?? 0),
+                        'item_balance_formatted' => (string) ($inspection['item_balance_formatted'] ?? '0.00'),
+                        'item_status' => (string) ($inspection['item_status'] ?? 'N/A'),
+                        'invoice_paid_minor' => (int) ($inspection['invoice_paid_minor'] ?? 0),
+                        'invoice_paid_formatted' => (string) ($inspection['invoice_paid_formatted'] ?? '0.00'),
+                        'invoice_balance_minor' => (int) ($inspection['invoice_balance_minor'] ?? 0),
+                        'invoice_balance_formatted' => (string) ($inspection['invoice_balance_formatted'] ?? '0.00'),
+                        'invoice_status' => (string) ($inspection['invoice_status'] ?? 'N/A'),
+                    ];
+                    $afterSnapshot = array_merge($stateSnapshot, ['receipt_status' => 'Disputed']);
+
+                    $correctionId = $this->insertImmutableCorrectionRecord(
+                        $db,
+                        $schema,
+                        $inspection,
+                        $nextSeq,
+                        $prevCorrId,
+                        self::ACTION_MARK_DISPUTED,
+                        self::STATUS_DISPUTED,
+                        null,
+                        $stateSnapshot,
+                        $afterSnapshot,
+                        $reason,
+                        $actorId,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        0,
+                        (int) ($inspection['previously_reversed_minor'] ?? 0),
+                        (int) ($inspection['effective_paid_minor'] ?? $inspection['amount_minor'])
+                    );
+                }
+
+                $sourceType = 'myskool_collection';
+                $slipNo = (string) ($inspection['slip_number'] ?? '');
+                $sourceRow = $inspection['source_row'] ?? null;
+                $studentId = $inspection['student_id'] ?? null;
+                $studentGr = (string) ($inspection['student_gr'] ?? '');
+                $studentName = (string) ($inspection['student_name'] ?? '');
+                $familyId = $inspection['family_id'] ?? null;
+                $familyCode = (string) ($inspection['family_code'] ?? '');
+                $feeType = (string) ($inspection['fee_type'] ?? ($inspection['fee_type_label'] ?? 'Monthly Fee'));
+                $feeParticular = (string) ($inspection['fee_particular'] ?? $feeType);
+                $billingMonth = (string) ($inspection['billing_month'] ?? ($inspection['period_label'] ?? 'N/A'));
+                $periodKey = (string) ($inspection['period_key'] ?? '');
+                $currency = (string) ($inspection['currency'] ?? 'SAR');
+                $amountMinor = (int) ($inspection['amount_minor'] ?? 0);
+                $linkedItemId = $inspection['invoice_item_id'] ?? $invoiceItemId;
+                $linkedInvId = $inspection['invoice_id'] ?? null;
+                $batchId = (string) ($inspection['batch_id'] ?: config('imports.active_batch_id', 'BATCH-20261025-FINAL-MYSKOOL'));
+                $origLabel = "MySkool Slip #{$slipNo} (Row #{$stagedColId})";
+            } else {
+                $itemInspect = $this->inspectInvoiceItemForMySkool((int) $invoiceItemId, $conn);
+                if (empty($itemInspect['exists'])) {
+                    throw ValidationException::withMessages([
+                        'invoice_item_id' => [$itemInspect['error'] ?? "Invoice item #{$invoiceItemId} not found."],
+                    ]);
+                }
+                $sourceType = 'myskool_invoice_item';
+                $slipNo = (string) ($itemInspect['invoice_number'] ?? '');
+                $sourceRow = null;
+                $studentId = $itemInspect['student_id'] ?? null;
+                $studentGr = (string) ($itemInspect['student_gr'] ?? '');
+                $studentName = (string) ($itemInspect['student_name'] ?? '');
+                $familyId = $itemInspect['family_id'] ?? null;
+                $familyCode = (string) ($itemInspect['family_code'] ?? '');
+                $feeType = (string) ($itemInspect['fee_type'] ?? 'Monthly Fee');
+                $feeParticular = (string) ($itemInspect['fee_particular'] ?? $feeType);
+                $billingMonth = (string) ($itemInspect['billing_month'] ?? 'N/A');
+                $periodKey = (string) ($itemInspect['period_key'] ?? '');
+                $currency = (string) ($itemInspect['currency'] ?? 'SAR');
+                $amountMinor = (int) ($itemInspect['amount_minor'] ?? 0);
+                $linkedItemId = (int) $invoiceItemId;
+                $linkedInvId = $itemInspect['invoice_id'] ?? null;
+                $batchId = (string) config('imports.active_batch_id', 'BATCH-20261025-FINAL-MYSKOOL');
+                $origLabel = "Invoice #{$slipNo} (Fee Item #{$invoiceItemId})";
+            }
+
+            $now = now();
+            $disputeCode = sprintf(
+                'MSDISP-%s-%s',
+                $stagedColId ? ('C' . $stagedColId) : ('I' . $invoiceItemId),
+                strtoupper(substr(md5(uniqid((string) mt_rand(), true)), 0, 6))
+            );
+
+            $disputeId = null;
+            if ($schema->hasTable('myskool_disputes')) {
+                $disputeId = (int) $db->table('myskool_disputes')->insertGetId([
+                    'dispute_code' => $disputeCode,
+                    'batch_id' => $batchId,
+                    'source_type' => $sourceType,
+                    'qa_staged_collection_id' => $stagedColId,
+                    'invoice_item_id' => $linkedItemId ? (int) $linkedItemId : null,
+                    'invoice_id' => $linkedInvId ? (int) $linkedInvId : null,
+                    'slip_number' => $slipNo,
+                    'source_row' => $sourceRow ? (int) $sourceRow : null,
+                    'student_id' => $studentId ? (int) $studentId : null,
+                    'student_gr' => $studentGr,
+                    'student_name' => $studentName,
+                    'family_id' => $familyId ? (int) $familyId : null,
+                    'family_code' => $familyCode,
+                    'fee_type' => $feeType,
+                    'fee_particular' => $feeParticular,
+                    'billing_month' => $billingMonth,
+                    'period_key' => $periodKey,
+                    'currency' => $currency,
+                    'amount_minor' => $amountMinor,
+                    'original_record_label' => $origLabel,
+                    'reason' => $reason,
+                    'status' => 'open',
+                    'correction_id' => $correctionId,
+                    'submitted_by' => $actorId,
+                    'submitted_at' => $now,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
+
+            if ($schema->hasTable('audit_logs')) {
+                $db->table('audit_logs')->insert([
+                    'actor_id' => $actorId,
+                    'action' => 'myskool_dispute_submitted',
+                    'subject_type' => $stagedColId ? 'qa_staged_collection' : 'invoice_item',
+                    'subject_id' => $stagedColId ?: $invoiceItemId,
+                    'metadata' => json_encode([
+                        'dispute_id' => $disputeId,
+                        'dispute_code' => $disputeCode,
+                        'student_gr' => $studentGr,
+                        'student_name' => $studentName,
+                        'fee_type' => $feeType,
+                        'billing_month' => $billingMonth,
+                        'currency' => $currency,
+                        'amount_minor' => $amountMinor,
+                        'original_record_label' => $origLabel,
+                        'reason' => $reason,
+                        'financial_balance_change' => 0,
+                    ]),
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
+
+            return [
+                'status' => 'success',
+                'message' => "Dispute case {$disputeCode} created for {$origLabel} (Records preserved, no balance change).",
+                'dispute_id' => $disputeId,
+                'dispute_code' => $disputeCode,
+                'correction_id' => $correctionId,
+                'source_type' => $sourceType,
+                'qa_staged_collection_id' => $stagedColId,
+                'invoice_item_id' => $linkedItemId,
+                'student_gr' => $studentGr,
+                'student_name' => $studentName,
+                'family_code' => $familyCode,
+                'fee_type' => $feeType,
+                'billing_month' => $billingMonth,
+                'currency' => $currency,
+                'amount_minor' => $amountMinor,
+                'amount_formatted' => number_format($amountMinor / 100, 2, '.', ''),
+                'original_record_label' => $origLabel,
+                'reason' => $reason,
+                'dispute_status' => 'open',
+            ];
+        });
+    }
+
+    /**
+     * Phase 3E (Task 3): Review, approve, reject, or resolve a MySkool dispute case.
+     * Makes ZERO automatic financial balance changes (any financial restoration following approval
+     * requires its own explicit authorized Restore action).
+     */
+    public function updateDisputeStatus(int $disputeId, array $input, ?int $userId = null, ?string $conn = null): array
+    {
+        $conn = $conn ?: config('database.default', 'mysql');
+        $db = DB::connection($conn);
+        $schema = $db->getSchemaBuilder();
+
+        try {
+            $actorId = app(HistoricalPaymentReconciliationService::class)->resolveAuthorizedActor($db, $userId);
+        } catch (RuntimeException $e) {
+            throw ValidationException::withMessages([
+                'authorization' => [$e->getMessage()],
+            ]);
+        }
+
+        $newStatus = strtolower(trim((string) ($input['status'] ?? '')));
+        $validStatuses = ['under_review', 'approved', 'rejected', 'resolved'];
+        if (!in_array($newStatus, $validStatuses, true)) {
+            throw ValidationException::withMessages([
+                'status' => ["Invalid dispute status '{$newStatus}'. Must be one of: " . implode(', ', $validStatuses)],
+            ]);
+        }
+
+        $notes = trim((string) ($input['review_notes'] ?? ($input['notes'] ?? '')));
+
+        if (!$schema->hasTable('myskool_disputes')) {
+            throw ValidationException::withMessages([
+                'dispute' => ['Disputes table does not exist.'],
+            ]);
+        }
+
+        return $db->transaction(function () use ($db, $schema, $disputeId, $newStatus, $notes, $actorId) {
+            $dispute = $db->table('myskool_disputes')->where('id', $disputeId)->lockForUpdate()->first();
+            if (!$dispute) {
+                throw ValidationException::withMessages([
+                    'dispute_id' => ["Dispute case #{$disputeId} not found."],
+                ]);
+            }
+
+            $now = now();
+            $updateData = [
+                'status' => $newStatus,
+                'reviewed_by' => $actorId,
+                'reviewed_at' => $now,
+                'updated_at' => $now,
+            ];
+            if ($notes !== '') {
+                $updateData['review_notes'] = $notes;
+            }
+            if ($newStatus === 'resolved') {
+                $updateData['resolved_by'] = $actorId;
+                $updateData['resolved_at'] = $now;
+            }
+
+            $db->table('myskool_disputes')->where('id', $disputeId)->update($updateData);
+
+            if ($schema->hasTable('audit_logs')) {
+                $db->table('audit_logs')->insert([
+                    'actor_id' => $actorId,
+                    'action' => 'myskool_dispute_' . $newStatus,
+                    'subject_type' => 'myskool_dispute',
+                    'subject_id' => $disputeId,
+                    'metadata' => json_encode([
+                        'dispute_code' => $dispute->dispute_code,
+                        'previous_status' => $dispute->status,
+                        'new_status' => $newStatus,
+                        'review_notes' => $notes,
+                        'financial_balance_change' => 0,
+                    ]),
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
+
+            return [
+                'status' => 'success',
+                'message' => "Dispute case {$dispute->dispute_code} updated to status '" . ucfirst(str_replace('_', ' ', $newStatus)) . "'. No automatic balance changes made.",
+                'dispute_id' => $disputeId,
+                'dispute_code' => (string) $dispute->dispute_code,
+                'new_status' => $newStatus,
+                'review_notes' => $notes,
+            ];
+        });
     }
 }

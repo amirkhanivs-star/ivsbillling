@@ -40,7 +40,11 @@ class FeeCatalogController
         $rates = $query->orderBy('c.class_label')->paginate(50)->withQueryString();
         $plans = DB::table('fee_plan_items as p')->join('enrollments as e', 'e.id', '=', 'p.enrollment_id')
             ->join('students as s', 's.id', '=', 'e.student_id')->select('p.id', 'p.fee_type_id', 'p.amount_minor', 'p.currency', 'e.grade_label', 'e.department_id', 'e.campus_id', 's.name', 's.gr_number')
-            ->where('p.is_active', true)->orderBy('s.name')->limit(300)->get();
+            ->where('p.is_active', true)
+            ->where(fn ($q) => $q->whereNull('p.status')->orWhere('p.status', 'active'))
+            ->whereNull('p.superseded_by_plan_id')
+            ->whereColumn('p.currency', 'e.currency')
+            ->orderBy('s.name')->limit(300)->get();
         return view('fee-structure', compact('types', 'classes', 'departments', 'rates', 'selectedType', 'currentType', 'plans'));
     }
 

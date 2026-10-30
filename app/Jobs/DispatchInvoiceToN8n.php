@@ -84,6 +84,40 @@ class DispatchInvoiceToN8n implements ShouldQueue
             return;
         }
 
+        // Revalidate full-family authorization and canonical financial integrity before dispatch
+        if ($webhookType === 'monthly') {
+            $approver = !empty($notification->approved_by)
+                ? DB::table('users')->where('id', $notification->approved_by)->first()
+                : null;
+            $consolidatedBuilder = app(\App\Services\ConsolidatedInvoiceBuilder::class);
+            $elig = $consolidatedBuilder->evaluateFamilyDispatchEligibility((int) $invoice->family_id, null, $approver);
+
+            if (!$elig['can_dispatch']) {
+                $blockReason = $elig['block_reason']
+                    ?? "Data Integrity Issue: Invoice {$invoice->invoice_number} has an unverified consolidated payable balance. Flagged for staff review.";
+                DB::table('notifications')->where('id', $notification->id)->update([
+                    'status' => 'blocked',
+                    'error' => $blockReason,
+                    'updated_at' => now(),
+                ]);
+                DB::table('audit_logs')->insert([
+                    'actor_id' => $notification->approved_by ?? null,
+                    'action' => 'notification.blocked_financial_integrity',
+                    'subject_type' => 'notification',
+                    'subject_id' => $notification->id,
+                    'metadata' => json_encode([
+                        'invoice_id' => $invoice->id,
+                        'invoice_number' => $invoice->invoice_number,
+                        'family_id' => $invoice->family_id,
+                        'reason' => $blockReason,
+                    ]),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                return;
+            }
+        }
+
         // Build structured JSON payload
         $payloadBuilder = app(InvoicePayloadBuilder::class);
         $payload = $payloadBuilder->build($notification, $invoice, $eventType);

@@ -1489,14 +1489,31 @@ class HistoricalOpeningBalanceService
         }
 
         // 3. Index historical paid collections (qa_staged_collections)
+        $restorationsByColId = [];
+        if ($schema->hasTable('qa_myskool_payment_corrections') && $collections->isNotEmpty()) {
+            $colIds = $collections->pluck('id')->filter()->values()->all();
+            if (!empty($colIds)) {
+                $restorationsByColId = $db->table('qa_myskool_payment_corrections')
+                    ->whereIn('qa_staged_collection_id', $colIds)
+                    ->where('action_type', 'restore_payment')
+                    ->select('qa_staged_collection_id', \Illuminate\Support\Facades\DB::raw('MAX(cumulative_reversed_minor) as reversed_minor'))
+                    ->groupBy('qa_staged_collection_id')
+                    ->pluck('reversed_minor', 'qa_staged_collection_id')
+                    ->all();
+            }
+        }
+
         foreach ($collections as $col) {
             $gr = trim((string) ($col->gr_number ?? ''));
             $particular = trim((string) ($col->fee_particular ?? ''));
             $amtMinor = (int) ($col->amount_minor ?? 0);
 
-            if ($gr === '' || $amtMinor <= 0) {
+            $reversedMinor = (int) ($restorationsByColId[$col->id] ?? 0);
+            $effectiveAmtMinor = max(0, $amtMinor - $reversedMinor);
+            if ($gr === '' || $effectiveAmtMinor <= 0) {
                 continue;
             }
+            $amtMinor = $effectiveAmtMinor;
 
             $feeTypeCode = self::resolveFeeTypeCode($particular);
             $subjectTag = self::extractSubjectTag($particular);
@@ -1697,7 +1714,8 @@ class HistoricalOpeningBalanceService
         string $feeTypeCode,
         string $periodStart,
         string $targetCurrency,
-        ?string $subjectTag = null
+        ?string $subjectTag = null,
+        ?int $expectedAmountMinor = null
     ): array {
         if (
             !array_key_exists('batch_id', $map)
@@ -1785,6 +1803,34 @@ class HistoricalOpeningBalanceService
             }
 
             if ($paidMinor > 0 && $outMinor === 0) {
+                // If an expected charge is known (e.g. from approved fee plan) and the payment is less than that charge,
+                // this is a partial advance/historical payment, NOT a fully settled obligation!
+                if ($expectedAmountMinor !== null && $expectedAmountMinor > 0 && $paidMinor < $expectedAmountMinor) {
+                    $remaining = max(0, $expectedAmountMinor - $paidMinor);
+                    return [
+                        'status' => 'partial_advance_payment',
+                        'primary_key' => $primaryKey,
+                        'period_scope_key' => $scopeKey,
+                        'currency' => $normCurrency,
+                        'paid_minor' => $paidMinor,
+                        'outstanding_minor' => $remaining,
+                        'expected_obligation_minor' => $expectedAmountMinor,
+                        'remaining_obligation_minor' => $remaining,
+                        'collection_rows_count' => (int) ($entry['collection_rows_count'] ?? 0),
+                        'due_rows_count' => 0,
+                        'collection_source_rows' => $entry['collection_source_rows'] ?? [],
+                        'due_source_rows' => [],
+                        'due_rows' => [],
+                        'staged_collection_ids' => $entry['staged_collection_ids'] ?? [],
+                        'staged_due_ids' => [],
+                        'slips' => $entry['slips'] ?? [],
+                        'blocks_billing' => false,
+                        'review_required' => false,
+                        'is_settled' => false,
+                        'is_partial' => true,
+                    ];
+                }
+
                 // A. Fully settled — same currency
                 return [
                     'status' => 'settled_same_currency',
@@ -1956,14 +2002,482 @@ class HistoricalOpeningBalanceService
         string $feeTypeCode,
         string $periodStart,
         string $targetCurrency,
-        ?string $subjectTag = null
+        ?string $subjectTag = null,
+        ?int $expectedAmountMinor = null
     ): ?array {
-        $result = self::classifyHistoricalObligation($map, $grNumber, $feeTypeCode, $periodStart, $targetCurrency, $subjectTag);
+        $result = self::classifyHistoricalObligation($map, $grNumber, $feeTypeCode, $periodStart, $targetCurrency, $subjectTag, $expectedAmountMinor);
         if (($result['status'] ?? 'new_obligation') === 'new_obligation') {
             return null;
         }
 
         return $result;
+    }
+
+
+    /**
+     * Evaluate whether a voided invoice item for a given student, fee type, and period
+     * is an eligible unpaid imported obligation (safe to regenerate with current settings)
+     * or must remain blocked due to historical payments, partial settlements, or genuine currency/data conflicts.
+     */
+    public static function evaluateVoidedImportedObligation(
+        $db,
+        array $historicalMap,
+        object $voidedItem,
+        string $grNumber,
+        string $feeTypeCode,
+        string $periodStart,
+        string $targetCurrency,
+        ?string $subjectTag = null
+    ): array {
+        $voidedItemId = (int) $voidedItem->id;
+        $origCurrency = strtoupper(trim((string) ($voidedItem->currency ?: $targetCurrency)));
+        $origAmountMinor = (int) ($voidedItem->amount_minor ?? 0);
+        $origDiscountMinor = (int) ($voidedItem->discount_minor ?? 0);
+        $origExemptionMinor = (int) ($voidedItem->exemption_minor ?? 0);
+        $origNetMinor = max(0, $origAmountMinor - $origDiscountMinor - $origExemptionMinor);
+
+        if ($origNetMinor <= 0) {
+            $voidAdjPrev = (int) ($db->table('fee_adjustments')
+                ->where('invoice_item_id', $voidedItemId)
+                ->where('kind', 'void')
+                ->orderByDesc('id')
+                ->value('previous_amount_minor') ?? 0);
+            if ($voidAdjPrev > 0) {
+                $origNetMinor = $voidAdjPrev;
+            }
+        }
+
+        // 1. Check active payment allocations or paid_minor on the voided item itself
+        $hasAllocations = (int) ($voidedItem->paid_minor ?? 0) > 0
+            || $db->table('payment_allocations')
+                ->where('invoice_item_id', $voidedItemId)
+                ->where('amount_minor', '>', 0)
+                ->exists();
+
+        if ($hasAllocations) {
+            $msg = "Blocked: Active payment allocations exist on voided item #{$voidedItemId}. Reverse receipts first.";
+            return [
+                'can_recreate' => false,
+                'block_category' => 'active_allocation',
+                'status_code' => 'financial_conflict',
+                'reason' => $msg,
+                'recreate_block_reason' => $msg,
+                'paid_minor' => (int) ($voidedItem->paid_minor ?? 0),
+                'outstanding_minor' => $origNetMinor,
+                'historical_currency' => $origCurrency,
+            ];
+        }
+
+        $schema = $db->getSchemaBuilder();
+
+        // 2. Check applied historical settlements in qa_historical_settlements
+        if ($schema->hasTable('qa_historical_settlements')) {
+            $periodKey = (string) ($voidedItem->period_key ?? '');
+            $settlement = $db->table('qa_historical_settlements')
+                ->where('status', 'applied')
+                ->where(function ($q) use ($voidedItemId, $grNumber, $periodStart, $periodKey) {
+                    $q->where('invoice_item_id', $voidedItemId);
+                    if ($grNumber !== '') {
+                        $q->orWhere(function ($sq) use ($grNumber, $periodStart, $periodKey) {
+                            $sq->where('student_gr', $grNumber)
+                               ->where(function ($pq) use ($periodStart, $periodKey) {
+                                   if ($periodKey !== '') {
+                                       $pq->where('period_key', $periodKey)
+                                          ->orWhere('period_key', 'LIKE', "%{$periodStart}%");
+                                   } else {
+                                       $pq->where('period_key', 'LIKE', "%{$periodStart}%");
+                                   }
+                               });
+                        });
+                    }
+                })
+                ->first();
+
+            if ($settlement) {
+                $settledMinor = (int) ($settlement->settled_amount_minor ?? 0);
+                $remMinor = (int) ($settlement->remaining_obligation_minor ?? 0);
+                $origObMinor = (int) ($settlement->original_obligation_minor ?? $origNetMinor);
+                $sCurr = strtoupper(trim((string) ($settlement->currency ?: $origCurrency)));
+                $paidFmt = number_format($settledMinor / 100, 2, '.', '');
+                $invLabel = !empty($voidedItem->invoice_number) ? " on {$voidedItem->invoice_number}" : '';
+
+                if ($remMinor > 0 || ($origObMinor > 0 && $settledMinor > 0 && $settledMinor < $origObMinor)) {
+                    $effectiveRem = $remMinor > 0 ? $remMinor : max(0, $origObMinor - $settledMinor);
+                    $remFmt = number_format($effectiveRem / 100, 2, '.', '');
+                    return [
+                        'can_recreate' => false,
+                        'block_category' => 'historical_payment_partial',
+                        'status_code' => 'restoration_review',
+                        'reason' => "This fee obligation was previously voided (Item #{$voidedItemId}{$invLabel}) but possesses partial historical MySkool payment evidence ({$sCurr} {$paidFmt} settled, {$sCurr} {$remFmt} remaining). Preserve the settled portion; requires administrative restoration review and safe reconciliation rather than recreation.",
+                        'recreate_block_reason' => "Recreation blocked: Partial historical MySkool payment exists ({$sCurr} {$paidFmt} settled, {$sCurr} {$remFmt} remaining). Preserve the settled portion and use safe reconciliation rather than recreating the full amount.",
+                        'paid_minor' => $settledMinor,
+                        'outstanding_minor' => $effectiveRem,
+                        'historical_currency' => $sCurr,
+                    ];
+                }
+
+                return [
+                    'can_recreate' => false,
+                    'block_category' => 'historical_payment_full',
+                    'status_code' => 'restoration_review',
+                    'reason' => "This fee obligation was previously voided (Item #{$voidedItemId}{$invLabel}) but possesses verified historical MySkool payment evidence ({$sCurr} {$paidFmt}). Requires administrative restoration review rather than recreation.",
+                    'recreate_block_reason' => "Recreation blocked: Obligation possesses verified historical MySkool payment evidence ({$sCurr} {$paidFmt}).",
+                    'paid_minor' => $settledMinor,
+                    'outstanding_minor' => 0,
+                    'historical_currency' => $sCurr,
+                ];
+            }
+        }
+
+        // 3. Verify lineage integrity if qa_opening_balance_lineage references this item
+        $hasLineageTable = $schema->hasTable('qa_opening_balance_lineage');
+        $hasDuesTable = $schema->hasTable('qa_staged_dues');
+        $itemLineage = $hasLineageTable
+            ? $db->table('qa_opening_balance_lineage')->where('invoice_item_id', $voidedItemId)->first()
+            : null;
+
+        if ($itemLineage) {
+            if (!$hasDuesTable) {
+                $msg = "Recreation blocked: Source MySkool staged dues table is unavailable to verify unpaid lineage for item #{$voidedItemId}.";
+                return [
+                    'can_recreate' => false,
+                    'block_category' => 'insufficient_evidence',
+                    'status_code' => 'financial_conflict',
+                    'reason' => $msg,
+                    'recreate_block_reason' => $msg,
+                    'paid_minor' => 0,
+                    'outstanding_minor' => $origNetMinor,
+                    'historical_currency' => $origCurrency,
+                ];
+            }
+            $linkedDue = $db->table('qa_staged_dues')->where('id', $itemLineage->qa_staged_due_id)->first();
+            if (!$linkedDue) {
+                $msg = "Recreation blocked: Source MySkool staged due record (#{$itemLineage->qa_staged_due_id}) is missing and cannot prove unpaid status.";
+                return [
+                    'can_recreate' => false,
+                    'block_category' => 'insufficient_evidence',
+                    'status_code' => 'financial_conflict',
+                    'reason' => $msg,
+                    'recreate_block_reason' => $msg,
+                    'paid_minor' => 0,
+                    'outstanding_minor' => $origNetMinor,
+                    'historical_currency' => $origCurrency,
+                ];
+            }
+            $linkedDueCurr = strtoupper(trim((string) ($linkedDue->currency ?? '')));
+            if (
+                !empty($linkedDue->is_currency_unresolved)
+                || !empty($linkedDue->has_currency_conflict)
+                || $linkedDueCurr === ''
+                || $linkedDueCurr === 'UNRESOLVED'
+                || ($origCurrency !== '' && $linkedDueCurr !== $origCurrency)
+            ) {
+                $msg = "Recreation blocked: Historical MySkool staged due record (#{$linkedDue->id}) has a currency conflict or unresolved currency ({$linkedDueCurr} vs {$origCurrency}).";
+                return [
+                    'can_recreate' => false,
+                    'block_category' => 'currency_conflict',
+                    'status_code' => 'financial_conflict',
+                    'reason' => $msg,
+                    'recreate_block_reason' => $msg,
+                    'paid_minor' => 0,
+                    'outstanding_minor' => (int) ($linkedDue->outstanding_amount_minor ?? $origNetMinor),
+                    'historical_currency' => $linkedDueCurr ?: $origCurrency,
+                ];
+            }
+        }
+
+        if (
+            empty($historicalMap)
+            || empty($historicalMap['batch_id'])
+            || trim($grNumber) === ''
+        ) {
+            return [
+                'can_recreate' => true,
+                'block_category' => null,
+                'status_code' => 'previously_voided',
+                'reason' => null,
+                'recreate_block_reason' => null,
+                'paid_minor' => 0,
+                'outstanding_minor' => 0,
+                'historical_currency' => $origCurrency,
+            ];
+        }
+
+        $batchId = trim((string) $historicalMap['batch_id']);
+        $normFeeType = self::normalizeFeeTypeCode($feeTypeCode);
+        $scopeKey = self::makePeriodScopeKey($batchId, $grNumber, $normFeeType, $periodStart, $subjectTag);
+        $scopeEntries = $historicalMap['by_period_scope'][$scopeKey] ?? [];
+
+        if (empty($scopeEntries) && !in_array($normFeeType, ['monthly', 'tuition'], true)) {
+            $oneTimeScopeKey = self::makePeriodScopeKey($batchId, $grNumber, $normFeeType, 'ONE_TIME', $subjectTag);
+            $scopeEntries = $historicalMap['by_period_scope'][$oneTimeScopeKey] ?? [];
+        }
+
+        if (empty($scopeEntries)) {
+            return [
+                'can_recreate' => true,
+                'block_category' => null,
+                'status_code' => 'previously_voided',
+                'reason' => null,
+                'recreate_block_reason' => null,
+                'paid_minor' => 0,
+                'outstanding_minor' => 0,
+                'historical_currency' => $origCurrency,
+            ];
+        }
+
+        // 4a. Check for unresolved currency in scopeEntries
+        if (isset($scopeEntries['UNRESOLVED'])) {
+            $msg = 'Recreation blocked: Historical MySkool obligation has an unresolved or missing currency for this period.';
+            return [
+                'can_recreate' => false,
+                'block_category' => 'currency_conflict',
+                'status_code' => 'financial_conflict',
+                'reason' => $msg,
+                'recreate_block_reason' => $msg,
+                'paid_minor' => 0,
+                'outstanding_minor' => 0,
+                'historical_currency' => 'UNRESOLVED',
+            ];
+        }
+
+        foreach ($scopeEntries as $entryCurr => $entry) {
+            if (!empty($entry['has_unresolved_currency'])) {
+                $msg = "Recreation blocked: Historical MySkool obligation in {$entryCurr} has an unresolved currency flag.";
+                return [
+                    'can_recreate' => false,
+                    'block_category' => 'currency_conflict',
+                    'status_code' => 'financial_conflict',
+                    'reason' => $msg,
+                    'recreate_block_reason' => $msg,
+                    'paid_minor' => (int) ($entry['paid_minor'] ?? 0),
+                    'outstanding_minor' => (int) ($entry['outstanding_minor'] ?? 0),
+                    'historical_currency' => (string) $entryCurr,
+                ];
+            }
+        }
+
+        // 4b. Check for ANY historical payments (qa_staged_collections) in ANY currency for this period
+        foreach ($scopeEntries as $entryCurr => $entry) {
+            $paidMinor = (int) ($entry['paid_minor'] ?? 0);
+            $outMinor = (int) ($entry['outstanding_minor'] ?? 0);
+            $colCount = (int) ($entry['collection_rows_count'] ?? 0);
+
+            if ($paidMinor > 0) {
+                $entryCurrStr = strtoupper(trim((string) $entryCurr));
+                $paidFmt = number_format($paidMinor / 100, 2, '.', '');
+                $invLabel = !empty($voidedItem->invoice_number) ? " on {$voidedItem->invoice_number}" : '';
+
+                if ($origCurrency !== '' && $entryCurrStr !== $origCurrency) {
+                    $msg = "Recreation blocked: Historical MySkool payment ({$entryCurrStr} {$paidFmt}) exists in a conflicting currency ({$entryCurrStr} vs {$origCurrency}) for this period.";
+                    return [
+                        'can_recreate' => false,
+                        'block_category' => 'currency_conflict',
+                        'status_code' => 'financial_conflict',
+                        'reason' => $msg,
+                        'recreate_block_reason' => $msg,
+                        'paid_minor' => $paidMinor,
+                        'outstanding_minor' => $outMinor,
+                        'historical_currency' => $entryCurrStr,
+                    ];
+                }
+
+                $isPartial = ($outMinor > 0) || ($origNetMinor > 0 && $paidMinor < $origNetMinor);
+                if ($isPartial) {
+                    $effectiveRem = $outMinor > 0 ? $outMinor : max(0, $origNetMinor - $paidMinor);
+                    $remFmt = number_format($effectiveRem / 100, 2, '.', '');
+                    return [
+                        'can_recreate' => false,
+                        'block_category' => 'historical_payment_partial',
+                        'status_code' => 'restoration_review',
+                        'reason' => "This fee obligation was previously voided (Item #{$voidedItemId}{$invLabel}) but possesses partial historical MySkool payment evidence ({$entryCurrStr} {$paidFmt} paid, {$entryCurrStr} {$remFmt} remaining). Preserve the settled portion; requires administrative restoration review and safe reconciliation rather than recreation.",
+                        'recreate_block_reason' => "Recreation blocked: Partial historical MySkool payment exists ({$entryCurrStr} {$paidFmt} paid, {$entryCurrStr} {$remFmt} remaining). Preserve the settled portion and use safe reconciliation rather than recreating the full amount.",
+                        'paid_minor' => $paidMinor,
+                        'outstanding_minor' => $effectiveRem,
+                        'historical_currency' => $entryCurrStr,
+                    ];
+                }
+
+                return [
+                    'can_recreate' => false,
+                    'block_category' => 'historical_payment_full',
+                    'status_code' => 'restoration_review',
+                    'reason' => "This fee obligation was previously voided (Item #{$voidedItemId}{$invLabel}) but possesses verified historical MySkool payment evidence ({$entryCurrStr} {$paidFmt}). Requires administrative restoration review rather than recreation.",
+                    'recreate_block_reason' => "Recreation blocked: Obligation possesses verified historical MySkool payment evidence ({$entryCurrStr} {$paidFmt}).",
+                    'paid_minor' => $paidMinor,
+                    'outstanding_minor' => 0,
+                    'historical_currency' => $entryCurrStr,
+                ];
+            }
+        }
+
+        // 4c. Multiple currencies in staged dues for the same period = genuine historical currency conflict
+        if (count($scopeEntries) > 1) {
+            $currs = implode(', ', array_keys($scopeEntries));
+            $msg = "Recreation blocked: Multiple historical MySkool currencies ({$currs}) exist in staged dues for this period.";
+            return [
+                'block_category' => 'currency_conflict',
+                'status_code' => 'financial_conflict',
+                'reason' => $msg,
+                'recreate_block_reason' => $msg,
+                'paid_minor' => 0,
+                'outstanding_minor' => 0,
+                'historical_currency' => $currs,
+            ];
+        }
+
+        $stagedCurr = (string) array_key_first($scopeEntries);
+        $stagedEntry = $scopeEntries[$stagedCurr];
+        $stagedDueIds = $stagedEntry['staged_due_ids'] ?? [];
+        $stagedOutMinor = (int) ($stagedEntry['outstanding_minor'] ?? 0);
+
+        if ($hasDuesTable && !empty($stagedDueIds)) {
+            $hasFlaggedDue = $db->table('qa_staged_dues')
+                ->whereIn('id', $stagedDueIds)
+                ->where(function ($q) {
+                    $q->where('is_currency_unresolved', true)
+                      ->orWhere('has_currency_conflict', true);
+                })
+                ->exists();
+            if ($hasFlaggedDue) {
+                $msg = "Recreation blocked: Historical MySkool staged due in {$stagedCurr} is flagged with a currency conflict or unresolved currency.";
+                return [
+                    'can_recreate' => false,
+                    'block_category' => 'currency_conflict',
+                    'status_code' => 'financial_conflict',
+                    'reason' => $msg,
+                    'recreate_block_reason' => $msg,
+                    'paid_minor' => 0,
+                    'outstanding_minor' => $stagedOutMinor,
+                    'historical_currency' => $stagedCurr,
+                ];
+            }
+        }
+
+        return [
+            'can_recreate' => true,
+            'block_category' => null,
+            'status_code' => 'previously_voided',
+            'reason' => null,
+            'recreate_block_reason' => null,
+            'paid_minor' => 0,
+            'outstanding_minor' => $stagedOutMinor,
+            'historical_currency' => $stagedCurr,
+        ];
+    }
+
+    /**
+     * Safely corrects an incomplete imported invoice item to the verified full approved fee obligation,
+     * preserving historical source data, existing payment allocations, and recording an audit trail.
+     */
+    public static function correctIncompleteObligation(
+        $db,
+        int $invoiceItemId,
+        int $actorId,
+        string $reason = 'Corrected incomplete historical obligation to approved fee plan'
+    ): array {
+        $item = $db->table('invoice_items')->where('id', $invoiceItemId)->first();
+        if (!$item) {
+            throw new \RuntimeException("Invoice item #{$invoiceItemId} not found.");
+        }
+
+        $student = $db->table('students')->where('id', $item->student_id)->first();
+        $feeType = $db->table('fee_types')->where('id', $item->fee_type_id)->first();
+        if (!$student || !$feeType) {
+            throw new \RuntimeException("Student or fee type not found for invoice item #{$invoiceItemId}.");
+        }
+
+        $enrollment = !empty($item->enrollment_id)
+            ? $db->table('enrollments')->where('id', $item->enrollment_id)->first()
+            : $db->table('enrollments')->where('student_id', $item->student_id)->where('status', 'active')->first();
+        $targetEntity = $enrollment ?: $student;
+
+        $connName = $db->getName();
+        $approvedFee = \App\Services\InvoiceService::resolveFeeAndCurrency($targetEntity, $feeType, $connName);
+        $appAmount = (int) $approvedFee['amount_minor'];
+        $appDiscount = (int) $approvedFee['discount_minor'];
+        $appNet = (int) $approvedFee['net_minor'];
+        $appCurrency = strtoupper(trim((string) $approvedFee['currency']));
+        $itemCurrency = strtoupper(trim((string) ($item->currency ?: $appCurrency)));
+
+        if ($appAmount <= 0) {
+            throw new \RuntimeException("No approved fee plan found to correct invoice item #{$invoiceItemId}.");
+        }
+
+        if ($appCurrency !== $itemCurrency) {
+            throw new \RuntimeException("Currency mismatch: cannot correct {$itemCurrency} item to {$appCurrency} without explicit currency migration.");
+        }
+
+        $currentNet = (int) $item->net_minor;
+        $currentPaid = (int) $item->paid_minor;
+
+        if ($currentNet >= $appNet) {
+            return [
+                'success' => false,
+                'message' => "Invoice item #{$invoiceItemId} already represents a full or higher obligation ({$itemCurrency} " . number_format($currentNet / 100, 2) . ").",
+                'item_id' => $invoiceItemId,
+            ];
+        }
+
+        $now = now();
+        $newStatus = ($currentPaid >= $appNet) ? 'paid' : ($currentPaid > 0 ? 'partial' : 'active');
+
+        $db->table('invoice_items')->where('id', $invoiceItemId)->update([
+            'amount_minor' => $appAmount,
+            'discount_minor' => $appDiscount,
+            'net_minor' => $appNet,
+            'status' => $newStatus,
+            'updated_at' => $now,
+        ]);
+
+        if ($db->getSchemaBuilder()->hasTable('fee_adjustments')) {
+            $db->table('fee_adjustments')->insert([
+                'invoice_item_id' => $invoiceItemId,
+                'user_id' => $actorId,
+                'kind' => 'adjustment',
+                'amount_minor' => $appNet,
+                'previous_amount_minor' => $currentNet,
+                'new_amount_minor' => $appNet,
+                'reason' => $reason,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+        }
+
+        if ($db->getSchemaBuilder()->hasTable('qa_historical_settlements')) {
+            $settlement = $db->table('qa_historical_settlements')
+                ->where('invoice_item_id', $invoiceItemId)
+                ->where('status', 'applied')
+                ->first();
+            if ($settlement) {
+                $db->table('qa_historical_settlements')->where('id', $settlement->id)->update([
+                    'original_obligation_minor' => $appNet,
+                    'remaining_obligation_minor' => max(0, $appNet - (int) $settlement->settled_amount_minor),
+                    'reconciliation_classification' => ((int) $settlement->settled_amount_minor >= $appNet)
+                        ? 'POST_CUTOFF_FULL_SETTLEMENT'
+                        : 'POST_CUTOFF_PARTIAL_PAYMENT',
+                    'guard_class' => ((int) $settlement->settled_amount_minor >= $appNet)
+                        ? 'CANDIDATE_FULL_SETTLEMENT'
+                        : 'CANDIDATE_PARTIAL_SETTLEMENT',
+                    'updated_at' => $now,
+                ]);
+            }
+        }
+
+        $invSvc = app(\App\Services\InvoiceService::class);
+        $invSvc->refreshInvoice((int) $item->invoice_id, $connName);
+
+        return [
+            'success' => true,
+            'item_id' => $invoiceItemId,
+            'invoice_id' => (int) $item->invoice_id,
+            'previous_net_minor' => $currentNet,
+            'new_net_minor' => $appNet,
+            'paid_minor' => $currentPaid,
+            'remaining_outstanding_minor' => max(0, $appNet - $currentPaid),
+            'currency' => $appCurrency,
+            'status' => $newStatus,
+        ];
     }
 
     private function validateQaConnection(string $conn): void

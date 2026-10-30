@@ -391,15 +391,20 @@ class FeeHistoryService
         // Batch-load settlement allocations and correction statuses without N+1 queries
         $settlementByColId = [];
         if (Schema::hasTable('qa_historical_settlement_collections')) {
-            $allocRows = DB::table('qa_historical_settlement_collections')
-                ->whereIn('qa_staged_collection_id', $rowIds)
-                ->orderBy('id')
-                ->get();
+            $allocQuery = DB::table('qa_historical_settlement_collections as sc')
+                ->whereIn('sc.qa_staged_collection_id', $rowIds)
+                ->orderBy('sc.id');
+            if (Schema::hasTable('qa_historical_settlements')) {
+                $allocQuery->leftJoin('qa_historical_settlements as hs', 'hs.id', '=', 'sc.settlement_id')
+                    ->select('sc.*', 'hs.settled_amount_minor as hs_settled_minor', 'hs.status as hs_status');
+            }
+            $allocRows = $allocQuery->get();
             foreach ($allocRows as $ar) {
                 $settlementByColId[(int) $ar->qa_staged_collection_id] = [
                     'status' => (string) $ar->status,
                     'reconciliation_id' => (string) $ar->reconciliation_id,
                     'invoice_item_id' => (int) $ar->invoice_item_id,
+                    'settled_amount_minor' => isset($ar->hs_settled_minor) ? (int) $ar->hs_settled_minor : null,
                 ];
             }
         } elseif (Schema::hasTable('qa_historical_settlements')) {
@@ -412,6 +417,7 @@ class FeeHistoryService
                     'status' => (string) $sr->status,
                     'reconciliation_id' => (string) $sr->reconciliation_id,
                     'invoice_item_id' => (int) $sr->invoice_item_id,
+                    'settled_amount_minor' => (int) $sr->settled_amount_minor,
                 ];
             }
         }
@@ -424,10 +430,27 @@ class FeeHistoryService
                 ->orderBy('id')
                 ->get();
             foreach ($corrRows as $cr) {
-                $correctionByColId[(int) $cr->qa_staged_collection_id] = [
+                $cId = (int) $cr->qa_staged_collection_id;
+                $prevRev = $correctionByColId[$cId]['reversed_amount_minor'] ?? 0;
+                $act = (string) $cr->action_type;
+                $origMinor = (int) ($cr->original_amount_minor ?? 0);
+                if (in_array($act, ['reverse_settlement', 'restore_payment'], true)) {
+                    $deltaRev = isset($cr->reversed_amount_minor) && (int) $cr->reversed_amount_minor > 0
+                        ? (int) $cr->reversed_amount_minor
+                        : $origMinor;
+                    $cumRev = isset($cr->cumulative_reversed_minor) && (int) $cr->cumulative_reversed_minor > 0
+                        ? (int) $cr->cumulative_reversed_minor
+                        : ($origMinor > 0 ? min($origMinor, $prevRev + $deltaRev) : ($prevRev + $deltaRev));
+                } elseif (in_array($act, ['reapply_settlement', 'reconcile_lineage'], true)) {
+                    $cumRev = 0;
+                } else {
+                    $cumRev = $prevRev;
+                }
+                $correctionByColId[$cId] = [
                     'correction_id' => (string) $cr->correction_id,
-                    'action_type' => (string) $cr->action_type,
+                    'action_type' => $act,
                     'resulting_status' => (string) $cr->resulting_status,
+                    'reversed_amount_minor' => $cumRev,
                 ];
             }
         }
@@ -467,6 +490,7 @@ class FeeHistoryService
                     'currency' => $curr,
                     'payment_method' => $r->payment_method ?: 'Cash',
                     'total_amount' => 0.0,
+                    'reversed_amount_minor' => 0,
                     'students' => [],
                     'fee_types' => [],
                     'months' => [],
@@ -476,6 +500,9 @@ class FeeHistoryService
 
             // Sum amount strictly without double counting
             $amt = (float) $r->amount;
+            $origRowMinor = isset($r->amount_minor) && (int) $r->amount_minor > 0
+                ? (int) $r->amount_minor
+                : (int) round($amt * 100);
             $grouped[$key]['total_amount'] += $amt;
 
             // Student details
@@ -511,18 +538,57 @@ class FeeHistoryService
             $setInfo = $settlementByColId[$colId] ?? null;
             $corrInfo = $correctionByColId[$colId] ?? null;
 
+            $rowReversedMinor = $corrInfo ? (int) ($corrInfo['reversed_amount_minor'] ?? 0) : 0;
+            if ($setInfo && $setInfo['status'] === 'reversed' && $rowReversedMinor === 0) {
+                $rowReversedMinor = $origRowMinor;
+            } elseif ($setInfo && $setInfo['status'] === 'applied' && isset($setInfo['settled_amount_minor']) && $setInfo['settled_amount_minor'] !== null) {
+                $settledMinor = (int) $setInfo['settled_amount_minor'];
+                if ($settledMinor < $origRowMinor && $rowReversedMinor > 0) {
+                    $rowReversedMinor = max($rowReversedMinor, $origRowMinor - $settledMinor);
+                }
+            }
+            $rowReversedMinor = min($origRowMinor, max(0, $rowReversedMinor));
+            $rowEffectivePaidMinor = max(0, $origRowMinor - $rowReversedMinor);
+            $grouped[$key]['reversed_amount_minor'] += $rowReversedMinor;
+
+            $isCreditedInLedger = ($setInfo && $setInfo['status'] === 'applied' && $rowEffectivePaidMinor > 0);
+            $hasRowConflict = !empty($r->has_currency_conflict) || !empty($r->is_currency_unresolved);
+
             $itemStatus = 'historical';
             if ($corrInfo) {
                 $resStatus = $corrInfo['resulting_status'];
-                if ($resStatus === 'reapplied' || ($setInfo && $setInfo['status'] === 'applied')) {
+                if ($rowReversedMinor >= $origRowMinor && $origRowMinor > 0) {
+                    $itemStatus = 'reversed';
+                } elseif ($rowReversedMinor > 0 && $rowReversedMinor < $origRowMinor) {
+                    $itemStatus = 'partially_reversed';
+                } elseif ($resStatus === 'reapplied' || ($setInfo && $setInfo['status'] === 'applied')) {
                     $itemStatus = 'reconciled';
-                } elseif (in_array($resStatus, ['reversed', 'disputed', 'under_review', 'corrected'], true)) {
+                } elseif (in_array($resStatus, ['reversed', 'partially_reversed', 'disputed', 'under_review', 'corrected'], true)) {
                     $itemStatus = $resStatus;
                 }
             } elseif ($setInfo) {
-                $itemStatus = ($setInfo['status'] === 'applied') ? 'reconciled' : 'reversed';
-            } elseif (!empty($r->has_currency_conflict) || !empty($r->is_currency_unresolved)) {
+                $itemStatus = ($setInfo['status'] === 'applied')
+                    ? ($rowReversedMinor > 0 ? 'partially_reversed' : 'reconciled')
+                    : 'reversed';
+            } elseif ($hasRowConflict) {
                 $itemStatus = 'under_review';
+            }
+
+            if ($rowReversedMinor >= $origRowMinor && $origRowMinor > 0) {
+                $allocStatus = 'fully_reversed';
+                $allocLabel = 'Fully Reversed';
+            } elseif ($rowReversedMinor > 0) {
+                $allocStatus = 'partially_reversed';
+                $allocLabel = 'Partially Reversed';
+            } elseif ($hasRowConflict || $itemStatus === 'disputed') {
+                $allocStatus = 'requires_review';
+                $allocLabel = 'Requires Review';
+            } elseif ($isCreditedInLedger) {
+                $allocStatus = 'paid';
+                $allocLabel = 'Paid';
+            } else {
+                $allocStatus = 'requires_reconciliation';
+                $allocLabel = 'Requires Reconciliation';
             }
 
             $grouped[$key]['items'][] = [
@@ -531,12 +597,23 @@ class FeeHistoryService
                 'source_row' => $r->source_row,
                 'student_name' => $r->student_name ?: ('GR ' . $r->gr_number),
                 'gr_number' => (string) $r->gr_number,
+                'fee_type' => $feeType,
                 'fee_particular' => $part ?: 'Monthly Fee',
                 'period' => $month ?: 'Historical',
-                'original_amount' => number_format($amt, 2),
+                'original_amount_minor' => $origRowMinor,
+                'original_amount' => number_format($origRowMinor / 100, 2),
+                'reversed_amount_minor' => $rowReversedMinor,
+                'reversed_amount' => number_format($rowReversedMinor / 100, 2),
+                'effective_paid_minor' => $rowEffectivePaidMinor,
+                'effective_paid_amount' => number_format($rowEffectivePaidMinor / 100, 2),
+                'remaining_reversible_minor' => $isCreditedInLedger ? $rowEffectivePaidMinor : 0,
+                'remaining_reversible' => number_format(($isCreditedInLedger ? $rowEffectivePaidMinor : 0) / 100, 2),
                 'discount' => '0',
-                'amount' => number_format($amt, 2),
+                'amount' => number_format($rowEffectivePaidMinor / 100, 2),
                 'currency' => $curr,
+                'is_credited_in_ledger' => $isCreditedInLedger,
+                'allocation_status' => $allocStatus,
+                'allocation_status_label' => $allocLabel,
                 'correction_status' => $itemStatus,
                 'reconciliation_id' => $setInfo['reconciliation_id'] ?? null,
             ];
@@ -552,8 +629,12 @@ class FeeHistoryService
             $feeTypes = !empty($grp['fee_types']) ? array_values($grp['fee_types']) : ['Monthly Fee'];
             $months = !empty($grp['months']) ? array_values($grp['months']) : [];
 
-            $totalAmount = (float) $grp['total_amount'];
-            $amountMinor = (int) round($totalAmount * 100);
+            $originalTotalAmount = (float) $grp['total_amount'];
+            $originalAmountMinor = (int) round($originalTotalAmount * 100);
+            $reversedAmountMinor = min($originalAmountMinor, max(0, (int) ($grp['reversed_amount_minor'] ?? 0)));
+            $effectiveAmountMinor = max(0, $originalAmountMinor - $reversedAmountMinor);
+            $reversedTotalAmount = $reversedAmountMinor / 100;
+            $effectiveTotalAmount = $effectiveAmountMinor / 100;
 
             $dateFormatted = '—';
             $dateStandard = '1970-01-01';
@@ -572,6 +653,7 @@ class FeeHistoryService
             $itemStatuses = array_column($grp['items'], 'correction_status');
             $totalItemsCount = count($itemStatuses);
             $reversedItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'reversed'));
+            $partialRevItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'partially_reversed'));
             $reconciledItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'reconciled'));
             $disputedItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'disputed'));
             $correctedItemsCount = count(array_filter($itemStatuses, fn($s) => $s === 'corrected'));
@@ -585,7 +667,7 @@ class FeeHistoryService
                 $correctionStatus = 'reversed';
                 $correctionBadge = 'Reversed';
                 $isReversed = true;
-            } elseif ($reversedItemsCount > 0 && $reversedItemsCount < $totalItemsCount) {
+            } elseif (($reversedItemsCount > 0 && $reversedItemsCount < $totalItemsCount) || $partialRevItemsCount > 0 || ($reversedAmountMinor > 0 && $reversedAmountMinor < $originalAmountMinor)) {
                 $correctionStatus = 'partially_reversed';
                 $correctionBadge = 'Partially Reversed';
             } elseif ($disputedItemsCount > 0) {
@@ -610,12 +692,19 @@ class FeeHistoryService
             $receipt->source_label = 'MySkool';
             $receipt->is_historical = true;
             $receipt->is_reversed = $isReversed;
+            $receipt->is_partially_reversed = ($correctionStatus === 'partially_reversed');
             $receipt->status = $isReversed ? 'reversed' : 'received';
             $receipt->received_on = $dateStandard;
             $receipt->received_on_formatted = $dateFormatted;
             $receipt->currency = $grp['currency'];
-            $receipt->amount_minor = $amountMinor;
-            $receipt->amount = $totalAmount;
+            $receipt->original_amount_minor = $originalAmountMinor;
+            $receipt->original_amount = $originalTotalAmount;
+            $receipt->reversed_amount_minor = $reversedAmountMinor;
+            $receipt->reversed_amount = $reversedTotalAmount;
+            $receipt->effective_amount_minor = $effectiveAmountMinor;
+            $receipt->effective_amount = $effectiveTotalAmount;
+            $receipt->amount_minor = $effectiveAmountMinor;
+            $receipt->amount = $effectiveTotalAmount;
             $receipt->discount_minor = 0;
             $receipt->discount = 0.0;
             $receipt->fee_types = $feeTypes;
@@ -642,17 +731,24 @@ class FeeHistoryService
                 'source_label' => 'Historical MySkool Payment Record',
                 'received_on' => $receipt->received_on_formatted,
                 'currency' => $receipt->currency,
-                'total_amount' => $receipt->currency . ' ' . number_format($receipt->amount, 2),
+                'total_amount' => $receipt->currency . ' ' . number_format($originalTotalAmount, 2),
+                'original_total_amount' => $receipt->currency . ' ' . number_format($originalTotalAmount, 2),
+                'total_reversed_amount' => $receipt->currency . ' ' . number_format($reversedTotalAmount, 2),
+                'remaining_effective_amount' => $receipt->currency . ' ' . number_format($effectiveTotalAmount, 2),
+                'original_amount_minor' => $originalAmountMinor,
+                'reversed_amount_minor' => $reversedAmountMinor,
+                'effective_amount_minor' => $effectiveAmountMinor,
                 'discount' => '0',
                 'received_by' => '— (Historical Legacy Record)',
                 'payment_method' => $receipt->payment_method,
-                'status' => $correctionBadge ? "Historical Record ({$correctionBadge})" : 'Historical Staged Collection (Read-Only)',
+                'status' => $correctionBadge ? "Historical Record ({$correctionBadge})" : 'Historical Staged Collection',
                 'is_reversed' => $isReversed,
                 'correction_status' => $correctionStatus,
                 'correction_badge' => $correctionBadge,
+                'can_correct_myskool' => $canCorrectMySkool,
                 'print_url' => $receipt->print_url,
                 'is_historical' => true,
-                'notice' => 'Historical MySkool Payment Record — Reconstructed from Imported Data',
+                'notice' => 'Historical MySkool Payment Record — Reconciled allocations can be restored in full or in part to outstanding dues.',
                 'items' => $grp['items'],
             ];
 

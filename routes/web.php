@@ -54,6 +54,7 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/challan/create-fee',[B::class,'createChallanFee'])->name('challan.create_fee');
  Route::get('/challan/inspect-voided-fee/{id}',[B::class,'inspectVoidedFee'])->name('challan.inspect_voided_fee');
  Route::post('/challan/restore-voided-fee',[B::class,'restoreVoidedFee'])->name('challan.restore_voided_fee');
+ Route::post('/challan/recreate-voided-fee',[B::class,'recreateVoidedFee'])->name('challan.recreate_voided_fee');
  Route::post('/challan/receive',[B::class,'receive'])->name('challan.receive');
  Route::post('/challan/discount',[B::class,'discount'])->name('challan.discount');
  Route::post('/challan/exempt',[B::class,'exempt'])->name('challan.exempt');
@@ -61,7 +62,11 @@ Route::middleware(['auth','accounts'])->group(function(){
  Route::post('/challan/void',[B::class,'voidFee'])->name('challan.void');
  Route::post('/challan/reverse-receipt',[B::class,'reverseReceipt'])->name('challan.reverse_receipt');
  Route::get('/challan/inspect-myskool-payment/{id}',[B::class,'inspectMySkoolPayment'])->name('challan.inspect_myskool_payment');
+ Route::get('/challan/inspect-myskool-item/{id}',[B::class,'inspectMySkoolInvoiceItem'])->name('challan.inspect_myskool_item');
  Route::post('/challan/correct-myskool-payment',[B::class,'correctMySkoolPayment'])->name('challan.correct_myskool_payment');
+ Route::post('/challan/restore-myskool-payment',[B::class,'restoreMySkoolPayment'])->name('challan.restore_myskool_payment');
+ Route::post('/challan/dispute-myskool-payment',[B::class,'disputeMySkoolPayment'])->name('challan.dispute_myskool_payment');
+ Route::post('/challan/disputes/{id}/status',[B::class,'updateMySkoolDisputeStatus'])->name('challan.update_myskool_dispute_status');
  Route::post('/challan/import-outstanding',[B::class,'importOutstanding'])->name('challan.import.outstanding');
  Route::post('/challan/import-outstanding-preloaded',[B::class,'importOutstandingPreloaded'])->name('challan.import.outstanding.preloaded');
  Route::post('/challan/import-collection',[B::class,'importCollection'])->name('challan.import.collection');

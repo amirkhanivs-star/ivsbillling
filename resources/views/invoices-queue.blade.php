@@ -491,22 +491,50 @@
 
                     {{-- 5. Financial Amounts & PDF Links --}}
                     <td>
-                        <div style="font-weight:700; color:#1e293b;">
-                            {{ $row->currency }} {{ $row->formatted_balance }}
-                        </div>
-                        @if($row->previous_dues_minor > 0)
-                            <div style="font-size:11px; color:#b45309;" title="Unpaid items from previous months">
-                                + Prev: {{ $row->currency }} {{ $row->formatted_previous_dues }}
+                        @if($row->has_data_integrity_issue ?? false)
+                            <div style="font-size:11px; font-weight:700; color:#991b1b; background:#fee2e2; border:1px solid #fca5a5; padding:2px 6px; border-radius:4px;">
+                                ⚠ UNVERIFIED — Data Integrity Hold
                             </div>
-                            <div style="font-size:11px; font-weight:700; color:#1e293b; border-top:1px dashed #cbd5e1; margin-top:2px; padding-top:2px;">
-                                Total: {{ $row->currency }} {{ $row->formatted_total_payable }}
+                        @elseif(($row->is_multi_currency ?? false) && !empty($row->currencies_map))
+                            @foreach($row->currencies_map as $cCode => $cInfo)
+                                <div style="font-weight:700; color:#1e293b; font-size:11px;">
+                                    {{ $cInfo['formatted_total_payable'] ?? ($cCode . ' ' . $row->formatted_total_payable) }}
+                                </div>
+                            @endforeach
+                        @else
+                            <div style="font-weight:700; color:#1e293b;">
+                                {{ $row->currency }} {{ $row->formatted_balance }}
+                            </div>
+                            @if($row->previous_dues_minor > 0)
+                                <div style="font-size:11px; color:#b45309;" title="Unpaid items from previous months">
+                                    + Prev: {{ $row->currency }} {{ $row->formatted_previous_dues }}
+                                </div>
+                            @endif
+                            @if(($row->later_period_minor ?? 0) > 0)
+                                <div style="font-size:11px; color:#0369a1;" title="Already-generated later-period unpaid charges">
+                                    + Later: {{ $row->currency }} {{ $row->formatted_later_period }}
+                                </div>
+                            @endif
+                            @if($row->previous_dues_minor > 0 || ($row->later_period_minor ?? 0) > 0)
+                                <div style="font-size:11px; font-weight:700; color:#1e293b; border-top:1px dashed #cbd5e1; margin-top:2px; padding-top:2px;">
+                                    Total: {{ $row->currency }} {{ $row->formatted_total_payable }}
+                                </div>
+                            @endif
+                        @endif
+
+                        @if(!empty($row->dispatched_totals_by_currency) && is_array($row->dispatched_totals_by_currency))
+                            <div style="font-size:10px; color:#475569; margin-top:3px;" title="Exact balance calculated at preparation/dispatch time">
+                                Dispatched:
+                                @foreach($row->dispatched_totals_by_currency as $dt)
+                                    <span>{{ $dt['currency'] ?? '' }} {{ $dt['amount'] ?? '' }}</span>@if(!$loop->last), @endif
+                                @endforeach
                             </div>
                         @endif
 
                         <div style="margin-top:4px; font-size:11px;">
                             @if($row->consolidated_challan_url)
-                                <a href="{{ $row->consolidated_challan_url }}" target="_blank" style="color:#7367f0; text-decoration:none;" title="Consolidated Family Challan PDF">
-                                    Family Challan ↗
+                                <a href="{{ $row->consolidated_challan_url }}" target="_blank" rel="noopener" style="color:#7367f0; text-decoration:none; font-weight:600;" title="Live Consolidated Fee Invoice PDF (renders current ledger balance)">
+                                    Consolidated Fee Invoice (Live) ↗
                                 </a>
                             @endif
                         </div>

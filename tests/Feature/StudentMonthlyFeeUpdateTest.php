@@ -685,12 +685,21 @@ class StudentMonthlyFeeUpdateTest extends TestCase
         ]);
         $recreateResponse->assertSessionHas('notice');
 
-        // Verify recreated fee item
-        $recreatedItem = DB::table('invoice_items')->where('id', $janItem->id)->first();
+        // Verify original voided item remains voided and replacement fee item is active
+        $origVoided = DB::table('invoice_items')->where('id', $janItem->id)->first();
+        $this->assertEquals('voided', $origVoided->status);
+
+        $recreatedItem = DB::table('invoice_items')
+            ->where('student_id', $data['studentId'])
+            ->where('period_start', '2027-01-01')
+            ->where('status', 'active')
+            ->first();
+        $this->assertNotNull($recreatedItem);
         $this->assertEquals('active', $recreatedItem->status);
         $this->assertEquals('AED', $recreatedItem->currency);
         $this->assertEquals(32000, $recreatedItem->amount_minor);
         $this->assertEquals(32000, $recreatedItem->net_minor);
+        $this->assertEquals($janItem->id, $recreatedItem->replaces_invoice_item_id);
 
         // Verify parent invoice
         $parentInv = DB::table('invoices')->where('id', $recreatedItem->invoice_id)->first();
@@ -707,12 +716,13 @@ class StudentMonthlyFeeUpdateTest extends TestCase
         $this->assertEquals('recreated', $adjustments[1]->kind);
         $this->assertEquals(32000, $adjustments[1]->new_amount_minor);
 
-        // Quick Test 5: Verify no duplicate invoices or items
-        $totalItems = DB::table('invoice_items')
+        // Quick Test 5: Verify no duplicate active invoices or items
+        $activeItems = DB::table('invoice_items')
             ->where('student_id', $data['studentId'])
             ->where('period_start', '2027-01-01')
+            ->where('status', '!=', 'voided')
             ->count();
-        $this->assertEquals(1, $totalItems, 'Exactly 1 invoice item must exist for January 2027; no duplicates allowed');
+        $this->assertEquals(1, $activeItems, 'Exactly 1 active invoice item must exist for January 2027; no duplicates allowed');
 
         // Running Create Fee again skips it cleanly as duplicate
         $rerunResponse = $this->actingAs($this->superAdmin)->post('/challan/create-fee', [
@@ -893,9 +903,18 @@ class StudentMonthlyFeeUpdateTest extends TestCase
         ]);
         $respWithApproval->assertSessionHas('notice');
 
-        $recreated = DB::table('invoice_items')->where('id', $octItemId)->first();
+        $origVoidedOct = DB::table('invoice_items')->where('id', $octItemId)->first();
+        $this->assertEquals('voided', $origVoidedOct->status);
+
+        $recreated = DB::table('invoice_items')
+            ->where('student_id', $data['studentId'])
+            ->where('period_start', '2026-10-01')
+            ->where('status', 'active')
+            ->first();
+        $this->assertNotNull($recreated);
         $this->assertEquals('active', $recreated->status);
         $this->assertEquals('AED', $recreated->currency);
         $this->assertEquals(32000, $recreated->amount_minor);
+        $this->assertEquals($octItemId, $recreated->replaces_invoice_item_id);
     }
 }

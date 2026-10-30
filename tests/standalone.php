@@ -13,10 +13,13 @@ eq(C::calculate(300,['january'=>'Partial payment | 100'])['perMonth']['january']
 echo "All standalone regression checks passed.\n";
 require __DIR__.'/../app/Services/BillingPeriod.php';
 use App\Services\BillingPeriod;
-$periods=BillingPeriod::selectedMonths(2028,[12,2,1],10);
+$periods=BillingPeriod::selectedMonths(2028,[12,2,1],10,'2027-12-01');
 eq($periods[0]['start'],'2028-01-01','billing months sorted chronologically');
 eq($periods[1]['end'],'2028-02-29','February leap-year month end');
 eq($periods[2]['due'],'2028-12-10','month-specific due date');
+eq(BillingPeriod::calculateDueDate(2026,10,5,'2026-09-20'),'2026-10-05','due date policy example A');
+eq(BillingPeriod::calculateDueDate(2026,10,5,'2026-10-28'),'2026-11-07','due date policy example B');
+eq(BillingPeriod::calculateDueDate(2026,11,5,'2026-10-28'),'2026-11-07','due date policy example C');
 try { BillingPeriod::selectedMonths(2028,[1,1],10); throw new RuntimeException('Duplicate month accepted'); }
 catch (InvalidArgumentException $exception) {echo "PASS duplicate-month rejection\n";}
 echo "All standalone period checks passed.\n";

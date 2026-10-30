@@ -235,6 +235,22 @@ class DispatchBatchToN8n implements ShouldQueue
             $family = DB::table('families')->where('id', $invoice->family_id)->first();
             $channels = json_decode($batch->channels ?: '["whatsapp"]', true, 512, JSON_THROW_ON_ERROR);
             $eligibilityError = WebhookSettingService::evaluateContactEligibility($family, $channels);
+            $isIntegrityHold = false;
+            if ($webhookType === 'monthly') {
+                $approverId = $notification->approved_by ?? $batch->approved_by ?? null;
+                $approver = $approverId ? DB::table('users')->where('id', $approverId)->first() : null;
+                $consolidatedBuilder = app(\App\Services\ConsolidatedInvoiceBuilder::class);
+                $elig = $consolidatedBuilder->evaluateFamilyDispatchEligibility(
+                    (int) $invoice->family_id,
+                    $batch->billing_period ?? null,
+                    $approver
+                );
+                if (!$elig['can_dispatch']) {
+                    $eligibilityError = $elig['block_reason']
+                        ?? "Data Integrity Issue: Invoice {$invoice->invoice_number} has an unverified consolidated payable balance. Flagged for staff review.";
+                    $isIntegrityHold = true;
+                }
+            }
             if ($webhookType === 'paid' && !PaidInvoiceEligibility::eligible((int) $notification->invoice_id)) {
                 $eligibilityError = 'Paid invoice is not fully paid or lacks a qualifying positive, unreversed receipt (portal provenance or historical cutoff).';
             }
@@ -242,6 +258,23 @@ class DispatchBatchToN8n implements ShouldQueue
                 DB::table('notifications')->where('id', $notification->id)->update([
                     'status' => 'blocked', 'error' => $eligibilityError, 'updated_at' => now(),
                 ]);
+                if ($isIntegrityHold) {
+                    DB::table('audit_logs')->insert([
+                        'actor_id' => $notification->approved_by ?? $batch->approved_by ?? null,
+                        'action' => 'notification.blocked_financial_integrity',
+                        'subject_type' => 'notification',
+                        'subject_id' => $notification->id,
+                        'metadata' => json_encode([
+                            'batch_id' => $this->batchId,
+                            'invoice_id' => $invoice->id,
+                            'invoice_number' => $invoice->invoice_number,
+                            'family_id' => $invoice->family_id,
+                            'reason' => $eligibilityError,
+                        ]),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
                 continue;
             }
 

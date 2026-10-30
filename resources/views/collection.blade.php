@@ -24,22 +24,34 @@
     $firstInvoiceItem = $invoiceItems->first();
     if ($matchedStudent) {
         $matchedInvoiceItem = $invoiceItems->first(fn($it) => (int) ($it->student_id ?? 0) === (int) $matchedStudent->id);
-        $firstStudent = $matchedInvoiceItem ?? (object) [
+        $firstStudent = (object) [
             'id' => $matchedStudent->id,
             'gr_number' => $matchedStudent->gr_number,
             'student_name' => $matchedStudent->name,
-            'class_name' => $matchedStudent->grade_label ?: ($firstInvoiceItem?->class_name ?? ''),
+            'class_name' => $matchedStudent->grade_label ?: ($matchedInvoiceItem?->class_name ?? ($firstInvoiceItem?->class_name ?? '')),
         ];
     } else {
         $fallbackFamilyStudent = (isset($familyStudents) && $familyStudents instanceof \Illuminate\Support\Collection)
             ? $familyStudents->first()
             : ($family ? DB::table('students')->where('family_id', $family->id)->orderBy('id')->first() : null);
-        $firstStudent = $firstInvoiceItem ?? ($fallbackFamilyStudent ? (object) [
-            'id' => $fallbackFamilyStudent->id,
-            'gr_number' => $fallbackFamilyStudent->gr_number,
-            'student_name' => $fallbackFamilyStudent->name,
-            'class_name' => $fallbackFamilyStudent->grade_label ?? '',
-        ] : null);
+        if ($firstInvoiceItem) {
+            $itemStudent = (isset($familyStudents) && $familyStudents instanceof \Illuminate\Support\Collection)
+                ? $familyStudents->first(fn($st) => (int) $st->id === (int) ($firstInvoiceItem->student_id ?? 0))
+                : null;
+            $firstStudent = (object) [
+                'id' => $firstInvoiceItem->student_id ?? ($fallbackFamilyStudent->id ?? null),
+                'gr_number' => $firstInvoiceItem->gr_number ?? ($fallbackFamilyStudent->gr_number ?? ''),
+                'student_name' => $firstInvoiceItem->student_name ?? ($fallbackFamilyStudent->name ?? ''),
+                'class_name' => $itemStudent?->grade_label ?: ($firstInvoiceItem->class_name ?: ($fallbackFamilyStudent->grade_label ?? '')),
+            ];
+        } else {
+            $firstStudent = $fallbackFamilyStudent ? (object) [
+                'id' => $fallbackFamilyStudent->id,
+                'gr_number' => $fallbackFamilyStudent->gr_number,
+                'student_name' => $fallbackFamilyStudent->name,
+                'class_name' => $fallbackFamilyStudent->grade_label ?? '',
+            ] : null;
+        }
     }
 
     if ($family) {
@@ -429,7 +441,7 @@
                                     <span style="color: var(--ms-purple); font-weight: 500;">{{ $item->student_name }}</span>
                                 </td>
                                 <td style="color: #6e6b7b;">
-                                    {{ $item->class_name ?? '11th (FED) - A' }}
+                                    {{ $item->class_name ?: '—' }}
                                 </td>
                                 <td>{{ $item->description ?: 'Monthly Fee' }}</td>
                                 <td>
@@ -731,6 +743,12 @@
                                     </td>
                                     <td class="col-total" style="text-align: right; white-space: nowrap;">
                                         <b>{{ $receipt->currency }} {{ number_format($receipt->amount, 2) }}</b>
+                                        @if((int) ($receipt->reversed_amount_minor ?? 0) > 0)
+                                            <div style="font-size: 10px; color: #b45309; line-height: 1.2;">
+                                                Orig: {{ $receipt->currency }} {{ number_format((float) ($receipt->original_amount ?? $receipt->amount), 2) }}
+                                                &bull; Rev: {{ number_format((float) ($receipt->reversed_amount ?? 0), 2) }}
+                                            </div>
+                                        @endif
                                     </td>
                                     <td class="col-date" style="white-space: nowrap;">{{ $receipt->received_on_formatted }}</td>
                                     <td class="col-received-by">
@@ -759,19 +777,6 @@
                                                     ✕
                                                 </button>
                                             @endif
-                                            {{-- Administrator-Only MySkool Review / Correction Action (Task 2) --}}
-                                            @if(!empty($receipt->can_correct_myskool) && $receipt->source === 'myskool' && in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
-                                                <button type="button"
-                                                    class="btn-ms-square-action js-myskool-correct-trigger"
-                                                    onclick="openMySkoolCorrectionModal({{ (int) $receipt->primary_id }})"
-                                                    data-staged-collection-id="{{ (int) $receipt->primary_id }}"
-                                                    data-slip="{{ $receipt->slip_number }}"
-                                                    style="background: #fffbeb; color: #b45309; border: 1px solid #fcd34d;"
-                                                    title="Review / Correct MySkool Payment"
-                                                    aria-label="Review / Correct MySkool Payment">
-                                                    &#8634;
-                                                </button>
-                                            @endif
                                         </div>
                                     </td>
                                 </tr>
@@ -797,6 +802,91 @@
                         </div>
                     </div>
                 @endif
+            </div>
+
+            {{-- MYSKOOL DISPUTES SECTION (Task 3) --}}
+            <div class="myskool-card" id="myskool-disputes-section" style="margin-top: 16px; border-left: 4px solid #f59e0b;">
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #ebe9f1; background: #fffbeb;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <strong style="color: #92400e; font-size: 13px;">Disputes (Historical MySkool Payment &amp; Fee Review Cases)</strong>
+                        <span style="font-size: 10px; background: #fef3c7; color: #92400e; border: 1px solid #fde68a; padding: 2px 8px; border-radius: 12px; font-weight: 700;">
+                            {{ ($myskoolDisputes ?? collect())->count() }} {{ \Illuminate\Support\Str::plural('Case', ($myskoolDisputes ?? collect())->count()) }}
+                        </span>
+                    </div>
+                    <span style="font-size: 11px; color: #b45309;">Submitting or approving a dispute preserves original records and makes no automatic balance changes</span>
+                </div>
+                <div style="overflow-x: auto; padding: 10px 14px;">
+                    <table class="myskool-table" style="font-size: 11px;">
+                        <thead>
+                            <tr style="background: #f8fafc;">
+                                <th>CASE #</th>
+                                <th>STUDENT</th>
+                                <th>FEE TYPE &amp; MONTH</th>
+                                <th>ORIGINAL RECORD</th>
+                                <th>AMOUNT</th>
+                                <th>REASON</th>
+                                <th>STATUS</th>
+                                @if(in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
+                                    <th style="text-align: right;">FINANCE ADMIN ACTIONS</th>
+                                @endif
+                            </tr>
+                        </thead>
+                        <tbody id="myskool-disputes-tbody">
+                            @forelse(($myskoolDisputes ?? collect()) as $disp)
+                                @php
+                                    $dStatus = strtolower((string) ($disp->status ?? 'open'));
+                                    $dBadgeStyle = match ($dStatus) {
+                                        'approved' => 'background:#dcfce7;color:#166534;border:1px solid #bbf7d0;',
+                                        'rejected' => 'background:#fee2e2;color:#991b1b;border:1px solid #fecaca;',
+                                        'resolved' => 'background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe;',
+                                        'under_review' => 'background:#ffedd5;color:#9a3412;border:1px solid #fed7aa;',
+                                        default => 'background:#fef3c7;color:#92400e;border:1px solid #fde68a;',
+                                    };
+                                @endphp
+                                <tr data-dispute-id="{{ $disp->id ?? '' }}">
+                                    <td><b>{{ $disp->dispute_code ?? '' }}</b></td>
+                                    <td>
+                                        <span style="color: var(--ms-purple); font-weight: 600;">{{ ($disp->student_name ?? '') ?: '—' }}</span>
+                                        <div style="font-size: 10px; color: #64748b;">GR: {{ ($disp->student_gr ?? '') ?: '—' }}</div>
+                                    </td>
+                                    <td>
+                                        <strong>{{ ($disp->fee_type ?? '') ?: 'Monthly Fee' }}</strong>
+                                        <div style="font-size: 10px; color: #64748b;">{{ ($disp->billing_month ?? '') ?: '—' }}</div>
+                                    </td>
+                                    <td>{{ ($disp->original_record_label ?? null) ?: (($disp->original_record_ref ?? null) ?: (!empty($disp->slip_number) ? 'Slip #' . $disp->slip_number : '—')) }}</td>
+                                    <td><b>{{ $disp->currency ?? '' }} {{ number_format(((int) ($disp->amount_minor ?? 0)) / 100, 2) }}</b></td>
+                                    <td style="max-width: 240px;">
+                                        <div>{{ $disp->reason ?? '' }}</div>
+                                        @if(!empty($disp->review_notes))
+                                            <div style="font-size: 10px; color: #475569; margin-top: 2px;"><em>Note: {{ $disp->review_notes }}</em></div>
+                                        @endif
+                                    </td>
+                                    <td>
+                                        <span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;{{ $dBadgeStyle }}">
+                                            {{ strtoupper(str_replace('_', ' ', $dStatus)) }}
+                                        </span>
+                                    </td>
+                                    @if(in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
+                                        <td style="text-align: right; white-space: nowrap;">
+                                            <div style="display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end;">
+                                                <button type="button" onclick="updateMySkoolDisputeStatus({{ (int) ($disp->id ?? 0) }}, 'under_review')" style="background:#ffedd5;color:#9a3412;border:1px solid #fed7aa;border-radius:4px;padding:2px 6px;font-size:10px;font-weight:600;cursor:pointer;">Review</button>
+                                                <button type="button" onclick="updateMySkoolDisputeStatus({{ (int) ($disp->id ?? 0) }}, 'approved')" style="background:#dcfce7;color:#166534;border:1px solid #bbf7d0;border-radius:4px;padding:2px 6px;font-size:10px;font-weight:600;cursor:pointer;">Approve</button>
+                                                <button type="button" onclick="updateMySkoolDisputeStatus({{ (int) ($disp->id ?? 0) }}, 'rejected')" style="background:#fee2e2;color:#991b1b;border:1px solid #fecaca;border-radius:4px;padding:2px 6px;font-size:10px;font-weight:600;cursor:pointer;">Reject</button>
+                                                <button type="button" onclick="updateMySkoolDisputeStatus({{ (int) ($disp->id ?? 0) }}, 'resolved')" style="background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe;border-radius:4px;padding:2px 6px;font-size:10px;font-weight:600;cursor:pointer;">Resolve</button>
+                                            </div>
+                                        </td>
+                                    @endif
+                                </tr>
+                            @empty
+                                <tr>
+                                    <td colspan="8" style="text-align: center; padding: 16px; color: #94a3b8;">
+                                        No MySkool dispute cases recorded for this family.
+                                    </td>
+                                </tr>
+                            @endforelse
+                        </tbody>
+                    </table>
+                </div>
             </div>
         @endif
     </div>
@@ -1068,9 +1158,14 @@
                     <div style="color: #64748b;" id="restore_invoice_info">Parent Invoice: SCH-...</div>
                     <div style="color: #64748b;" id="restore_period_info">Period: ...</div>
                     <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #cbd5e1; display: flex; justify-content: space-between;">
-                        <span>Original Net Value:</span>
-                        <strong id="restore_original_net">0.00</strong>
+                        <span>Original (Voided):</span>
+                        <strong id="restore_original_net" style="color: #dc2626;">0.00</strong>
                     </div>
+                    <div style="margin-top: 4px; display: flex; justify-content: space-between;">
+                        <span>Replacement (Current Approved Settings):</span>
+                        <strong id="restore_current_net" style="color: #15803d;">0.00</strong>
+                    </div>
+                    <div id="restore_recreate_status_row" style="margin-top: 4px; font-size: 10px; color: #475569;"></div>
                 </div>
 
                 {{-- Historical settlement badge / notice --}}
@@ -1090,12 +1185,22 @@
 
                 <div class="myskool-drawer-field">
                     <label>Administrative Justification / Reason *</label>
-                    <textarea class="myskool-input" id="restore_reason" name="reason" rows="3" placeholder="Enter mandatory reason for restoring this voided obligation" style="height: 70px; resize: vertical;" required></textarea>
+                    <textarea class="myskool-input" id="restore_reason" name="reason" rows="3" placeholder="Enter mandatory reason for recreating or restoring this voided obligation" style="height: 70px; resize: vertical;" required></textarea>
                 </div>
 
-                <button type="submit" class="btn-ms-save" id="btn-submit-restoration" style="background: #7367f0;">
-                    Confirm Safe Restoration
+                <button type="button" class="btn-ms-save" id="btn-submit-recreate-current" style="background: #28c76f; margin-bottom: 8px; width: 100%;">
+                    Recreate Using Current Settings
                 </button>
+                <div id="recreate_current_hint" style="font-size: 10px; color: #15803d; margin-bottom: 10px; text-align: center;">
+                    Creates a new invoice obligation using current approved student currency &amp; fee while keeping the original voided invoice for audit.
+                </div>
+
+                <button type="submit" class="btn-ms-save" id="btn-submit-restoration" style="background: #64748b; width: 100%;">
+                    Restore Original (Historical Values)
+                </button>
+                <div style="font-size: 10px; color: #64748b; margin-top: 4px; text-align: center;">
+                    Restores the original historical invoice currency &amp; amount in place.
+                </div>
             </div>
         </form>
     </div>
@@ -1726,6 +1831,8 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
           return;
         }
 
+        let recreatableCount = 0;
+
         data.items.forEach(item => {
           const tr = document.createElement('tr');
           let statusBadge = '';
@@ -1747,9 +1854,29 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
               statusBadge = `<span class="badge" style="background: #e0f2fe; color: #0284c7; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Already invoiced</span>`;
               actionHtml = `<span style="font-size: 10px; color: #0284c7;">${item.existing_invoice_number || 'Billed'}</span>`;
             } else if (item.status === 'Previously voided') {
-              statusBadge = `<span class="badge" style="background: #fef3c7; color: #d97706; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Previously voided</span>`;
+              const origLabel = item.original_voided_summary || `Original: ${item.original_voided_formatted || rateStr} (Voided)`;
+              const replLabel = item.replacement_summary || `Replacement: ${item.replacement_formatted || rateStr} (Current approved settings)`;
+              rateHtml = `
+                <div style="font-size: 10px; color: #dc2626; text-decoration: line-through;">${origLabel}</div>
+                <div style="font-size: 10px; color: #15803d; font-weight: 700;">${replLabel}</div>
+              `;
+              if (item.can_recreate_current) {
+                recreatableCount++;
+                statusBadge = `
+                  <span class="badge" style="background: #fef3c7; color: #d97706; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Previously voided</span>
+                  <div style="font-size: 9px; color: #15803d; font-weight: 600; margin-top: 2px;">Recreation Permitted</div>
+                `;
+              } else {
+                statusBadge = `
+                  <span class="badge" style="background: #fef3c7; color: #d97706; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Previously voided</span>
+                  <div style="font-size: 9px; color: #dc2626; font-weight: 600; margin-top: 2px;">Recreation Blocked</div>
+                `;
+              }
               if (window.IQRA_IS_ADMIN && item.voided_item_id) {
-                actionHtml = `<button type="button" class="btn-restore-void" data-item-id="${item.voided_item_id}" style="background: #f59e0b; color: #fff; border: none; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer;">Inspect & Restore</button>`;
+                const recreateBtn = item.can_recreate_current
+                  ? `<button type="button" class="btn-recreate-void-current" data-item-id="${item.voided_item_id}" style="background: #28c76f; color: #fff; border: none; border-radius: 3px; padding: 3px 8px; font-size: 10px; font-weight: 600; cursor: pointer; margin-bottom: 3px; display: inline-block;">Recreate Using Current Settings</button><br>`
+                  : '';
+                actionHtml = `${recreateBtn}<button type="button" class="btn-restore-void" data-item-id="${item.voided_item_id}" style="background: #f59e0b; color: #fff; border: none; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer; display: inline-block;">Inspect &amp; Restore</button>`;
               } else {
                 actionHtml = `<span style="font-size: 10px; color: #d97706;">Voided</span>`;
               }
@@ -1760,9 +1887,15 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
               statusBadge = `<span class="badge" style="background: #f0fdf4; color: #16a34a; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Historical opening balance</span>`;
               actionHtml = `<span style="font-size: 10px; color: #16a34a;">Opening Balance</span>`;
             } else if (item.status === 'Requires restoration review') {
+              if (item.original_voided_summary && item.replacement_summary) {
+                rateHtml = `
+                  <div style="font-size: 10px; color: #dc2626; text-decoration: line-through;">${item.original_voided_summary}</div>
+                  <div style="font-size: 10px; color: #64748b;">${item.replacement_summary}</div>
+                `;
+              }
               statusBadge = `<span class="badge" style="background: #ffedd5; color: #ea580c; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;">Restoration review</span>`;
               if (window.IQRA_IS_ADMIN && item.voided_item_id) {
-                actionHtml = `<button type="button" class="btn-restore-void" data-item-id="${item.voided_item_id}" style="background: #ea580c; color: #fff; border: none; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer;">Inspect & Restore</button>`;
+                actionHtml = `<button type="button" class="btn-restore-void" data-item-id="${item.voided_item_id}" style="background: #ea580c; color: #fff; border: none; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer;">Inspect &amp; Restore</button>`;
               } else {
                 actionHtml = `<span style="font-size: 10px; color: #ea580c;">Review Needed</span>`;
               }
@@ -1778,10 +1911,20 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
             <td style="padding: 4px 6px;"><strong>${item.fee_type_name}</strong><br><span style="color:#64748b;font-size:9px;">${item.rate_source}</span></td>
             <td style="padding: 4px 6px;"><span class="ms-pill-lavender" style="font-size:9px;">${item.period_label}</span></td>
             <td style="padding: 4px 6px; text-align: right;">${rateHtml}</td>
-            <td style="padding: 4px 6px; text-align: center;">${statusBadge}<br><span style="font-size:8px; color:#94a3b8;" title="${item.reason}">${item.reason.substring(0, 35)}${item.reason.length > 35 ? '...' : ''}</span></td>
+            <td style="padding: 4px 6px; text-align: center;">${statusBadge}<br><span style="font-size:8px; color:#64748b;" title="${item.reason}">${item.reason}</span></td>
             <td style="padding: 4px 6px; text-align: right;">${actionHtml}</td>
           `;
           previewTbody.appendChild(tr);
+        });
+
+        // Attach direct recreate-using-current-settings button handlers in preview
+        document.querySelectorAll('.btn-recreate-void-current').forEach(btn => {
+          btn.addEventListener('click', async function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const itemId = this.dataset.itemId;
+            await executeRecreateUsingCurrentSettings(itemId, 'Recreated voided fee obligation using current approved settings from Create Fee preview.', this);
+          });
         });
 
         // Attach restoration button handlers
@@ -1796,10 +1939,10 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
 
         const summary = data.summary || {};
         if (previewCount) {
-          previewCount.textContent = `${summary.total_eligible || 0} charge(s) planned (${summary.total_blocked || 0} blocked)`;
+          previewCount.textContent = `${summary.total_eligible || 0} charge(s) planned, ${recreatableCount} recreatable (${summary.total_blocked || 0} blocked/voided)`;
         }
 
-        if ((summary.total_eligible || 0) === 0) {
+        if ((summary.total_eligible || 0) === 0 && recreatableCount === 0) {
           if (previewWarning) {
             previewWarning.style.display = 'block';
             previewWarning.innerHTML = `<strong>No eligible fees to create.</strong> Selected obligations are already invoiced, voided, or historically settled.`;
@@ -1810,7 +1953,14 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
             btnSubmitCreateFee.style.cursor = 'not-allowed';
           }
         } else {
-          if (previewWarning) previewWarning.style.display = 'none';
+          if (previewWarning) {
+            if ((summary.total_eligible || 0) === 0 && recreatableCount > 0) {
+              previewWarning.style.display = 'block';
+              previewWarning.innerHTML = `<strong>Previously voided obligation(s) eligible for recreation.</strong> Click <em>Recreate Using Current Settings</em> or <em>Save</em> to create a new obligation using current approved student settings.`;
+            } else {
+              previewWarning.style.display = 'none';
+            }
+          }
           if (btnSubmitCreateFee) {
             btnSubmitCreateFee.disabled = false;
             btnSubmitCreateFee.style.opacity = '1';
@@ -1832,6 +1982,50 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
   const restorationSpinner = document.getElementById('restoration_loading_spinner');
   const restorationContent = document.getElementById('restoration_content_block');
   const btnSubmitRestoration = document.getElementById('btn-submit-restoration');
+  const btnSubmitRecreateCurrent = document.getElementById('btn-submit-recreate-current');
+
+  async function executeRecreateUsingCurrentSettings(itemId, reasonText, triggerBtn) {
+    if (!itemId) return;
+    const origText = triggerBtn ? triggerBtn.textContent : '';
+    if (triggerBtn) {
+      triggerBtn.disabled = true;
+      triggerBtn.textContent = 'Recreating...';
+    }
+    try {
+      const resp = await fetch('/challan/recreate-voided-fee', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-CSRF-TOKEN': window.IQRA_CSRF_TOKEN || document.querySelector('meta[name="csrf-token"]')?.content
+        },
+        body: JSON.stringify({
+          invoice_item_id: Number(itemId),
+          reason: reasonText || 'Recreated voided fee obligation using current approved settings.'
+        })
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        alertNotice(data.message || 'Fee recreated using current approved settings.');
+        if (restorationDrawer) restorationDrawer.hidden = true;
+        setTimeout(() => location.reload(), 700);
+      } else {
+        const errMsg = data.message || (data.errors && Object.values(data.errors).flat()[0]) || 'Recreation failed';
+        alertNotice(errMsg, 'error');
+        if (triggerBtn) {
+          triggerBtn.disabled = false;
+          triggerBtn.textContent = origText || 'Recreate Using Current Settings';
+        }
+      }
+    } catch (err) {
+      alertNotice('Network error while recreating fee obligation.', 'error');
+      if (triggerBtn) {
+        triggerBtn.disabled = false;
+        triggerBtn.textContent = origText || 'Recreate Using Current Settings';
+      }
+    }
+  }
 
   if (restorationCloseBtn && restorationDrawer) {
     restorationCloseBtn.addEventListener('click', () => {
@@ -1866,13 +2060,38 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
 
       const item = data.item;
       const values = data.original_approved_values || {};
+      const currentSettings = data.current_approved_settings || {};
       const proposed = data.proposed_restoration || {};
       const histEv = data.historical_evidence || {};
 
       document.getElementById('restore_student_info').textContent = `Student: ${item.student_name} (GR: ${item.gr_number})`;
       document.getElementById('restore_invoice_info').textContent = `Parent Invoice: ${item.invoice_number} (Status: ${item.invoice_status})`;
       document.getElementById('restore_period_info').textContent = `Particular: ${item.description} (${item.period_key || item.period_start})`;
-      document.getElementById('restore_original_net').textContent = `${item.currency} ${values.net_formatted}`;
+      document.getElementById('restore_original_net').textContent = `${item.currency} ${values.net_formatted} (Voided)`;
+
+      const restoreCurrentEl = document.getElementById('restore_current_net');
+      if (restoreCurrentEl) {
+        const currStr = currentSettings.currency || item.currency;
+        const currFmt = currentSettings.net_formatted || values.net_formatted;
+        restoreCurrentEl.textContent = `${currStr} ${currFmt}`;
+      }
+
+      const recreateStatusRow = document.getElementById('restore_recreate_status_row');
+      if (recreateStatusRow) {
+        if (data.is_safe_to_recreate_current) {
+          recreateStatusRow.innerHTML = `<span style="color: #15803d; font-weight: 600;">✓ Recreation Using Current Settings Permitted</span>`;
+        } else {
+          recreateStatusRow.innerHTML = `<span style="color: #dc2626; font-weight: 600;">✕ Recreation Blocked: ${data.recreate_block_reason || data.error || 'Not eligible'}</span>`;
+        }
+      }
+
+      if (btnSubmitRecreateCurrent) {
+        btnSubmitRecreateCurrent.disabled = !data.is_safe_to_recreate_current;
+        btnSubmitRecreateCurrent.style.opacity = data.is_safe_to_recreate_current ? '1' : '0.5';
+        btnSubmitRecreateCurrent.textContent = currentSettings.currency && currentSettings.net_formatted
+          ? `Recreate Using Current Settings (${currentSettings.currency} ${currentSettings.net_formatted})`
+          : 'Recreate Using Current Settings';
+      }
 
       const settlementBox = document.getElementById('restore_settlement_box');
       if (histEv.post_cutoff_paid_minor > 0 || proposed.settled_paid_minor > 0) {
@@ -1889,11 +2108,17 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
       if (data.is_safe_to_restore) {
         badge.style.background = '#eafbf1';
         badge.style.color = '#28c76f';
-        if (btnSubmitRestoration) btnSubmitRestoration.disabled = false;
+        if (btnSubmitRestoration) {
+          btnSubmitRestoration.disabled = false;
+          btnSubmitRestoration.textContent = `Restore Original (${item.currency} ${values.net_formatted})`;
+        }
       } else {
         badge.style.background = '#fee2e2';
         badge.style.color = '#dc2626';
-        if (btnSubmitRestoration) btnSubmitRestoration.disabled = true;
+        if (btnSubmitRestoration) {
+          btnSubmitRestoration.disabled = true;
+          btnSubmitRestoration.textContent = 'Restore Original (Historical Values)';
+        }
       }
 
       document.getElementById('restore_action_desc').textContent = data.action_description;
@@ -1903,12 +2128,23 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
     }
   }
 
+  if (btnSubmitRecreateCurrent) {
+    btnSubmitRecreateCurrent.addEventListener('click', async function(e) {
+      e.preventDefault();
+      const itemId = restoreItemIdInput ? restoreItemIdInput.value : null;
+      const reasonInput = document.getElementById('restore_reason');
+      const reasonText = (reasonInput && reasonInput.value ? reasonInput.value.trim() : '')
+        || 'Recreated voided fee obligation using current approved student settings.';
+      await executeRecreateUsingCurrentSettings(itemId, reasonText, btnSubmitRecreateCurrent);
+    });
+  }
+
   if (restorationForm) {
     restorationForm.addEventListener('submit', async function(e) {
       e.preventDefault();
       if (btnSubmitRestoration) {
         btnSubmitRestoration.disabled = true;
-        btnSubmitRestoration.textContent = 'Restoring...';
+        btnSubmitRestoration.textContent = 'Restoring Original...';
       }
 
       const fd = new FormData(restorationForm);
@@ -1931,14 +2167,14 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
           alertNotice(data.message || 'Restoration failed', 'error');
           if (btnSubmitRestoration) {
             btnSubmitRestoration.disabled = false;
-            btnSubmitRestoration.textContent = 'Confirm Safe Restoration';
+            btnSubmitRestoration.textContent = 'Restore Original (Historical Values)';
           }
         }
       } catch (err) {
         alertNotice('Network error during fee restoration', 'error');
         if (btnSubmitRestoration) {
           btnSubmitRestoration.disabled = false;
-          btnSubmitRestoration.textContent = 'Confirm Safe Restoration';
+          btnSubmitRestoration.textContent = 'Restore Original (Historical Values)';
         }
       }
     });
@@ -2047,7 +2283,7 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
 </script>
 
 {{-- RECEIPT ITEMIZATION DETAILS DIALOG --}}
-<dialog id="receipt-details-dialog" style="border:none;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.3);padding:0;max-width:650px;width:95%;margin:auto;font-family:inherit;">
+<dialog id="receipt-details-dialog" style="border:none;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.3);padding:0;max-width:840px;width:96%;margin:auto;font-family:inherit;">
  <div style="background:#7367f0;color:#fff;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-top-left-radius:8px;border-top-right-radius:8px;">
   <strong style="font-size:16px;display:flex;align-items:center;gap:8px;">
     <span>Receipt Slip #<span id="rd-slip"></span></span>
@@ -2055,12 +2291,14 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
   </strong>
   <button type="button" onclick="document.getElementById('receipt-details-dialog').close()" style="background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;">&times;</button>
  </div>
- <div style="padding:20px;font-size:13px;color:#5e5873;max-height:80vh;overflow-y:auto;">
+ <div style="padding:20px;font-size:13px;color:#5e5873;max-height:84vh;overflow-y:auto;">
   
   {{-- META GRID --}}
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:12px;margin-bottom:14px;">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;background:#f8f7fa;border:1px solid #ebe9f1;border-radius:6px;padding:12px;margin-bottom:14px;">
     <div><small style="color:#64748b;display:block;">Payment Date</small><strong id="rd-date">—</strong></div>
-    <div><small style="color:#64748b;display:block;">Total Amount</small><strong id="rd-total" style="color:#7367f0;">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Original Receipt Total</small><strong id="rd-total" style="color:#7367f0;">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Total Amount Reversed</small><strong id="rd-reversed-total" style="color:#b45309;">—</strong></div>
+    <div><small style="color:#64748b;display:block;">Remaining Effective Paid</small><strong id="rd-effective-total" style="color:#166534;">—</strong></div>
     <div><small style="color:#64748b;display:block;">Discount</small><strong id="rd-discount">0</strong></div>
     <div><small style="color:#64748b;display:block;">Method</small><strong id="rd-method">Cash</strong></div>
     <div><small style="color:#64748b;display:block;">Received By</small><strong id="rd-received-by">—</strong></div>
@@ -2071,18 +2309,180 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
 
   {{-- ITEMS TABLE --}}
   <div style="font-weight:600;margin:12px 0 6px;color:#334155;">Underlying Item Allocations:</div>
-  <table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid #ebe9f1;border-radius:4px;overflow:hidden;">
-    <thead>
-      <tr style="background:#f1f5f9;color:#475569;text-align:left;">
-        <th style="padding:8px 10px;">Student</th>
-        <th style="padding:8px 10px;">Fee Particular</th>
-        <th style="padding:8px 10px;">Month</th>
-        <th style="padding:8px 10px;text-align:right;">Amount</th>
-      </tr>
-    </thead>
-    <tbody id="rd-items-tbody">
-    </tbody>
-  </table>
+  <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid #ebe9f1;border-radius:4px;overflow:hidden;">
+      <thead>
+        <tr style="background:#f1f5f9;color:#475569;text-align:left;">
+          <th style="padding:8px 10px;">Student</th>
+          <th style="padding:8px 10px;">Fee Particular</th>
+          <th style="padding:8px 10px;">Month</th>
+          <th style="padding:8px 10px;text-align:right;">Original Paid</th>
+          <th style="padding:8px 10px;text-align:right;">Reversed</th>
+          <th style="padding:8px 10px;text-align:right;">Effective Paid</th>
+          <th style="padding:8px 10px;">Status</th>
+          <th style="padding:8px 10px;text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rd-items-tbody">
+      </tbody>
+    </table>
+  </div>
+
+  {{-- INDIVIDUAL PAYMENT RESTORATION CONFIRMATION PANEL (PHASE 3 TASK 2) --}}
+  @if(in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
+  <div id="rd-restore-panel" style="display:none;margin-top:16px;background:#faf9ff;border:1px solid #c4b5fd;border-radius:8px;padding:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #e2e8f0;">
+      <div>
+        <strong style="font-size:14px;color:#4b3f72;">Individual MySkool Payment Allocation Restoration</strong>
+        <div style="font-size:11px;color:#64748b;">Reverses the selected payment credit back to outstanding dues. Does not issue a cash refund or delete historical records.</div>
+      </div>
+      <button type="button" onclick="closeMySkoolRestorePanel()" style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;padding:3px 9px;font-size:11px;font-weight:600;color:#475569;cursor:pointer;">&times; Close Panel</button>
+    </div>
+
+    <div id="rdr-loading" style="display:none;padding:16px;text-align:center;color:#64748b;font-size:12px;">
+      Inspecting ledger linkage and reversible allocation balance...
+    </div>
+
+    <div id="rdr-content" style="display:none;">
+      {{-- Allocation Identity & Reversible Balance Grid --}}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:11px;">
+        <div><small style="color:#64748b;display:block;">Student Name &amp; GR</small><strong id="rdr-student">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Original MySkool Slip #</small><strong id="rdr-slip">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Fee Type</small><strong id="rdr-fee-type">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Billing Month</small><strong id="rdr-month">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Original Currency</small><strong id="rdr-currency">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Original Paid Amount</small><strong id="rdr-orig-paid" style="color:#7367f0;">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Amount Previously Reversed</small><strong id="rdr-prev-reversed" style="color:#b45309;">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Remaining Reversible Amount</small><strong id="rdr-rem-reversible" style="color:#166534;">—</strong></div>
+      </div>
+
+      {{-- Unreconciled / Blocked State Banner --}}
+      <div id="rdr-reconcile-warning" style="display:none;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:12px;margin-bottom:12px;font-size:11px;color:#9a3412;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <strong id="rdr-reconcile-title" style="font-size:12px;">Requires Reconciliation</strong>
+          <span id="rdr-reconcile-badge" style="background:#ffedd5;color:#9a3412;border:1px solid #fdba74;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">REQUIRES RECONCILIATION</span>
+        </div>
+        <div id="rdr-reconcile-msg" style="margin-top:4px;line-height:1.45;">—</div>
+        <div id="rdr-reconcile-actions" style="display:none;margin-top:10px;padding-top:8px;border-top:1px dashed #fdba74;">
+          <div style="margin-bottom:6px;color:#7c2d12;font-weight:600;">To restore this payment safely, first reconcile its historical obligation and settlement lineage in the original receipt currency (creates 0.00 unpaid debt):</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <input type="text" id="rdr-reconcile-reason" class="myskool-input" placeholder="Enter reconciliation reason (min 5 chars)..." style="flex:1;min-width:220px;font-size:11px;">
+            <button type="button" id="rdr-btn-reconcile" onclick="submitMySkoolLineageReconciliation()" style="background:#0284c7;color:#fff;border:none;border-radius:4px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">
+              Reconcile Lineage First
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {{-- Restoration Execution Form --}}
+      <form id="rdr-form" onsubmit="submitMySkoolPaymentRestoration(event)" style="display:none;">
+        @csrf
+        <input type="hidden" id="rdr-col-id" name="qa_staged_collection_id">
+        <input type="hidden" id="rdr-idempotency-key" name="idempotency_key">
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:12px;">
+          <div>
+            <label style="display:block;font-weight:700;font-size:11px;color:#334155;margin-bottom:6px;">Restoration Mode *</label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:6px;cursor:pointer;">
+              <input type="radio" name="restoration_mode" id="rdr-mode-full" value="full" checked onchange="updateMySkoolRestorePreview()">
+              <span><strong>Full Restoration</strong> (Restore full remaining reversible amount)</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+              <input type="radio" name="restoration_mode" id="rdr-mode-partial" value="partial" onchange="updateMySkoolRestorePreview()">
+              <span><strong>Partial Restoration</strong> (Restore chosen partial amount)</span>
+            </label>
+          </div>
+
+          <div>
+            <label style="display:block;font-weight:700;font-size:11px;color:#334155;margin-bottom:4px;">
+              Amount to Restore (<span id="rdr-amount-curr">SAR</span>) *
+            </label>
+            <input type="number" id="rdr-amount" name="restore_amount" class="myskool-input" step="0.01" min="0.01" required oninput="updateMySkoolRestorePreview()" style="width:100%;font-weight:700;font-size:13px;">
+            <small id="rdr-amount-help" style="display:block;color:#64748b;font-size:10px;margin-top:3px;">Must be greater than 0.00 and at most the remaining reversible allocation.</small>
+          </div>
+        </div>
+
+        {{-- Live Financial Impact Preview --}}
+        <div style="font-weight:700;font-size:11px;color:#334155;margin-bottom:5px;">Preview of Financial Impact:</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px;border:1px solid #e2e8f0;background:#fff;margin-bottom:12px;">
+          <thead>
+            <tr style="background:#f1f5f9;color:#334155;text-align:left;">
+              <th style="padding:6px 10px;border-bottom:1px solid #e2e8f0;">Accounting Dimension</th>
+              <th style="padding:6px 10px;border-bottom:1px solid #e2e8f0;">Before Restoration</th>
+              <th style="padding:6px 10px;border-bottom:1px solid #e2e8f0;">After Restoration</th>
+            </tr>
+          </thead>
+          <tbody id="rdr-preview-tbody"></tbody>
+        </table>
+
+        <div style="margin-bottom:12px;">
+          <label style="display:block;font-weight:700;font-size:11px;color:#334155;margin-bottom:4px;">Mandatory Restoration Reason *</label>
+          <textarea id="rdr-reason" name="reason" class="myskool-input" rows="2" required minlength="5" placeholder="Enter mandatory restoration reason and verification reference (min 5 characters)..." style="width:100%;height:54px;resize:vertical;"></textarea>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+          <button type="button" onclick="closeMySkoolRestorePanel()" style="background:#f1f5f9;border:1px solid #cbd5e1;padding:7px 14px;border-radius:4px;font-size:12px;font-weight:600;color:#475569;cursor:pointer;">
+            Cancel
+          </button>
+          <button type="submit" id="rdr-btn-submit" style="background:#dc2626;color:#fff;border:none;padding:7px 16px;border-radius:4px;font-size:12px;font-weight:700;cursor:pointer;">
+            Confirm &amp; Restore to Outstanding Dues
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {{-- INDIVIDUAL PAYMENT / FEE DISPUTE PANEL (PHASE 3 TASK 3) --}}
+  <div id="rd-dispute-panel" style="display:none;margin-top:16px;background:#fffdf5;border:1px solid #fde68a;border-radius:8px;padding:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #fef3c7;">
+      <div>
+        <strong style="font-size:14px;color:#92400e;">Dispute Historical MySkool Fee / Payment Entry</strong>
+        <div style="font-size:11px;color:#b45309;">Creates a tracked case in the Disputes section without altering ledger balances or deleting historical records.</div>
+      </div>
+      <button type="button" onclick="closeMySkoolDisputePanel()" style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;padding:3px 9px;font-size:11px;font-weight:600;color:#475569;cursor:pointer;">&times; Close Panel</button>
+    </div>
+
+    <div id="rdd-loading" style="display:none;padding:16px;text-align:center;color:#64748b;font-size:12px;">
+      Inspecting record details for dispute...
+    </div>
+
+    <div id="rdd-content" style="display:none;">
+      {{-- Dispute Item Details Grid --}}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:11px;">
+        <div><small style="color:#64748b;display:block;">Student Name &amp; GR</small><strong id="rdd-student">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Record Reference</small><strong id="rdd-record">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Fee Type</small><strong id="rdd-fee-type">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Billing Month</small><strong id="rdd-month">—</strong></div>
+        <div><small style="color:#64748b;display:block;">Currency &amp; Amount</small><strong id="rdd-amount" style="color:#92400e;">—</strong></div>
+      </div>
+
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:11px;color:#92400e;line-height:1.45;">
+        <strong>Safety Guarantee:</strong> Submitting a dispute preserves all original imported receipts, other students' fees, and historical records. It creates a formal case in the Disputes section for administrative review. Financial balances are not automatically modified.
+      </div>
+
+      {{-- Dispute Execution Form --}}
+      <form id="rdd-form" onsubmit="submitMySkoolDispute(event)">
+        @csrf
+        <input type="hidden" id="rdd-col-id" name="qa_staged_collection_id">
+        <input type="hidden" id="rdd-item-id" name="invoice_item_id">
+
+        <div style="margin-bottom:12px;">
+          <label style="display:block;font-weight:700;font-size:11px;color:#334155;margin-bottom:4px;">Mandatory Dispute Reason &amp; Explanation *</label>
+          <textarea id="rdd-reason" name="reason" class="myskool-input" rows="3" required minlength="5" placeholder="Enter explanation for disputing this entry (min 5 characters)..." style="width:100%;height:65px;resize:vertical;"></textarea>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+          <button type="button" onclick="closeMySkoolDisputePanel()" style="background:#f1f5f9;border:1px solid #cbd5e1;padding:7px 14px;border-radius:4px;font-size:12px;font-weight:600;color:#475569;cursor:pointer;">
+            Cancel
+          </button>
+          <button type="submit" id="rdd-btn-submit" style="background:#d97706;color:#fff;border:none;padding:7px 16px;border-radius:4px;font-size:12px;font-weight:700;cursor:pointer;">
+            Submit Dispute Case
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+  @endif
 
   {{-- FOOTER BUTTONS --}}
   <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding-top:14px;border-top:1px solid #ebe9f1;">
@@ -2097,69 +2497,566 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
 </dialog>
 
 <script>
-window.showReceiptDetails = function(payload) {
-    if (!payload) return;
-    document.getElementById('rd-slip').textContent = payload.slip_number || '—';
-    document.getElementById('rd-date').textContent = payload.received_on || '—';
-    document.getElementById('rd-total').textContent = payload.total_amount || '—';
-    document.getElementById('rd-discount').textContent = payload.discount || '0';
-    document.getElementById('rd-method').textContent = payload.payment_method || 'Cash';
-    document.getElementById('rd-received-by').textContent = payload.received_by || '—';
-    document.getElementById('rd-status').textContent = payload.status || 'Active';
-    
-    var badge = document.getElementById('rd-source-badge');
-    if (payload.source === 'portal') {
-        badge.textContent = 'Live Portal Receipt';
-        badge.style.background = '#e0f2fe';
-        badge.style.color = '#0369a1';
-    } else {
-        badge.textContent = 'Historical MySkool Record';
-        badge.style.background = '#fef3c7';
-        badge.style.color = '#92400e';
+(() => {
+    let activeReceiptPayload = null;
+    let currentRestoreInspection = null;
+
+    function formatMinorMoney(minor) {
+        const val = Math.max(0, Number(minor || 0)) / 100;
+        return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
-    var noticeBox = document.getElementById('rd-notice-container');
-    if (payload.is_historical) {
-        noticeBox.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:8px 12px;margin:10px 0;font-size:11px;color:#92400e;line-height:1.4;"><strong>Historical MySkool Payment Record — Reconstructed from Imported Data</strong><br>This payment record was reconstructed from verified MySkool import data. It reflects legacy fee collections received prior to portal migration without mutating current ledger balances.</div>';
-    } else {
-        noticeBox.innerHTML = '';
+    function renderAllocationStatusBadge(status, label) {
+        const st = String(status || 'paid').toLowerCase();
+        const text = label || (st === 'partially_reversed' ? 'Partially Reversed' : (st === 'fully_reversed' || st === 'reversed' ? 'Fully Reversed' : (st === 'requires_reconciliation' ? 'Requires Reconciliation' : (st === 'requires_review' ? 'Requires Review' : 'Paid'))));
+        let style = 'background:#dcfce7;color:#166534;border:1px solid #bbf7d0;';
+        if (st === 'partially_reversed') {
+            style = 'background:#fef3c7;color:#92400e;border:1px solid #fde68a;';
+        } else if (st === 'fully_reversed' || st === 'reversed') {
+            style = 'background:#fee2e2;color:#991b1b;border:1px solid #fecaca;';
+        } else if (st === 'requires_reconciliation' || st === 'requires_review' || st === 'disputed' || st === 'under_review') {
+            style = 'background:#ffedd5;color:#9a3412;border:1px solid #fed7aa;';
+        }
+        return '<span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;white-space:nowrap;' + style + '">' + text + '</span>';
     }
 
-    var tbody = document.getElementById('rd-items-tbody');
-    tbody.innerHTML = '';
-    if (payload.items && payload.items.length > 0) {
-        payload.items.forEach(function(it) {
-            var tr = document.createElement('tr');
-            var statusTag = '';
-            if (it.correction_status && it.correction_status !== 'historical') {
-                statusTag = ' <span class="ms-pill-lavender" style="font-size:9px;margin-left:4px;">' + String(it.correction_status).toUpperCase() + '</span>';
+    window.showReceiptDetails = function(payload) {
+        if (!payload) return;
+        activeReceiptPayload = payload;
+        if (typeof window.closeMySkoolRestorePanel === 'function') {
+            window.closeMySkoolRestorePanel();
+        }
+        if (typeof window.closeMySkoolDisputePanel === 'function') {
+            window.closeMySkoolDisputePanel();
+        }
+        document.getElementById('rd-slip').textContent = payload.slip_number || '—';
+        document.getElementById('rd-date').textContent = payload.received_on || '—';
+        document.getElementById('rd-total').textContent = payload.original_total_amount || payload.total_amount || '—';
+        document.getElementById('rd-reversed-total').textContent = payload.total_reversed_amount || ((payload.currency ? payload.currency + ' ' : '') + '0.00');
+        document.getElementById('rd-effective-total').textContent = payload.remaining_effective_amount || payload.total_amount || '—';
+        document.getElementById('rd-discount').textContent = payload.discount || '0';
+        document.getElementById('rd-method').textContent = payload.payment_method || 'Cash';
+        document.getElementById('rd-received-by').textContent = payload.received_by || '—';
+        document.getElementById('rd-status').textContent = payload.status || 'Active';
+        var badge = document.getElementById('rd-source-badge');
+        if (payload.source === 'portal') {
+            badge.textContent = 'Live Portal Receipt';
+            badge.style.background = '#e0f2fe';
+            badge.style.color = '#0369a1';
+        } else {
+            badge.textContent = 'Historical MySkool Record';
+            badge.style.background = '#fef3c7';
+            badge.style.color = '#92400e';
+        }
+
+        var noticeBox = document.getElementById('rd-notice-container');
+        if (payload.is_historical) {
+            noticeBox.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:8px 12px;margin:10px 0;font-size:11px;color:#92400e;line-height:1.45;"><strong>Historical MySkool Payment Record — Individual Allocation Restoration Enabled</strong><br>Original imported MySkool source records are permanently preserved. Reconciled allocations credited in the ledger can be individually restored (in full or in part) to outstanding dues without affecting sibling allocations or issuing an automatic cash refund.</div>';
+        } else {
+            noticeBox.innerHTML = '';
+        }
+
+        var tbody = document.getElementById('rd-items-tbody');
+        tbody.innerHTML = '';
+        if (payload.items && payload.items.length > 0) {
+            payload.items.forEach(function(it) {
+                var tr = document.createElement('tr');
+                var currPrefix = it.currency ? it.currency + ' ' : '';
+                var origPaid = it.original_amount || it.amount || '0.00';
+                var revAmt = it.reversed_amount || '0.00';
+                var effPaid = it.effective_paid_amount !== undefined ? it.effective_paid_amount : (it.amount || '0.00');
+                var remMinor = it.remaining_reversible_minor !== undefined ? Number(it.remaining_reversible_minor) : Number(it.amount_minor || 0);
+                var statusBadge = renderAllocationStatusBadge(it.allocation_status, it.allocation_status_label);
+
+                var actionHtml = '<span style="color:#94a3b8;font-size:11px;">—</span>';
+                @if(in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
+                if (payload.is_historical && window.IQRA_IS_ADMIN && it.id) {
+                    var disputeBtn = '<button type="button" class="btn-ms-disc js-myskool-dispute-btn" onclick="openMySkoolDisputePanel(' + Number(it.id) + ', ' + (it.invoice_item_id ? Number(it.invoice_item_id) : 'null') + ')" style="background:#fffbeb;color:#b45309;border:1px solid #fcd34d;border-radius:4px;padding:3px 8px;font-size:10px;font-weight:700;cursor:pointer;" title="Dispute this MySkool payment allocation">DISPUTE</button>';
+                    var restoreBtn = '<button type="button" class="btn-ms-disc js-myskool-restore-btn" onclick="openMySkoolRestorePanel(' + Number(it.id) + ')" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;border-radius:4px;padding:3px 8px;font-size:10px;font-weight:700;cursor:pointer;" title="Restore this MySkool payment allocation">RESTORE</button>';
+                    actionHtml = '<div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap;">' + disputeBtn + ' ' + restoreBtn + '</div>';
+                }
+                @endif
+
+                tr.innerHTML = '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><strong>' + (it.student_name || '—') + '</strong><br><small style="color:#64748b;">GR: ' + (it.gr_number || '—') + '</small></td>' +
+                    '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;">' + (it.fee_particular || 'Monthly Fee') + '</td>' +
+                    '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><span class="ms-pill-lavender">' + (it.period || '—') + '</span></td>' +
+                    '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:600;">' + currPrefix + origPaid + '</td>' +
+                    '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;color:#b45309;font-weight:600;">' + (Number(it.reversed_amount_minor || 0) > 0 ? currPrefix + revAmt : '—') + '</td>' +
+                    '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:700;color:#166534;">' + currPrefix + effPaid + '</td>' +
+                    '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;">' + statusBadge + '</td>' +
+                    '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;">' + actionHtml + '</td>';
+                tbody.appendChild(tr);
+            });
+        } else {
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:12px;color:#94a3b8;">No itemized details recorded.</td></tr>';
+        }
+
+        var printBtn = document.getElementById('rd-print-btn');
+        if (payload.print_url) {
+            printBtn.href = payload.print_url;
+            printBtn.style.display = 'inline-flex';
+        } else {
+            printBtn.style.display = 'none';
+        }
+
+        var dlg = document.getElementById('receipt-details-dialog');
+        if (dlg && !dlg.open) {
+            dlg.showModal();
+        }
+    };
+
+    window.closeMySkoolRestorePanel = function() {
+        const panel = document.getElementById('rd-restore-panel');
+        if (panel) panel.style.display = 'none';
+        currentRestoreInspection = null;
+    };
+
+    window.openMySkoolRestorePanel = async function(stagedCollectionId) {
+        if (typeof window.closeMySkoolDisputePanel === 'function') {
+            window.closeMySkoolDisputePanel();
+        }
+        var dlg = document.getElementById('receipt-details-dialog');
+        if (dlg && !dlg.open) {
+            dlg.showModal();
+        }
+        const panel = document.getElementById('rd-restore-panel');
+        const loading = document.getElementById('rdr-loading');
+        const content = document.getElementById('rdr-content');
+        if (!panel) return;
+
+        panel.style.display = 'block';
+        loading.style.display = 'block';
+        content.style.display = 'none';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+        try {
+            const resp = await fetch('/challan/inspect-myskool-payment/' + encodeURIComponent(stagedCollectionId), {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+            const data = await resp.json();
+            if (!resp.ok || !data.exists) {
+                window.alertNotice(data.error || 'Unable to inspect MySkool allocation.', 'error');
+                panel.style.display = 'none';
+                return;
             }
-            var adminBtn = '';
-            @if(in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
-            if (payload.is_historical && window.IQRA_IS_ADMIN && it.id) {
-                adminBtn = '<div style="margin-top:4px;"><button type="button" onclick="document.getElementById(\'receipt-details-dialog\').close(); openMySkoolCorrectionModal(' + Number(it.id) + ');" style="background:#fffbeb;color:#b45309;border:1px solid #fcd34d;border-radius:4px;padding:2px 7px;font-size:10px;font-weight:600;cursor:pointer;" title="Review / Correct MySkool Payment">&#8634; Review / Correct Row #' + Number(it.id) + '</button></div>';
+            currentRestoreInspection = data;
+            populateMySkoolRestorePanel(data);
+            loading.style.display = 'none';
+            content.style.display = 'block';
+        } catch (err) {
+            window.alertNotice('Network error while inspecting MySkool allocation.', 'error');
+            panel.style.display = 'none';
+        }
+    };
+
+    function populateMySkoolRestorePanel(data) {
+        const curr = data.currency || 'SAR';
+        document.getElementById('rdr-student').textContent = (data.student_name || '—') + ' (GR ' + (data.student_gr || '—') + ')';
+        document.getElementById('rdr-slip').textContent = '#' + (data.slip_number || '—') + ' (Row #' + data.qa_staged_collection_id + ')';
+        document.getElementById('rdr-fee-type').textContent = data.fee_type || data.fee_particular || 'Monthly Fee';
+        document.getElementById('rdr-month').textContent = data.billing_month || data.period_key || '—';
+        document.getElementById('rdr-currency').innerHTML = data.has_currency_conflict
+            ? '<span style="color:#dc2626;font-weight:700;">' + curr + ' (Conflict vs ' + (data.student_expected_currency || '—') + ')</span>'
+            : curr;
+        document.getElementById('rdr-orig-paid').textContent = curr + ' ' + (data.original_paid_formatted || data.amount_formatted || '0.00');
+        document.getElementById('rdr-prev-reversed').textContent = curr + ' ' + (data.previously_reversed_formatted || '0.00');
+        document.getElementById('rdr-rem-reversible').textContent = curr + ' ' + (data.remaining_reversible_formatted || '0.00');
+
+        const warnBox = document.getElementById('rdr-reconcile-warning');
+        const warnTitle = document.getElementById('rdr-reconcile-title');
+        const warnBadge = document.getElementById('rdr-reconcile-badge');
+        const warnMsg = document.getElementById('rdr-reconcile-msg');
+        const warnActions = document.getElementById('rdr-reconcile-actions');
+        const formEl = document.getElementById('rdr-form');
+
+        if (!data.is_credited_in_ledger || !data.is_safe_to_reverse || Number(data.remaining_reversible_minor || 0) <= 0) {
+            warnBox.style.display = 'block';
+            formEl.style.display = 'none';
+            const isFullyRev = data.allocation_status === 'fully_reversed'
+                || (Number(data.previously_reversed_minor || 0) >= Number(data.original_paid_minor || 0) && Number(data.original_paid_minor || 0) > 0);
+            if (isFullyRev) {
+                warnTitle.textContent = 'Allocation Already Fully Reversed';
+                warnBadge.textContent = 'FULLY REVERSED';
+                warnMsg.textContent = 'This historical payment allocation has already been fully restored to outstanding dues. Remaining reversible balance is ' + curr + ' 0.00.';
+                warnActions.style.display = 'none';
+            } else if (data.has_currency_conflict) {
+                warnTitle.textContent = 'Requires Review — Currency Conflict Detected';
+                warnBadge.textContent = 'REQUIRES REVIEW';
+                warnMsg.textContent = data.safety_explanation || 'Historical receipt currency conflicts with student registration currency. Never mix or offset different currencies.';
+                warnActions.style.display = 'none';
+            } else {
+                warnTitle.textContent = 'Requires Reconciliation — Historical Payment Not Yet Credited in Active Ledger';
+                warnBadge.textContent = 'REQUIRES RECONCILIATION';
+                warnMsg.textContent = data.safety_explanation || 'This historical payment has not been posted as a paid credit on an active ledger obligation. Restoration is blocked until its original fee obligation and source lineage are reconciled so artificial debt is never created.';
+                warnActions.style.display = data.can_reconcile_lineage ? 'block' : 'none';
             }
-            @endif
-            tr.innerHTML = '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><strong>' + (it.student_name || '—') + '</strong><br><small style="color:#64748b;">GR: ' + (it.gr_number || '—') + '</small>' + adminBtn + '</td>' +
-                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;">' + (it.fee_particular || 'Monthly Fee') + statusTag + '</td>' +
-                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;"><span class="ms-pill-lavender">' + (it.period || '—') + '</span></td>' +
-                '<td style="padding:8px 10px;border-bottom:1px solid #ebe9f1;text-align:right;font-weight:700;">' + (it.currency ? it.currency + ' ' : '') + it.amount + '</td>';
-            tbody.appendChild(tr);
-        });
-    } else {
-        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:12px;color:#94a3b8;">No itemized details recorded.</td></tr>';
+            return;
+        }
+
+        warnBox.style.display = 'none';
+        formEl.style.display = 'block';
+
+        const remMajor = (Number(data.remaining_reversible_minor || 0) / 100).toFixed(2);
+        document.getElementById('rdr-col-id').value = data.qa_staged_collection_id;
+        document.getElementById('rdr-idempotency-key').value = 'ms-restore-' + data.qa_staged_collection_id + '-' + Date.now();
+        document.getElementById('rdr-amount-curr').textContent = curr;
+        document.getElementById('rdr-mode-full').checked = true;
+        document.getElementById('rdr-mode-partial').checked = false;
+
+        const amountInput = document.getElementById('rdr-amount');
+        amountInput.max = remMajor;
+        amountInput.value = remMajor;
+        amountInput.readOnly = true;
+
+        document.getElementById('rdr-reason').value = '';
+        updateMySkoolRestorePreview();
     }
 
-    var printBtn = document.getElementById('rd-print-btn');
-    if (payload.print_url) {
-        printBtn.href = payload.print_url;
-        printBtn.style.display = 'inline-flex';
-    } else {
-        printBtn.style.display = 'none';
-    }
+    window.updateMySkoolRestorePreview = function() {
+        if (!currentRestoreInspection) return;
+        const data = currentRestoreInspection;
+        const curr = data.currency || 'SAR';
+        const remMinor = Number(data.remaining_reversible_minor || 0);
+        const remMajor = (remMinor / 100).toFixed(2);
 
-    document.getElementById('receipt-details-dialog').showModal();
-};
+        const isFull = document.getElementById('rdr-mode-full').checked;
+        const amountInput = document.getElementById('rdr-amount');
+        if (isFull) {
+            amountInput.value = remMajor;
+            amountInput.readOnly = true;
+        } else {
+            if (amountInput.readOnly) {
+                amountInput.readOnly = false;
+                if (Number(amountInput.value) >= Number(remMajor) && remMinor > 100) {
+                    amountInput.value = '';
+                }
+                amountInput.focus();
+            }
+        }
+
+        const rawVal = parseFloat(amountInput.value || '0');
+        const restoreMinor = Number.isFinite(rawVal) && rawVal > 0 ? Math.round(rawVal * 100) : 0;
+        const validAmount = restoreMinor > 0 && restoreMinor <= remMinor;
+
+        const helpEl = document.getElementById('rdr-amount-help');
+        const submitBtn = document.getElementById('rdr-btn-submit');
+        if (!validAmount) {
+            helpEl.style.color = '#dc2626';
+            helpEl.textContent = 'Enter an amount between ' + curr + ' 0.01 and ' + curr + ' ' + remMajor + '.';
+            if (submitBtn) submitBtn.disabled = true;
+        } else {
+            helpEl.style.color = '#64748b';
+            helpEl.textContent = (restoreMinor === remMinor)
+                ? 'Restores 100% of remaining reversible allocation (' + curr + ' ' + remMajor + ').'
+                : 'Partial restoration of ' + curr + ' ' + formatMinorMoney(restoreMinor) + '; leaves ' + curr + ' ' + formatMinorMoney(remMinor - restoreMinor) + ' paid.';
+            if (submitBtn) submitBtn.disabled = false;
+        }
+
+        const clampedMinor = validAmount ? restoreMinor : 0;
+        const newEffectivePaidMinor = Math.max(0, remMinor - clampedMinor);
+        const newAllocStatus = (clampedMinor === 0)
+            ? (data.allocation_status_label || 'Paid')
+            : (newEffectivePaidMinor === 0 ? 'Fully Reversed' : 'Partially Reversed');
+
+        const itemPaidBefore = Number(data.item_paid_minor || 0);
+        const itemNet = Number(data.item_net_minor || 0);
+        const itemBalBefore = Number(data.item_balance_minor || 0);
+        const itemPaidAfter = Math.max(0, itemPaidBefore - clampedMinor);
+        const itemBalAfter = Math.max(0, itemNet - itemPaidAfter);
+
+        const invPaidBefore = Number(data.invoice_paid_minor || 0);
+        const invTotal = Number(data.invoice_total_minor || 0);
+        const invBalBefore = Number(data.invoice_balance_minor || 0);
+        const invPaidAfter = Math.max(0, invPaidBefore - clampedMinor);
+        const invBalAfter = Math.max(0, invTotal - invPaidAfter);
+
+        const previewTbody = document.getElementById('rdr-preview-tbody');
+        previewTbody.innerHTML = [
+            ['Selected Allocation Effective Paid', curr + ' ' + formatMinorMoney(remMinor), '<b>' + curr + ' ' + formatMinorMoney(newEffectivePaidMinor) + '</b> (' + newAllocStatus + ')'],
+            ['Invoice Item (' + (data.invoice_item_id ? '#' + data.invoice_item_id : 'Linked Obligation') + ') Outstanding Due', curr + ' ' + formatMinorMoney(itemBalBefore), '<b style="color:#dc2626;">' + curr + ' ' + formatMinorMoney(itemBalAfter) + ' (+' + curr + ' ' + formatMinorMoney(clampedMinor) + ')</b>'],
+            ['Parent Invoice (' + (data.invoice_number || 'N/A') + ') Balance', curr + ' ' + formatMinorMoney(invBalBefore), '<b style="color:#dc2626;">' + curr + ' ' + formatMinorMoney(invBalAfter) + '</b>'],
+            ['Other Sibling &amp; Month Allocations on Slip #' + (data.slip_number || '—'), 'Unchanged', '<span style="color:#166534;font-weight:600;">Unchanged (Isolated)</span>'],
+            ['Original MySkool Source Record', 'Row #' + data.qa_staged_collection_id + ' (' + curr + ' ' + (data.original_paid_formatted || data.amount_formatted) + ')', '<span style="color:#166534;font-weight:600;">Preserved Intact</span>']
+        ].map(row => '<tr><td style="padding:5px 10px;border-bottom:1px solid #f1f5f9;">' + row[0] + '</td><td style="padding:5px 10px;border-bottom:1px solid #f1f5f9;">' + row[1] + '</td><td style="padding:5px 10px;border-bottom:1px solid #f1f5f9;">' + row[2] + '</td></tr>').join('');
+    };
+
+    window.submitMySkoolPaymentRestoration = async function(e) {
+        e.preventDefault();
+        if (!currentRestoreInspection) return;
+
+        const formEl = document.getElementById('rdr-form');
+        const submitBtn = document.getElementById('rdr-btn-submit');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Restoring...';
+        }
+
+        try {
+            const fd = new FormData(formEl);
+            const resp = await fetch('{{ route("challan.restore_myskool_payment") }}', {
+                method: 'POST',
+                body: fd,
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '{{ csrf_token() }}'
+                }
+            });
+            const res = await resp.json();
+            if (resp.ok && res.success) {
+                window.alertNotice(res.notice || 'MySkool payment allocation restored to outstanding dues.');
+                document.getElementById('receipt-details-dialog').close();
+                setTimeout(() => location.reload(), 650);
+            } else {
+                let msg = res.message || 'Restoration blocked by financial safety rules.';
+                if (res.errors) {
+                    const firstErr = Object.values(res.errors)[0];
+                    if (Array.isArray(firstErr) && firstErr[0]) {
+                        msg = firstErr[0];
+                    }
+                }
+                window.alertNotice(msg, 'error');
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Confirm & Restore to Outstanding Dues';
+                }
+            }
+        } catch (err) {
+            window.alertNotice('Network error while restoring MySkool payment.', 'error');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Confirm & Restore to Outstanding Dues';
+            }
+        }
+    };
+
+    window.submitMySkoolLineageReconciliation = async function() {
+        if (!currentRestoreInspection) return;
+        const reasonInput = document.getElementById('rdr-reconcile-reason');
+        const reason = (reasonInput ? reasonInput.value : '').trim();
+        if (reason.length < 5) {
+            window.alertNotice('Please enter a reconciliation reason of at least 5 characters.', 'error');
+            if (reasonInput) reasonInput.focus();
+            return;
+        }
+        const btn = document.getElementById('rdr-btn-reconcile');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Reconciling...';
+        }
+        try {
+            const fd = new FormData();
+            fd.append('_token', '{{ csrf_token() }}');
+            fd.append('qa_staged_collection_id', String(currentRestoreInspection.qa_staged_collection_id));
+            fd.append('action_type', 'reconcile_lineage');
+            fd.append('reason', reason);
+            fd.append('idempotency_key', 'ms-reconcile-' + currentRestoreInspection.qa_staged_collection_id + '-' + Date.now());
+
+            const resp = await fetch('{{ route("challan.correct_myskool_payment") }}', {
+                method: 'POST',
+                body: fd,
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '{{ csrf_token() }}'
+                }
+            });
+            const res = await resp.json();
+            if (resp.ok && res.success) {
+                window.alertNotice(res.notice || 'Historical obligation reconciled. You can now restore this payment.');
+                await window.openMySkoolRestorePanel(currentRestoreInspection.qa_staged_collection_id);
+            } else {
+                window.alertNotice(res.message || 'Lineage reconciliation blocked.', 'error');
+            }
+        } catch (err) {
+            window.alertNotice('Network error while reconciling historical obligation.', 'error');
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = 'Reconcile Lineage First';
+            }
+        }
+    };
+
+    window.closeMySkoolDisputePanel = function() {
+        const panel = document.getElementById('rd-dispute-panel');
+        if (panel) panel.style.display = 'none';
+    };
+
+    window.openMySkoolDisputePanel = async function(stagedCollectionId, invoiceItemId) {
+        if (typeof window.closeMySkoolRestorePanel === 'function') {
+            window.closeMySkoolRestorePanel();
+        }
+        var dlg = document.getElementById('receipt-details-dialog');
+        if (dlg && !dlg.open) {
+            dlg.showModal();
+        }
+        const panel = document.getElementById('rd-dispute-panel');
+        const loading = document.getElementById('rdd-loading');
+        const content = document.getElementById('rdd-content');
+        if (!panel) return;
+
+        panel.style.display = 'block';
+        loading.style.display = 'block';
+        content.style.display = 'none';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+        try {
+            let inspectUrl = stagedCollectionId
+                ? ('/challan/inspect-myskool-payment/' + encodeURIComponent(stagedCollectionId))
+                : ('/challan/inspect-myskool-item/' + encodeURIComponent(invoiceItemId));
+            const resp = await fetch(inspectUrl, {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+            const data = await resp.json();
+            if (!resp.ok || !data.exists) {
+                window.alertNotice(data.error || 'Unable to inspect entry for dispute.', 'error');
+                panel.style.display = 'none';
+                return;
+            }
+
+            const curr = data.currency || 'SAR';
+            document.getElementById('rdd-student').textContent = (data.student_name || '—') + ' (GR ' + (data.student_gr || '—') + ')';
+            document.getElementById('rdd-record').textContent = data.qa_staged_collection_id
+                ? ('Slip #' + (data.slip_number || '—') + ' (Row #' + data.qa_staged_collection_id + ')')
+                : ('Invoice #' + (data.invoice_number || '—') + ' (Item #' + (data.invoice_item_id || invoiceItemId) + ')');
+            document.getElementById('rdd-fee-type').textContent = data.fee_type || data.fee_particular || 'Monthly Fee';
+            document.getElementById('rdd-month').textContent = data.billing_month || data.period_key || '—';
+            document.getElementById('rdd-amount').textContent = curr + ' ' + (data.original_paid_formatted || data.amount_formatted || '0.00');
+
+            document.getElementById('rdd-col-id').value = data.qa_staged_collection_id || (stagedCollectionId || '');
+            document.getElementById('rdd-item-id').value = data.invoice_item_id || (invoiceItemId || '');
+            document.getElementById('rdd-reason').value = '';
+
+            loading.style.display = 'none';
+            content.style.display = 'block';
+        } catch (err) {
+            window.alertNotice('Network error while inspecting entry for dispute.', 'error');
+            panel.style.display = 'none';
+        }
+    };
+
+    window.submitMySkoolDispute = async function(e) {
+        e.preventDefault();
+        const formEl = document.getElementById('rdd-form');
+        const submitBtn = document.getElementById('rdd-btn-submit');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Submitting Dispute...';
+        }
+        try {
+            const fd = new FormData(formEl);
+            const resp = await fetch('{{ route("challan.dispute_myskool_payment") }}', {
+                method: 'POST',
+                body: fd,
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '{{ csrf_token() }}'
+                }
+            });
+            const res = await resp.json();
+            if (resp.ok && res.success) {
+                window.alertNotice(res.notice || 'Dispute case created successfully.');
+                const dlg = document.getElementById('receipt-details-dialog');
+                if (dlg && dlg.open) dlg.close();
+                setTimeout(() => location.reload(), 650);
+            } else {
+                let msg = res.message || 'Dispute submission failed.';
+                if (res.errors) {
+                    const firstErr = Object.values(res.errors)[0];
+                    if (Array.isArray(firstErr) && firstErr[0]) msg = firstErr[0];
+                }
+                window.alertNotice(msg, 'error');
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Submit Dispute Case';
+                }
+            }
+        } catch (err) {
+            window.alertNotice('Network error while submitting dispute.', 'error');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Submit Dispute Case';
+            }
+        }
+    };
+
+    window.updateMySkoolDisputeStatus = async function(disputeId, newStatus) {
+        let notes = '';
+        if (newStatus === 'rejected') {
+            notes = prompt('Please enter rejection notes / reason (optional):');
+            if (notes === null) return;
+        } else if (newStatus === 'approved') {
+            if (!confirm('Approve this dispute case? This preserves records and makes no automatic balance changes.')) return;
+        }
+
+        try {
+            const resp = await fetch('/challan/disputes/' + encodeURIComponent(disputeId) + '/status', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '{{ csrf_token() }}'
+                },
+                body: JSON.stringify({
+                    _token: '{{ csrf_token() }}',
+                    status: newStatus,
+                    review_notes: notes
+                })
+            });
+            const res = await resp.json();
+            if (resp.ok && res.success) {
+                window.alertNotice(res.notice || 'Dispute status updated successfully.');
+                setTimeout(() => location.reload(), 650);
+            } else {
+                window.alertNotice(res.message || 'Unable to update dispute status.', 'error');
+            }
+        } catch (err) {
+            window.alertNotice('Network error while updating dispute status.', 'error');
+        }
+    };
+
+    window.openMySkoolDisputeFromInvoiceItem = function(invoiceItemId, stagedCollectionId) {
+        window.openMySkoolDisputePanel(stagedCollectionId || null, invoiceItemId);
+    };
+
+    window.openMySkoolRestoreFromInvoiceItem = async function(invoiceItemId, stagedCollectionId) {
+        if (stagedCollectionId && Number(stagedCollectionId) > 0) {
+            return window.openMySkoolRestorePanel(stagedCollectionId);
+        }
+        try {
+            const resp = await fetch('/challan/inspect-myskool-item/' + encodeURIComponent(invoiceItemId), {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+            const data = await resp.json();
+            if (!resp.ok || !data.exists) {
+                window.alertNotice(data.error || 'Unable to inspect invoice item for restoration.', 'error');
+                return;
+            }
+            if (data.qa_staged_collection_id) {
+                return window.openMySkoolRestorePanel(data.qa_staged_collection_id);
+            }
+            if (data.requires_finance_review) {
+                window.alertNotice(data.finance_review_message || 'Finance review required. Use Dispute to open a review case.', 'error');
+                return window.openMySkoolDisputePanel(null, invoiceItemId);
+            }
+            window.alertNotice('This fee entry is already marked unpaid. No payment restoration needed.', 'info');
+        } catch (err) {
+            window.alertNotice('Network error inspecting invoice item.', 'error');
+        }
+    };
+})();
 </script>
 
 @if(in_array(auth()->user()?->role, ['super_admin', 'finance_admin', 'admin'], true))
@@ -2360,8 +3257,10 @@ window.showReceiptDetails = function(payload) {
     let currentMySkoolInspection = null;
 
     const actionLabels = {
+        restore_payment: 'Restore Selected Payment Allocation (Full or Partial)',
         reverse_settlement: 'Reverse Reconciled MySkool Settlement (Restore Unpaid Invoice Balance)',
         reapply_settlement: 'Reapply Reversed Historical Settlement',
+        reconcile_lineage: 'Reconcile Historical Obligation & Lineage (Zero New Debt)',
         mark_under_review: 'Place Under Finance Review (Audit Hold)',
         mark_disputed: 'Mark Receipt Disputed (Block Auto-Application)',
         mark_corrected: 'Mark Receipt Corrected (Audit Notation)',
