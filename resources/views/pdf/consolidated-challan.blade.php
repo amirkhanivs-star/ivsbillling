@@ -50,6 +50,8 @@
   .qr { max-width:100%; width:82px; height:auto; }
   .instruction { margin-top:6px; font-size:7.3px; line-height:1.38; }
   .instruction strong { color:#263d69; }
+  .eoe-statement { margin-top:8px; font-size:7px; line-height:1.4; color:#455263; page-break-inside:avoid; }
+  .eoe-statement strong { color:#263d69; }
   .signature { text-align:right; margin:2px 0 0; }
   .signature img { width:84px; height:auto; }
   .page-break { page-break-before:always; }
@@ -338,6 +340,10 @@
     </div>
     @if($signSrc)<div class="signature"><img src="{{ $signSrc }}" alt="Accounts Manager Signature"></div>@endif
   </div>
+  <div class="eoe-statement">
+    <strong>Errors &amp; Omissions Excepted (E&amp;OE):</strong> Every effort has been made to ensure the accuracy of this statement. However, errors or omissions may occur. If you notice any discrepancy in fees,<br>
+    payments, or outstanding balances, kindly contact on this number. Any verified discrepancies will be reviewed and corrected accordingly. We appreciate your understanding and cooperation.
+  </div>
 @empty
   @if(!empty($banner))
     <div class="banner-wrap">
@@ -368,7 +374,12 @@
     </table>
   @endif
   <div class="notice">There are no unpaid billed fee items to display for this account.</div>
+  <div class="eoe-statement">
+    <strong>Errors &amp; Omissions Excepted (E&amp;OE):</strong> Every effort has been made to ensure the accuracy of this statement. However, errors or omissions may occur. If you notice any discrepancy in fees,<br>
+    payments, or outstanding balances, kindly contact on this number. Any verified discrepancies will be reviewed and corrected accordingly. We appreciate your understanding and cooperation.
+  </div>
 @endforelse
 <div class="footer">IQRA VIRTUAL SCHOOL &bull; {{ $footerPhone }} &bull; {{ $footerEmail }} &bull; {{ $statementNumber }}</div>
 </body>
 </html>
+

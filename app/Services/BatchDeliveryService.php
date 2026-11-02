@@ -111,7 +111,7 @@ class BatchDeliveryService
             }
         } else {
             // Routine monthly: unsettled invoices
-            $q->where('i.status', '!=', 'paid')
+            $q->whereNotIn('i.status', ['paid', 'void', 'voided'])
               ->whereColumn('i.paid_minor', '<', 'i.total_minor');
         }
 
@@ -207,6 +207,9 @@ class BatchDeliveryService
      */
     public function resolveFilteredSelection(array $filters, object $user, array $channels = ['whatsapp']): array
     {
+        if (empty($filters['period']) && empty($filters['paid_only']) && ($filters['webhook_type'] ?? 'monthly') !== 'paid') {
+            $filters['period'] = app(InvoiceDeliveryQueueService::class)->getLatestBillingMonth();
+        }
         $q = $this->buildFilterQuery($filters, $user);
 
         $channelsStr = implode(',', $channels);
@@ -307,6 +310,10 @@ class BatchDeliveryService
             )
             : [];
 
+        $coverage = $webhookType === 'monthly'
+            ? app(InvoiceSubmissionCoverageService::class)->forPeriod($periodForSummary, $user)
+            : [];
+
         foreach ($grouped as $groupKey => $invoicesGroup) {
             // Sort group so that the latest appropriate invoice comes first
             // If period filter is supplied, prefer invoices belonging to that period
@@ -323,6 +330,12 @@ class BatchDeliveryService
             })->values();
 
             $primaryInvoice = $sorted->first();
+
+            if ($webhookType === 'monthly' && isset($coverage[(int) $primaryInvoice->family_id])) {
+                $excludedBreakdown['already_submitted']++;
+                $excludedReasons[$primaryInvoice->id] = 'Dues already included in an accepted webhook submission or pending initial submission; reminders require separate authorization.';
+                continue;
+            }
 
             // Any older invoices in the same family group or in previous billing runs are superseded for delivery
             if ($webhookType === 'monthly') {
@@ -633,6 +646,9 @@ class BatchDeliveryService
     ): array {
         // Prevent concurrent batch dispatch double-clicks
         $webhookType = (!empty($filters['paid_only']) || ($filters['webhook_type'] ?? '') === 'paid') ? 'paid' : 'monthly';
+        if ($webhookType === 'monthly') {
+            $filters['period'] = $billingPeriod ?: ($filters['period'] ?? app(InvoiceDeliveryQueueService::class)->getLatestBillingMonth());
+        }
         $eventType = ($webhookType === 'paid') ? 'invoice.paid.batch' : 'invoice.monthly.batch';
         $channelsStr = implode(',', $channels);
 
@@ -751,6 +767,16 @@ class BatchDeliveryService
             $batchId, $webhookType, $eventType, $billingPeriod, $channels, $filters,
             $totalRecipients, $chunksTotal, $chunkSize, $user, $snapshot, $channelsStr, &$batchRecordId
         ) {
+            if ($webhookType === 'monthly') {
+                $familyIds = array_values(array_unique(array_column($snapshot['eligible_recipients'], 'family_id')));
+                sort($familyIds);
+                DB::table('families')->whereIn('id', $familyIds)->orderBy('id')->lockForUpdate()->get();
+                $coverage = app(InvoiceSubmissionCoverageService::class)->forPeriod($billingPeriod ?: $snapshot['billing_cycle'], $user);
+                if (array_intersect($familyIds, array_keys($coverage))) {
+                    throw new RuntimeException('Selection changed: dues are already covered or pending. Refresh before staging initial invoices.');
+                }
+            }
+
             // Insert notification batch record
             $batchRecordId = DB::table('notification_batches')->insertGetId([
                 'batch_id' => $batchId,

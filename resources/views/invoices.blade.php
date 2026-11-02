@@ -206,26 +206,26 @@
                 @endif
                 <select name="period" class="input" style="font-weight:700; font-size:14px; padding:4px 8px; width:100%; border-color:#cbd5e1; background:#f8fafc;" onchange="this.form.submit()" title="Change Billing Month">
                     @foreach($availableMonths as $m)
-                        @php($mLabel = \Carbon\Carbon::createFromFormat('Y-m', $m)->format('F Y'))
+                        @php($mLabel = \Carbon\Carbon::createFromFormat('!Y-m', $m)->format('F Y'))
                         <option value="{{ $m }}" @selected($selectedPeriod === $m)>{{ $mLabel }}</option>
                     @endforeach
                 </select>
             </form>
-            <div class="kpi-desc">Latest generated billing cycle</div>
+            <div class="kpi-desc">Current or selected billing campaign</div>
         </div>
 
         {{-- Card 2: Awaiting Review --}}
         <div class="kpi-card" style="border-left: 4px solid #f59e0b;">
             <div class="kpi-label">📋 Challans Awaiting Review</div>
             <div class="kpi-val" style="color:#d97706;">{{ number_format($dashboardStats['awaiting_review']) }}</div>
-            <div class="kpi-desc">Unsent current monthly challans</div>
+            <div class="kpi-desc">No recorded coverage; initial invoice review</div>
         </div>
 
         {{-- Card 3: Ready to Send Families --}}
         <div class="kpi-card" style="border-left: 4px solid #10b981;">
             <div class="kpi-label">👥 Ready to Send Families</div>
             <div class="kpi-val" style="color:#059669;">{{ number_format($dashboardStats['ready_families']) }}</div>
-            <div class="kpi-desc">Consolidated recipient families</div>
+            <div class="kpi-desc">Eligible families without recorded initial coverage</div>
         </div>
 
         {{-- Card: Paid Invoices --}}
@@ -244,9 +244,11 @@
 
         {{-- Card 5: Submitted to n8n --}}
         <div class="kpi-card" style="border-left: 4px solid #6d28d9;">
-            <div class="kpi-label">📬 Submitted to n8n</div>
+            <div class="kpi-label">📬 Campaign submissions</div>
             <div class="kpi-val" style="color:#6d28d9;">{{ number_format($dashboardStats['submitted']) }}</div>
-            <div class="kpi-desc">Accepted by webhook / delivered</div>
+            <div class="kpi-desc">Webhook accepted: {{ number_format($dashboardStats['monthly_submissions'] ?? 0) }} monthly · {{ number_format($dashboardStats['paid_notifications'] ?? 0) }} paid</div>
+            <div class="kpi-desc">Invoice-period submissions: {{ number_format($dashboardStats['invoice_period_submitted'] ?? 0) }}</div>
+            <div class="kpi-desc">Reported delivered/read statuses: {{ number_format($dashboardStats['verified_deliveries'] ?? 0) }}</div>
         </div>
 
         {{-- Card 6: Needs Attention --}}
@@ -256,6 +258,23 @@
             <div class="kpi-desc">Failed or contact blocked</div>
         </div>
     </div>
+
+    @if(!empty($dashboardStats['coverage']))
+        <div class="notice" style="margin-bottom:16px; padding:14px; background:#f5f3ff; border:1px solid #ddd6fe; border-radius:8px;">
+            <strong>{{ $dashboardStats['selected_month'] }} submission coverage</strong>
+            <div style="margin-top:6px;">
+                Earlier accepted submissions including this month's dues: <strong>{{ number_format($dashboardStats['coverage']['earlier_accepted_families']) }}</strong> families ·
+                Month-specific monthly submissions: <strong>{{ number_format($dashboardStats['coverage']['specific_accepted_families']) }}</strong> families ·
+                Overlap: <strong>{{ number_format($dashboardStats['coverage']['overlap_families']) }}</strong> ·
+                Unique covered families: <strong>{{ number_format($dashboardStats['coverage']['covered_families']) }}</strong>
+            </div>
+            <div style="margin-top:6px;">
+                No recorded monthly submission covering these dues: <strong>{{ number_format($dashboardStats['coverage']['no_recorded_submission_families']) }}</strong> families ·
+                WhatsApp delivered/read with provider evidence: <strong>{{ number_format($dashboardStats['coverage']['confirmed_families']) }}</strong> families
+            </div>
+            <p class="muted" style="margin:6px 0 0;">Coverage totals include all authorized families with invoices for this month, including settled invoices. Campaign submissions above count notification records, including paid receipts. Webhook acceptance does not confirm WhatsApp delivery. Covered families are excluded from new initial invoices; any reminder requires separate review and authorization.</p>
+        </div>
+    @endif
 
     {{-- 5 CLEAR WORKFLOW SECTIONS (SECTION 5) --}}
     <nav class="iq-nav-tabs" aria-label="Invoice Delivery Workflow Sections">
@@ -511,7 +530,7 @@
                                     @if(!empty($row->dues_by_month))
                                         <div style="margin-top:2px;">
                                             @foreach($row->dues_by_month as $mDue)
-                                                @php($mLabel = $mDue['month_label'] ?? (($mDue['month'] ?? '') !== 'OB' ? \Carbon\Carbon::createFromFormat('Y-m', $mDue['month'])->format('M-y') : 'Opening'))
+                                                @php($mLabel = $mDue['month_label'] ?? (($mDue['month'] ?? '') !== 'OB' ? \Carbon\Carbon::createFromFormat('!Y-m', $mDue['month'])->format('M-y') : 'Opening'))
                                                 <span class="due-month-pill" title="{{ $mDue['period_label'] ?? $mLabel }}: {{ $mDue['formatted'] ?? ($mDue['currency'] . ' ' . \App\Services\Money::format($mDue['dues_minor'])) }}">
                                                     {{ $mLabel }}: {{ $row->is_multi_currency ? ($mDue['formatted'] ?? ($mDue['currency'] . ' ' . \App\Services\Money::format($mDue['dues_minor']))) : \App\Services\Money::format($mDue['dues_minor']) }}
                                                 </span>
@@ -1210,8 +1229,8 @@
     @elseif($currentTab === 'sent')
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
             <div>
-                <h3 style="margin:0; color:#0f172a;">Sent Invoices &amp; Verified Delivery Status</h3>
-                <p class="muted" style="margin:2px 0 0 0; font-size:12px;">Accepted by n8n webhook (HTTP 200/202). WhatsApp delivery and read states update via verified downstream callbacks.</p>
+                <h3 style="margin:0; color:#0f172a;">Sent Invoices &amp; Campaign Submissions</h3>
+                <p class="muted" style="margin:2px 0 0 0; font-size:12px;">Submissions for the selected billing campaign, including older paid invoices and preserved family-merge history. Webhook acceptance does not confirm WhatsApp delivery; delivery and read states require verified downstream callbacks.</p>
             </div>
         </div>
 
@@ -1242,17 +1261,21 @@
                                 <span class="muted">Single</span>
                             @endif
                         </td>
-                        <td><strong>{{ $sRow->invoice_number }}</strong></td>
+                        <td><strong>{{ $sRow->invoice_number }}</strong>
+                            <div class="muted" style="font-size:11px;">Invoice period: {{ $sRow->billing_period ? \Carbon\Carbon::parse($sRow->billing_period)->format('M Y') : '—' }}</div>
+                        </td>
                         <td>{{ $sRow->family_code ?: 'Family #' . $sRow->family_id }}</td>
                         <td>{{ $sRow->whatsapp }}</td>
-                        <td><span class="badge-status badge-submitted">SUBMITTED (HTTP 200)</span></td>
+                        <td><span class="badge-status badge-submitted">WEBHOOK ACCEPTED</span>
+                            <div class="muted" style="font-size:11px;">{{ $sRow->webhook_type === 'paid' || $sRow->kind === 'paid' ? 'Paid notification' : 'Monthly invoice' }}@if($sRow->response_code) · HTTP {{ $sRow->response_code }}@endif</div>
+                        </td>
                         <td>
-                            @if($sRow->whatsapp_delivery_status === 'read')
+                            @if($sRow->whatsapp_delivery_status === 'read' && !empty($sRow->provider_message_id) && in_array('whatsapp', explode(',', $sRow->channel), true))
                                 <span class="badge-status badge-read">READ</span>
-                            @elseif($sRow->whatsapp_delivery_status === 'delivered')
+                            @elseif($sRow->whatsapp_delivery_status === 'delivered' && !empty($sRow->provider_message_id) && in_array('whatsapp', explode(',', $sRow->channel), true))
                                 <span class="badge-status badge-delivered">DELIVERED</span>
                             @else
-                                <span class="badge-status badge-queued">PENDING DISPATCH</span>
+                                <span class="badge-status badge-queued">DELIVERY UNCONFIRMED</span>
                             @endif
                         </td>
                         <td><code>{{ $sRow->provider_message_id ?: '—' }}</code></td>
@@ -1264,7 +1287,7 @@
                 @empty
                     <tr>
                         <td colspan="9" style="text-align:center; padding:30px; color:#64748b;">
-                            <strong>No invoices submitted for this month yet.</strong>
+                            <strong>No invoices submitted for this billing campaign yet.</strong>
                         </td>
                     </tr>
                 @endforelse

@@ -217,7 +217,9 @@ class DispatchBatchToN8n implements ShouldQueue
             }
             // Check if superseded
             if ($notification->is_superseded) {
-                DB::table('notifications')->where('id', $notification->id)->update(['status' => 'superseded', 'updated_at' => now()]);
+                if (!in_array($notification->status, ['submitted', 'delivered', 'read'], true)) {
+                    DB::table('notifications')->where('id', $notification->id)->update(['status' => 'superseded', 'updated_at' => now()]);
+                }
                 continue;
             }
 

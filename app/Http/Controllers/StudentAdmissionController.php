@@ -231,11 +231,83 @@ class StudentAdmissionController
                                 'invoice_id'=>$existingTargetInv->id,
                                 'updated_at'=>now(),
                             ]);
-                            DB::table('notifications')->where('invoice_id',$oldInv->id)->update([
-                                'invoice_id'=>$existingTargetInv->id,
-                                'updated_at'=>now(),
-                            ]);
+                            $oldNotifs = DB::table('notifications')->where('invoice_id', $oldInv->id)->get();
+                            foreach ($oldNotifs as $oldNotif) {
+                                $targetExists = DB::table('notifications')
+                                    ->where('invoice_id', $existingTargetInv->id)
+                                    ->where('channel', $oldNotif->channel)
+                                    ->where('kind', $oldNotif->kind)
+                                    ->exists();
+
+                                $payloadData = !empty($oldNotif->payload) ? json_decode($oldNotif->payload, true) : [];
+                                if (!is_array($payloadData)) $payloadData = [];
+                                $payloadData['_merge_source_invoice'] = [
+                                    'invoice_id' => $oldInv->id,
+                                    'invoice_number' => $oldInv->invoice_number,
+                                    'original_kind' => $oldNotif->kind,
+                                    'merged_at' => now()->toIso8601String(),
+                                ];
+
+                                if ($targetExists) {
+                                    $baseKind = substr((string)$oldNotif->kind, 0, 15);
+                                    $supKind = $baseKind . '_sup';
+                                    $counter = 1;
+                                    while (DB::table('notifications')
+                                        ->where('invoice_id', $existingTargetInv->id)
+                                        ->where('channel', $oldNotif->channel)
+                                        ->where('kind', $supKind)
+                                        ->exists()) {
+                                        $counter++;
+                                        $supKind = substr($baseKind, 0, 13) . '_s' . $counter;
+                                    }
+
+                                    DB::table('notifications')->where('id', $oldNotif->id)->update([
+                                        'invoice_id' => $existingTargetInv->id,
+                                        'kind' => $supKind,
+                                        'payload' => json_encode($payloadData),
+                                        'is_superseded' => true,
+                                        'superseded_by_invoice_id' => $existingTargetInv->id,
+                                        'updated_at' => now(),
+                                    ]);
+
+                                    DB::table('audit_logs')->insert([
+                                        'actor_id' => $request->user()->id,
+                                        'action' => 'notification.superseded_on_family_merge',
+                                        'subject_type' => 'notification',
+                                        'subject_id' => $oldNotif->id,
+                                        'metadata' => json_encode([
+                                            'source_invoice_id' => $oldInv->id,
+                                            'source_invoice_number' => $oldInv->invoice_number,
+                                            'target_invoice_id' => $existingTargetInv->id,
+                                            'target_invoice_number' => $existingTargetInv->invoice_number,
+                                            'original_kind' => $oldNotif->kind,
+                                            'new_kind' => $supKind,
+                                        ]),
+                                        'created_at' => now(),
+                                    ]);
+                                } else {
+                                    DB::table('notifications')->where('id', $oldNotif->id)->update([
+                                        'invoice_id' => $existingTargetInv->id,
+                                        'payload' => json_encode($payloadData),
+                                        'updated_at' => now(),
+                                    ]);
+                                }
+                            }
+                            if (\Illuminate\Support\Facades\Schema::hasTable('qa_historical_settlements')) {
+                                DB::table('qa_historical_settlements')->where('invoice_id', $oldInv->id)->update([
+                                    'invoice_id' => $existingTargetInv->id,
+                                    'family_id' => $targetFamilyId,
+                                    'updated_at' => now(),
+                                ]);
+                            }
                             (new \App\Services\InvoiceService())->refreshInvoice($existingTargetInv->id);
+                            DB::table('notifications')
+                                ->where('invoice_id', $existingTargetInv->id)
+                                ->where('status', 'queued')
+                                ->update([
+                                    'payload' => null,
+                                    'updated_at' => now(),
+                                ]);
                             DB::table('invoices')->where('id',$oldInv->id)->delete();
                         }else{
                             DB::table('invoices')->where('id',$oldInv->id)->update([

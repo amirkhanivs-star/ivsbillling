@@ -39,9 +39,23 @@ class InvoiceDeliveryQueueService
             $q->where('n.batch_id', $filters['batch_id']);
         }
 
-        // Filter: Billing Period
+        // Sent reporting follows the campaign, including older paid invoices and merge history.
+        // Other queue views retain their existing invoice-period filtering.
         if (!empty($filters['period'])) {
-            $q->where('b.period_start', 'like', $filters['period'] . '%');
+            $period = $filters['period'] . '%';
+            $periodBasis = $filters['period_basis'] ?? (($filters['submission_status'] ?? null) === 'submitted' ? 'campaign' : 'invoice');
+            if ($periodBasis === 'campaign') {
+                $q->where(function ($campaign) use ($period) {
+                    $campaign->where('nb.billing_period', 'like', $period)
+                        ->orWhere(function ($legacy) use ($period) {
+                            $legacy->where(function ($missing) {
+                                $missing->whereNull('nb.billing_period')->orWhere('nb.billing_period', '');
+                            })->where('b.period_start', 'like', $period);
+                        });
+                });
+            } else {
+                $q->where('b.period_start', 'like', $period);
+            }
         }
 
         // Filter: Department
@@ -685,17 +699,47 @@ class InvoiceDeliveryQueueService
             ->orderByDesc('period_month')
             ->pluck('period_month')
             ->filter()
+            ->unique()
             ->values()
             ->all();
     }
 
     /**
-     * Get the latest successfully generated monthly billing period.
+     * Default to the current or most recent past generated month; future months remain selectable.
      */
     public function getLatestBillingMonth(): string
     {
-        $months = $this->getAvailableBillingMonths();
-        return $months[0] ?? date('Y-m');
+        $currentMonth = now()->format('Y-m');
+        foreach ($this->getAvailableBillingMonths() as $month) {
+            if ($month <= $currentMonth) {
+                return $month;
+            }
+        }
+        return $currentMonth;
+    }
+
+    /**
+     * Read-only submission reporting using the same campaign/status/filter rules as the Sent table.
+     * Keep renamed notification kinds: webhook_type survives family merges.
+     */
+    public function getCampaignSubmissionStats(string $period, object $user, array $filters = []): array
+    {
+        $filters = array_merge($filters, ['period' => $period, 'submission_status' => 'submitted', 'period_basis' => 'campaign']);
+        $query = $this->buildBaseQueueQuery($filters, $user);
+        $counts = (clone $query)->selectRaw("
+            COUNT(n.id) as submitted,
+            SUM(CASE WHEN n.webhook_type = 'paid' OR n.kind = 'paid' THEN 1 ELSE 0 END) as paid_notifications,
+            SUM(CASE WHEN n.status IN ('delivered', 'read') THEN 1 ELSE 0 END) as verified_deliveries
+        ")->first();
+        $invoicePeriodCount = $this->buildBaseQueueQuery(array_merge($filters, ['period_basis' => 'invoice']), $user)->count();
+
+        return [
+            'submitted' => (int) ($counts->submitted ?? 0),
+            'paid_notifications' => (int) ($counts->paid_notifications ?? 0),
+            'monthly_submissions' => (int) ($counts->submitted ?? 0) - (int) ($counts->paid_notifications ?? 0),
+            'verified_deliveries' => (int) ($counts->verified_deliveries ?? 0),
+            'invoice_period_submitted' => $invoicePeriodCount,
+        ];
     }
 
     /**
@@ -703,7 +747,7 @@ class InvoiceDeliveryQueueService
      */
     public function getDashboardKpiStats(string $period, object $user, array $filters = []): array
     {
-        $dt = \Carbon\Carbon::createFromFormat('Y-m', $period);
+        $dt = \Carbon\Carbon::createFromFormat('!Y-m', $period);
         $monthName = $dt ? $dt->format('F Y') : $period;
 
         $baseInv = DB::table('invoices as i')
@@ -734,13 +778,6 @@ class InvoiceDeliveryQueueService
                     ->whereIn('n.status', ['submitted', 'delivered', 'read', 'queued', 'processing']);
             });
 
-        // Actionable eligible ready query (verified contact + opt-in)
-        $actionableReadyQuery = (clone $readyQuery)
-            ->where('f.contact_verified', 1)
-            ->where('f.messaging_opt_in', 1)
-            ->whereNotNull('f.whatsapp')
-            ->where('f.whatsapp', '!=', '');
-
         // Ineligible query (missing verification / opt-in)
         $ineligibleQuery = (clone $readyQuery)
             ->where(function ($sub) {
@@ -750,8 +787,9 @@ class InvoiceDeliveryQueueService
                     ->orWhere('f.whatsapp', '');
             });
 
-        $actionableReadyCount = (clone $actionableReadyQuery)->distinct()->count('i.family_id');
-        $actionableInvoicesCount = (clone $actionableReadyQuery)->count('i.id');
+        $initialReadyQuery = $this->buildInitialReadyQuery(array_merge($filters, ['period' => $period]), $user);
+        $actionableReadyCount = (clone $initialReadyQuery)->distinct()->count('i.family_id');
+        $actionableInvoicesCount = (clone $initialReadyQuery)->count('i.id');
         $ineligibleCount = (clone $ineligibleQuery)->distinct()->count('i.family_id');
 
         // Paid Invoices (fully settled invoices for the selected period; includes prior unqueued for 2026-10)
@@ -828,21 +866,9 @@ class InvoiceDeliveryQueueService
         }
         $processingCount = $procQuery->count();
 
-        // Submitted / Sent (HTTP 200/202 accepted by n8n or delivered/read)
-        $sentQuery = DB::table('notifications as n')
-            ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
-            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
-            ->where('b.period_start', 'like', $period . '%')
-            ->whereIn('n.kind', ['monthly', 'paid'])
-            ->whereIn('n.status', ['submitted', 'delivered', 'read']);
-
-        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
-            $sentQuery->where('i.campus_id', $user->campus_id);
-            if (!empty($user->department_id)) {
-                $sentQuery->where('i.department_id', $user->department_id);
-            }
-        }
-        $submittedCount = $sentQuery->count();
+        // Campaign submissions are webhook acceptance, not verified WhatsApp delivery.
+        $submissionStats = $this->getCampaignSubmissionStats($period, $user, $filters);
+        $submittedCount = $submissionStats['submitted'];
 
         // Needs Attention (failed or blocked + contact ineligible unnotified)
         $attNotifQuery = DB::table('notifications as n')
@@ -873,7 +899,12 @@ class InvoiceDeliveryQueueService
             $scopedInvoices = $scopedRes['total_matched_invoices'] ?? 0;
         }
 
+        $coverageScope = (clone $baseInv)->distinct()->pluck('i.family_id')->all();
+        $coverageStats = app(InvoiceSubmissionCoverageService::class)->summarize($period, $user, $coverageScope);
+        $coverageStats['no_recorded_submission_families'] = count($coverageScope) - $coverageStats['covered_families'];
+
         return [
+            'coverage' => $coverageStats,
             'selected_period' => $period,
             'selected_month' => $monthName,
             'awaiting_review' => $actionableReadyCount,
@@ -883,6 +914,10 @@ class InvoiceDeliveryQueueService
             'paid_invoices' => $paidInvoicesCount,
             'processing' => $processingCount,
             'submitted' => $submittedCount,
+            'monthly_submissions' => $submissionStats['monthly_submissions'],
+            'paid_notifications' => $submissionStats['paid_notifications'],
+            'verified_deliveries' => $submissionStats['verified_deliveries'],
+            'invoice_period_submitted' => $submissionStats['invoice_period_submitted'],
             'attention' => $attentionCount,
             'contact_ineligible' => $ineligibleCount,
             'has_active_search' => $hasActiveSearch,
@@ -892,116 +927,24 @@ class InvoiceDeliveryQueueService
     }
 
     /**
-     * Get paginated active Ready to Send monthly family challans for selected billing month.
-     * Consolidates multi-invoice families into single monthly family delivery targets,
-     * properly accounting for all siblings, multi-currency balances, and previous unpaid dues.
+     * Use the exact initial batch selection for both Ready reporting and its visible table.
      */
+    public function buildInitialReadyQuery(array $filters, object $user): Builder
+    {
+        $filters = array_merge($filters, ['paid_only' => false, 'webhook_type' => 'monthly']);
+        $batchService = app(BatchDeliveryService::class);
+        $snapshot = $batchService->resolveFilteredSelection($filters, $user, ['whatsapp']);
+        $familyIds = array_column($snapshot['eligible_recipients'], 'family_id');
+        return $batchService->buildFilterQuery($filters, $user)
+            ->leftJoin('campuses as c', 'c.id', '=', 'i.campus_id')
+            ->whereIn('i.family_id', $familyIds);
+    }
+
     public function getReadyToSendChallans(array $filters, object $user, int $perPage = 25): LengthAwarePaginator
     {
         $period = !empty($filters['period']) ? $filters['period'] : $this->getLatestBillingMonth();
 
-        $q = DB::table('invoices as i')
-            ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
-            ->join('families as f', 'f.id', '=', 'i.family_id')
-            ->leftJoin('departments as d', 'd.id', '=', 'i.department_id')
-            ->leftJoin('campuses as c', 'c.id', '=', 'i.campus_id')
-            ->where('b.period_start', 'like', $period . '%')
-            ->where('i.status', '!=', 'paid')
-            ->whereRaw('i.total_minor > i.paid_minor')
-            ->whereNotIn('i.status', ['void', 'voided']);
-
-        // Scope check for campus/dept staff
-        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
-            $q->where('i.campus_id', $user->campus_id);
-            if (!empty($user->department_id)) {
-                $q->where('i.department_id', $user->department_id);
-            }
-        }
-
-        // Filters
-        if (!empty($filters['campus_id'])) {
-            $q->where('i.campus_id', (int)$filters['campus_id']);
-        }
-        if (!empty($filters['department_id'])) {
-            $q->where('i.department_id', (int)$filters['department_id']);
-        }
-
-        // Grade filter
-        if (!empty($filters['grade'])) {
-            $grade = $filters['grade'];
-            $q->whereExists(function ($sub) use ($grade) {
-                $sub->select(DB::raw(1))
-                    ->from('invoice_items as sub_ii')
-                    ->leftJoin('enrollments as sub_e', 'sub_e.id', '=', 'sub_ii.enrollment_id')
-                    ->whereColumn('sub_ii.invoice_id', 'i.id')
-                    ->where(function ($gq) use ($grade) {
-                        $gq->where('sub_e.grade_label', $grade)
-                            ->orWhereExists(function ($eq) use ($grade) {
-                                $eq->select(DB::raw(1))
-                                    ->from('enrollments as active_e')
-                                    ->whereColumn('active_e.student_id', 'sub_ii.student_id')
-                                    ->where('active_e.status', 'active')
-                                    ->where('active_e.grade_label', $grade);
-                            });
-                    });
-            });
-        }
-
-        // Search filter (handles exact family code prioritization + universal search)
-        if (!empty($filters['search'])) {
-            $term = trim($filters['search']);
-            $isExactFamily = DB::table('families')->where('family_code', $term)->exists();
-            if ($isExactFamily) {
-                $q->where('f.family_code', $term);
-            } else {
-                $q->where(function ($sq) use ($term) {
-                    $sq->where('i.invoice_number', 'like', "%{$term}%")
-                       ->orWhere('f.family_code', 'like', "%{$term}%")
-                       ->orWhere('f.guardian_name', 'like', "%{$term}%")
-                       ->orWhere('f.whatsapp', 'like', "%{$term}%")
-                       ->orWhere('f.email', 'like', "%{$term}%")
-                       ->orWhereExists(function ($stSub) use ($term) {
-                           $stSub->selectRaw('1')
-                               ->from('invoice_items as st_ii')
-                               ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
-                               ->whereColumn('st_ii.invoice_id', 'i.id')
-                               ->where(function ($stQuery) use ($term) {
-                                   $stQuery->where('st_s.name', 'like', "%{$term}%")
-                                           ->orWhere('st_s.gr_number', 'like', "%{$term}%");
-                               });
-                       });
-                });
-            }
-        }
-
-        // Contact eligibility filter
-        if (!empty($filters['contact_status']) && $filters['contact_status'] !== 'all') {
-            if ($filters['contact_status'] === 'eligible_only') {
-                $q->where('f.contact_verified', 1)->where('f.messaging_opt_in', 1)->whereNotNull('f.whatsapp')->where('f.whatsapp', '!=', '');
-            } elseif ($filters['contact_status'] === 'ineligible_only') {
-                $q->where(function ($sub) {
-                    $sub->where('f.contact_verified', 0)
-                        ->orWhere('f.messaging_opt_in', 0)
-                        ->orWhereNull('f.whatsapp')
-                        ->orWhere('f.whatsapp', '');
-                });
-            }
-        } else {
-            // Default in Ready to Send: only actionable eligible families
-            $q->where('f.contact_verified', 1)->where('f.messaging_opt_in', 1)->whereNotNull('f.whatsapp')->where('f.whatsapp', '!=', '');
-        }
-
-        // Exclude if ANY invoice of this family for this cycle already has an active notification
-        $q->whereNotExists(function ($sub) use ($period) {
-            $sub->select(DB::raw(1))
-                ->from('notifications as n')
-                ->join('invoices as ni', 'ni.id', '=', 'n.invoice_id')
-                ->join('billing_runs as nb', 'nb.id', '=', 'ni.billing_run_id')
-                ->whereColumn('ni.family_id', 'i.family_id')
-                ->where('nb.period_start', 'like', $period . '%')
-                ->where('n.kind', 'monthly')
-                ->whereIn('n.status', ['submitted', 'delivered', 'read', 'queued', 'processing']);
-        });
+        $q = $this->buildInitialReadyQuery(array_merge($filters, ['period' => $period]), $user);
 
         // Paginate by distinct families
         $familyIdsQuery = (clone $q)->select('i.family_id')->distinct();

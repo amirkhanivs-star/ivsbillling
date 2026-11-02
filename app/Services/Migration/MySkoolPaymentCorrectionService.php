@@ -25,6 +25,8 @@ class MySkoolPaymentCorrectionService
     public const ACTION_REAPPLY_SETTLEMENT = 'reapply_settlement';
     public const ACTION_MARK_UNDER_REVIEW = 'mark_under_review';
     public const ACTION_MARK_DISPUTED = 'mark_disputed';
+    public const ACTION_RESOLVE_DISPUTE = 'resolve_dispute';
+    public const ACTION_REJECT_DISPUTE = 'reject_dispute';
     public const ACTION_MARK_CORRECTED = 'mark_corrected';
     public const ACTION_PROPOSE_REASSIGNMENT = 'propose_reassignment';
     public const ACTION_PROPOSE_PRE_CUTOFF_COMPENSATION = 'propose_pre_cutoff_compensation';
@@ -680,6 +682,31 @@ class MySkoolPaymentCorrectionService
             $remainingReversibleMinor = max(0, min($effectivePaidMinor, $activeSettledCap, $itemPaidCap));
         }
 
+        // Closed disputes may predate resolution correction records. Their stale
+        // mark_disputed entry must not override the receipt's ledger-derived status.
+        $latestDispute = $schema->hasTable('myskool_disputes')
+            ? $db->table('myskool_disputes')
+                ->where('qa_staged_collection_id', $stagedCollectionId)
+                ->orderByDesc('id')
+                ->first()
+            : null;
+        $isDisputeClosed = $latestDispute
+            && in_array((string) $latestDispute->status, ['rejected', 'resolved'], true);
+
+        if ($isReconciled) {
+            $currentReceiptStatus = $previouslyReversedMinor > 0 ? self::STATUS_PARTIALLY_REVERSED : self::STATUS_RECONCILED;
+            $currentStatusLabel = $previouslyReversedMinor > 0 ? 'Partially Reversed' : 'Reconciled';
+        } elseif ($reversedSettlement) {
+            $currentReceiptStatus = self::STATUS_REVERSED;
+            $currentStatusLabel = 'Reversed';
+        } elseif ($hasCurrencyConflict) {
+            $currentReceiptStatus = self::STATUS_UNDER_REVIEW;
+            $currentStatusLabel = 'Under Review (Currency Conflict)';
+        } elseif ($isPreCutoff) {
+            $currentReceiptStatus = self::STATUS_HISTORICAL_PRE_CUTOFF;
+            $currentStatusLabel = 'Pre-Cutoff Historical (Reflected in OB)';
+        }
+
         if ($latestCorrection) {
             $corrResult = (string) $latestCorrection['resulting_status'];
             if ($corrResult === self::STATUS_REVERSED && !$isReconciled) {
@@ -688,7 +715,7 @@ class MySkoolPaymentCorrectionService
             } elseif ($corrResult === self::STATUS_PARTIALLY_REVERSED && $isReconciled) {
                 $currentReceiptStatus = self::STATUS_PARTIALLY_REVERSED;
                 $currentStatusLabel = 'Partially Reversed';
-            } elseif ($corrResult === self::STATUS_DISPUTED) {
+            } elseif ($corrResult === self::STATUS_DISPUTED && !$isDisputeClosed) {
                 $currentReceiptStatus = self::STATUS_DISPUTED;
                 $currentStatusLabel = 'Disputed';
             } elseif ($corrResult === self::STATUS_UNDER_REVIEW) {
@@ -702,20 +729,6 @@ class MySkoolPaymentCorrectionService
                 $currentStatusLabel = $previouslyReversedMinor > 0
                     ? 'Partially Reversed'
                     : ($corrResult === self::STATUS_REAPPLIED ? 'Reconciled (Reapplied)' : 'Reconciled');
-            }
-        } else {
-            if ($isReconciled) {
-                $currentReceiptStatus = $previouslyReversedMinor > 0 ? self::STATUS_PARTIALLY_REVERSED : self::STATUS_RECONCILED;
-                $currentStatusLabel = $previouslyReversedMinor > 0 ? 'Partially Reversed' : 'Reconciled';
-            } elseif ($reversedSettlement) {
-                $currentReceiptStatus = self::STATUS_REVERSED;
-                $currentStatusLabel = 'Reversed';
-            } elseif ($hasCurrencyConflict) {
-                $currentReceiptStatus = self::STATUS_UNDER_REVIEW;
-                $currentStatusLabel = 'Under Review (Currency Conflict)';
-            } elseif ($isPreCutoff) {
-                $currentReceiptStatus = self::STATUS_HISTORICAL_PRE_CUTOFF;
-                $currentStatusLabel = 'Pre-Cutoff Historical (Reflected in OB)';
             }
         }
 
@@ -3475,13 +3488,21 @@ class MySkoolPaymentCorrectionService
             ]);
         }
 
-        return $db->transaction(function () use ($db, $schema, $disputeId, $newStatus, $notes, $actorId) {
+        return $db->transaction(function () use ($db, $schema, $conn, $disputeId, $newStatus, $notes, $actorId) {
             $dispute = $db->table('myskool_disputes')->where('id', $disputeId)->lockForUpdate()->first();
             if (!$dispute) {
                 throw ValidationException::withMessages([
                     'dispute_id' => ["Dispute case #{$disputeId} not found."],
                 ]);
             }
+
+            $recordClosure = (string) $dispute->status !== $newStatus
+                && in_array($newStatus, ['rejected', 'resolved'], true)
+                && !empty($dispute->qa_staged_collection_id)
+                && $schema->hasTable('qa_myskool_payment_corrections');
+            $beforeInspection = $recordClosure
+                ? $this->inspect((int) $dispute->qa_staged_collection_id, $conn, true)
+                : null;
 
             $now = now();
             $updateData = [
@@ -3499,6 +3520,45 @@ class MySkoolPaymentCorrectionService
             }
 
             $db->table('myskool_disputes')->where('id', $disputeId)->update($updateData);
+
+            if ($recordClosure && !empty($beforeInspection['exists'])) {
+                $afterInspection = $this->inspect((int) $dispute->qa_staged_collection_id, $conn, true);
+                $lastCorr = $db->table('qa_myskool_payment_corrections')
+                    ->where('qa_staged_collection_id', $dispute->qa_staged_collection_id)
+                    ->orderByDesc('sequence_no')
+                    ->orderByDesc('id')
+                    ->lockForUpdate()
+                    ->first();
+                $beforeState = [
+                    'dispute_id' => $disputeId,
+                    'dispute_code' => (string) $dispute->dispute_code,
+                    'dispute_status' => (string) $dispute->status,
+                    'receipt_status' => $beforeInspection['current_receipt_status'],
+                    'item_paid_minor' => (int) ($beforeInspection['item_paid_minor'] ?? 0),
+                    'invoice_paid_minor' => (int) ($beforeInspection['invoice_paid_minor'] ?? 0),
+                ];
+                $afterState = array_merge($beforeState, [
+                    'dispute_status' => $newStatus,
+                    'receipt_status' => $afterInspection['current_receipt_status'],
+                ]);
+
+                $this->insertImmutableCorrectionRecord(
+                    $db,
+                    $schema,
+                    $afterInspection,
+                    $lastCorr ? (int) $lastCorr->sequence_no + 1 : 1,
+                    $lastCorr ? (string) $lastCorr->correction_id : null,
+                    $newStatus === 'resolved' ? self::ACTION_RESOLVE_DISPUTE : self::ACTION_REJECT_DISPUTE,
+                    $afterInspection['current_receipt_status'],
+                    null,
+                    $beforeState,
+                    $afterState,
+                    $notes !== '' ? $notes : "Dispute {$dispute->dispute_code} {$newStatus}.",
+                    $actorId,
+                    cumulativeReversedMinor: (int) $afterInspection['previously_reversed_minor'],
+                    remainingPaidMinor: (int) $afterInspection['effective_paid_minor']
+                );
+            }
 
             if ($schema->hasTable('audit_logs')) {
                 $db->table('audit_logs')->insert([

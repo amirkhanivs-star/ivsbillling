@@ -711,6 +711,19 @@ class BillingController {
    }
   }
 
+  // The legacy page-send path must enforce the same cross-campaign initial coverage guard.
+  if ($webhookType === 'monthly') {
+   $coverageService = app(\App\Services\InvoiceSubmissionCoverageService::class);
+   foreach ($invoices as $invoice) {
+    $period = substr((string) DB::table('billing_runs')->where('id', $invoice->billing_run_id)->value('period_start'), 0, 7);
+    try {
+     $coverageService->assertInitialAllowed((int) $invoice->family_id, $period, $r->user());
+    } catch (\RuntimeException $e) {
+     throw \Illuminate\Validation\ValidationException::withMessages(['invoice_ids' => $e->getMessage()]);
+    }
+   }
+  }
+
   $familyEligibilityMap = ($webhookType === 'monthly')
    ? $consolidatedBuilder->evaluateFamiliesDispatchEligibility(
        $invoices->pluck('family_id')->unique()->filter()->values()->all(),
@@ -748,6 +761,12 @@ class BillingController {
      $invoice, $channels, $channelsStr, $webhookType, $failureReason, $isIntegrityHold, $r,
      &$queuedCount, &$retriedCount, &$blockedCount, &$skippedQueued, &$skippedSubmitted, &$skippedDelivered, &$notificationIdToDispatch
     ) {
+     if ($webhookType === 'monthly') {
+      DB::table('families')->where('id', $invoice->family_id)->lockForUpdate()->first();
+      $period = substr((string) DB::table('billing_runs')->where('id', $invoice->billing_run_id)->value('period_start'), 0, 7);
+      app(\App\Services\InvoiceSubmissionCoverageService::class)->assertInitialAllowed((int) $invoice->family_id, $period, $r->user());
+     }
+
      // Look up existing notification using complete uniqueness identity: invoice_id, channel, kind
      $existing = DB::table('notifications')
       ->where('invoice_id', $invoice->id)

@@ -31,6 +31,14 @@ class DispatchInvoiceToN8n implements ShouldQueue
             return;
         }
 
+        if ($notification->is_superseded) {
+            DB::table('notifications')->where('id', $notification->id)->update([
+                'status' => 'superseded',
+                'updated_at' => now(),
+            ]);
+            return;
+        }
+
         if (config('services.notifications_disabled', false) || DatabaseSafetyGuard::isQaDatabase()) {
             DB::table('notifications')->where('id', $notification->id)->update([
                 'status' => 'qa_suppressed',

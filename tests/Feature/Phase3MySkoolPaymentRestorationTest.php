@@ -659,6 +659,115 @@ class Phase3MySkoolPaymentRestorationTest extends TestCase
             ->assertJsonPath('remaining_paid_minor', 16500);
     }
 
+    public function test_closed_dispute_preserves_currency_and_newer_dispute_blocks(): void
+    {
+        $fx = $this->seedReceipt24083Fixture(false);
+        $colId = $fx['col_arham_jul'];
+        $dispute = $this->postJson('/challan/dispute-myskool-payment', [
+            'qa_staged_collection_id' => $colId,
+            'reason' => 'Review historical allocation before restoration.',
+        ])->assertOk()->json();
+        $this->postJson('/challan/disputes/' . $dispute['dispute_id'] . '/status', ['status' => 'rejected'])->assertOk();
+        DB::table('qa_staged_collections')->where('id', $colId)->update(['has_currency_conflict' => true]);
+        $this->getJson('/challan/inspect-myskool-payment/' . $colId)->assertOk()
+            ->assertJsonPath('allocation_status', 'requires_review')
+            ->assertJsonPath('can_reconcile_lineage', false);
+        DB::table('qa_staged_collections')->where('id', $colId)->update(['has_currency_conflict' => false]);
+        $this->postJson('/challan/dispute-myskool-payment', [
+            'qa_staged_collection_id' => $colId,
+            'reason' => 'New dispute requires another allocation review.',
+        ])->assertOk();
+        // Closing the older case cannot clear the newer open dispute.
+        $this->postJson('/challan/disputes/' . $dispute['dispute_id'] . '/status', ['status' => 'resolved'])->assertOk();
+        $this->getJson('/challan/inspect-myskool-payment/' . $colId)->assertOk()
+            ->assertJsonPath('current_receipt_status', 'disputed')
+            ->assertJsonPath('can_reconcile_lineage', false);
+    }
+
+    public static function closedDisputeCases(): array
+    {
+        $cases = [];
+        foreach (['rejected', 'resolved'] as $status) {
+            foreach ([true, false] as $preCutoff) {
+                foreach ([true, false] as $legacy) {
+                    $cases[$status . ($preCutoff ? '-pre' : '-post') . ($legacy ? '-legacy' : '-new')] = [$status, $preCutoff, $legacy];
+                }
+            }
+        }
+        return $cases;
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('closedDisputeCases')]
+    public function test_closed_dispute_allows_lineage_reconciliation_and_restoration(string $status, bool $preCutoff, bool $legacy): void
+    {
+        $fx = $this->seedReceipt24083Fixture(false);
+        $colId = $fx['col_arham_jul'];
+        if (!$preCutoff) {
+            DB::table('qa_staged_collections')->where('id', $colId)->update([
+                'payment_date_parsed' => '2026-10-28',
+                'payment_date_raw' => '28 Oct 2026',
+            ]);
+        }
+        $beforeInvoice = DB::table('invoices')->where('id', $fx['sar_invoice_id'])->first();
+        $dispute = $this->postJson('/challan/dispute-myskool-payment', [
+            'qa_staged_collection_id' => $colId,
+            'reason' => 'Review disputed historical allocation.',
+        ])->assertOk()->json();
+        $mark = DB::table('qa_myskool_payment_corrections')->where('correction_id', $dispute['correction_id'])->first();
+
+        $this->getJson('/challan/inspect-myskool-payment/' . $colId)->assertOk()
+            ->assertJsonPath('allocation_status', 'requires_review')
+            ->assertJsonPath('can_reconcile_lineage', false);
+
+        if ($legacy) {
+            // Reproduce closures written before resolution corrections were added.
+            DB::table('myskool_disputes')->where('id', $dispute['dispute_id'])->update(['status' => $status]);
+        } else {
+            $this->postJson('/challan/disputes/' . $dispute['dispute_id'] . '/status', [
+                'status' => $status,
+                'review_notes' => 'Historical dispute review completed.',
+            ])->assertOk();
+            $closure = DB::table('qa_myskool_payment_corrections')->where('qa_staged_collection_id', $colId)->orderByDesc('sequence_no')->first();
+            $this->assertSame($status === 'resolved' ? 'resolve_dispute' : 'reject_dispute', $closure->action_type);
+            $this->assertSame($preCutoff ? 'historical_pre_cutoff' : 'unreconciled_post_cutoff', $closure->resulting_status);
+            $this->assertSame($mark->correction_id, $closure->previous_correction_id);
+            $this->assertSame((int) $mark->sequence_no + 1, (int) $closure->sequence_no);
+            $this->assertSame('disputed', json_decode($closure->before_state_json, true)['receipt_status']);
+            $this->assertSame($status, json_decode($closure->after_state_json, true)['dispute_status']);
+            $this->assertSame($this->adminUser->id, (int) $closure->acted_by);
+            // Repeating a status update must not append another closure correction.
+            $this->postJson('/challan/disputes/' . $dispute['dispute_id'] . '/status', ['status' => $status])->assertOk();
+            $this->assertSame(2, DB::table('qa_myskool_payment_corrections')->where('qa_staged_collection_id', $colId)->count());
+        }
+        $this->assertEquals($mark, DB::table('qa_myskool_payment_corrections')->where('id', $mark->id)->first());
+        $this->assertEquals($beforeInvoice, DB::table('invoices')->where('id', $fx['sar_invoice_id'])->first());
+
+        // These flags drive the warning and Reconcile Lineage First button.
+        $this->getJson('/challan/inspect-myskool-payment/' . $colId)->assertOk()
+            ->assertJsonPath('current_receipt_status', $preCutoff ? 'historical_pre_cutoff' : 'unreconciled_post_cutoff')
+            ->assertJsonPath('allocation_status', 'requires_reconciliation')
+            ->assertJsonPath('requires_reconciliation', true)
+            ->assertJsonPath('can_reconcile_lineage', true)
+            ->assertJsonPath('is_credited_in_ledger', false);
+        $this->postJson('/challan/correct-myskool-payment', [
+            'qa_staged_collection_id' => $colId,
+            'action_type' => 'reconcile_lineage',
+            'reason' => 'Reconcile historical allocation after dispute closure.',
+        ])->assertOk()->assertJsonPath('success', true);
+        // Reloading the panel after reconciliation now exposes the Restore form.
+        $this->getJson('/challan/inspect-myskool-payment/' . $colId)->assertOk()
+            ->assertJsonPath('is_credited_in_ledger', true)
+            ->assertJsonPath('is_safe_to_reverse', true)
+            ->assertJsonPath('remaining_reversible_minor', 26500);
+        $this->postJson('/challan/restore-myskool-payment', [
+            'qa_staged_collection_id' => $colId,
+            'restoration_mode' => 'partial',
+            'restore_amount' => 100,
+            'reason' => 'Restore reviewed historical payment allocation.',
+        ])->assertOk()->assertJsonPath('reversed_amount_minor', 10000)
+            ->assertJsonPath('remaining_paid_minor', 16500);
+    }
+
     /**
      * Test 10 & 11: Native IQRA reversals continue working and mixed-currency balances (SAR vs AED) remain independent.
      */
@@ -835,6 +944,14 @@ class Phase3MySkoolPaymentRestorationTest extends TestCase
         ]);
         $resolveResp->assertOk();
         $this->assertSame('resolved', DB::table('myskool_disputes')->where('id', $disputeRow->id)->value('status'));
+        $this->getJson('/challan/inspect-myskool-payment/' . $fx['col_arham_jul'])->assertOk()
+            ->assertJsonPath('current_receipt_status', 'reconciled')
+            ->assertJsonPath('allocation_status', 'paid')
+            ->assertJsonPath('is_safe_to_reverse', true);
+        $this->assertSame('reconciled', DB::table('qa_myskool_payment_corrections')
+            ->where('qa_staged_collection_id', $fx['col_arham_jul'])
+            ->orderByDesc('sequence_no')->value('resulting_status'));
+
     }
 
     /**

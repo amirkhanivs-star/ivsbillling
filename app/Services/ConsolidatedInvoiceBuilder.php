@@ -247,7 +247,7 @@ class ConsolidatedInvoiceBuilder
                         $lKey = "{$curr}|{$itemMonth}";
                         $isLaterOverdue = ($itemDue !== null && $itemDue < $todayStr);
                         if (!isset($laterMonthsMap[$lKey])) {
-                            $dt = Carbon::createFromFormat('Y-m', $itemMonth);
+                            $dt = Carbon::createFromFormat('!Y-m', $itemMonth);
                             $laterMonthsMap[$lKey] = [
                                 'month' => $itemMonth,
                                 'month_label' => $dt ? $dt->format('M-y') : $itemMonth,
@@ -269,7 +269,7 @@ class ConsolidatedInvoiceBuilder
                         $mKey = $itemMonth ?: 'OB';
                         $pKey = "{$curr}|{$mKey}";
                         if (!isset($prevMonthsMap[$pKey])) {
-                            $dt = $itemMonth ? Carbon::createFromFormat('Y-m', $itemMonth) : null;
+                            $dt = $itemMonth ? Carbon::createFromFormat('!Y-m', $itemMonth) : null;
                             $prevMonthsMap[$pKey] = [
                                 'month' => $mKey,
                                 'month_label' => $dt ? $dt->format('M-y') : 'Opening',
