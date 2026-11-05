@@ -99,7 +99,8 @@ class StudentAdmissionController
             'campus_id'=>$en?->campus_id,
             'department_id'=>$en?->department_id,'grade_label'=>$en?->grade_label,
             'section_current'=>$resolvedSectionCurrent,
-            'subject_name'=>$en?->subject_name,'class_days_per_week'=>$en?->class_days_per_week,
+            'subject_name'=>$latestPlan?->subject_name ?? $en?->subject_name,
+            'class_days_per_week'=>$latestPlan?->class_days_per_week ?? $en?->class_days_per_week,
             'currency'=>$currentCurrency ?: 'SAR',
             'monthly_fee'=>$monthlyFeeFormatted,
             'contact_verified'=>(bool)($family?->contact_verified ?? false),
@@ -149,6 +150,10 @@ class StudentAdmissionController
             'registration_date'=>'nullable|date','session'=>'nullable|string|max:40',
             'class_admitted'=>'nullable|string|max:200','section_admitted'=>'nullable|string|max:120',
             'section_current'=>'nullable|string|max:120','grade_label'=>'required|string|max:200',
+            'campus_id'=>'nullable|integer|exists:campuses,id',
+            'department_id'=>'nullable|integer|exists:departments,id',
+            'subject_name'=>'nullable|string|max:150',
+            'class_days_per_week'=>'nullable|integer|between:1,7',
             'challan_due_date'=>'nullable|date','b_form'=>'nullable|string|max:80',
             'roll_number'=>'nullable|string|max:80','house'=>'nullable|string|max:120',
             'phone_number'=>'nullable|string|max:30','readmission_date'=>'nullable|date',
@@ -163,6 +168,26 @@ class StudentAdmissionController
             ->orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
             ->orderByDesc('id')
             ->first();
+
+        $oldDepartmentId = (int)($en?->department_id ?? 0);
+        $newDepartmentId = $request->filled('department_id') ? (int)$request->input('department_id') : $oldDepartmentId;
+        $departmentChanged = ($en && $newDepartmentId > 0 && $newDepartmentId !== $oldDepartmentId);
+        $newCampusId = $request->filled('campus_id') ? (int)$request->input('campus_id') : (int)($en?->campus_id ?? 1);
+
+        if ($departmentChanged) {
+            abort_unless(
+                in_array($request->user()->role, ['super_admin', 'finance_admin'], true) ||
+                $request->user()->canAccessDepartment($newDepartmentId, $newCampusId),
+                403,
+                'Changing student department requires Super Admin, Finance Admin, or authorized department privileges.'
+            );
+        }
+
+        $targetDeptId = $newDepartmentId ?: ($oldDepartmentId ?: 1);
+        $deptCode = DB::table('departments')->where('id', $targetDeptId)->value('code') ?? 'school';
+        $subjectName = ($deptCode === 'tuition') ? (trim((string)$request->input('subject_name', '')) ?: null) : null;
+        $classDaysPerWeek = ($deptCode === 'quran') ? ($request->filled('class_days_per_week') ? (int)$request->input('class_days_per_week') : null) : null;
+
         $monthlyFeeType = DB::table('fee_types')->where('code', 'monthly')->first();
         $latestPlan = null;
         if ($en && $monthlyFeeType) {
@@ -198,8 +223,10 @@ class StudentAdmissionController
             );
         }
 
+        $planOrDeptChanged = ($feePlanChanged || $departmentChanged);
+
         $notice = null;
-        DB::transaction(function() use($s,$student,$d,$request,$en,$monthlyFeeType,$latestPlan,$oldMonthlyFeeMinor,$newMonthlyFeeMinor,$feeChanged,$oldCurrency,$newCurrency,$currencyChanged,$feePlanChanged,&$notice){
+        DB::transaction(function() use($s,$student,$d,$request,$en,$monthlyFeeType,$latestPlan,$oldMonthlyFeeMinor,$newMonthlyFeeMinor,$feeChanged,$oldCurrency,$newCurrency,$currencyChanged,$feePlanChanged,$oldDepartmentId,$newDepartmentId,$departmentChanged,$newCampusId,$targetDeptId,$deptCode,$subjectName,$classDaysPerWeek,$planOrDeptChanged,&$notice){
             $curFamily=DB::table('families')->where('id',$s->family_id)->lockForUpdate()->first();
             $code=trim($d['family_code']??'')?:null;
             $targetFamily=$code?DB::table('families')->where('family_code',$code)->lockForUpdate()->first():null;
@@ -472,45 +499,82 @@ class StudentAdmissionController
                 : null;
             $oldGradeLabel = $en?->grade_label;
 
-            if ($en) {
-                $programId = DB::table('programs')
-                    ->where('department_id', $en->department_id)
-                    ->where('name', $newGradeLabel)
-                    ->value('id');
-                if (!$programId) {
-                    $programId = DB::table('programs')->insertGetId([
-                        'department_id' => $en->department_id,
-                        'name' => $newGradeLabel,
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ]);
-                }
-
-                $sectionId = null;
-                if ($sectionCurrent !== null) {
-                    $sectionId = DB::table('sections')
-                        ->where('program_id', $programId)
-                        ->where('name', $sectionCurrent)
-                        ->value('id');
-                    if (!$sectionId) {
-                        $sectionId = DB::table('sections')->insertGetId([
-                            'program_id' => $programId,
-                            'name' => $sectionCurrent,
-                            'created_at' => now(),
-                            'updated_at' => now(),
-                        ]);
-                    }
-                }
-
-                DB::table('enrollments')->where('id', $en->id)->update([
-                    'program_id' => $programId,
-                    'section_id' => $sectionId,
-                    'grade_label' => $newGradeLabel,
+            $programId = DB::table('programs')
+                ->where('department_id', $targetDeptId)
+                ->where('name', $newGradeLabel)
+                ->value('id');
+            if (!$programId) {
+                $programId = DB::table('programs')->insertGetId([
+                    'department_id' => $targetDeptId,
+                    'name' => $newGradeLabel,
+                    'created_at' => now(),
                     'updated_at' => now(),
                 ]);
             }
 
-            if ($feePlanChanged && $en) {
+            $sectionId = null;
+            if ($sectionCurrent !== null) {
+                $sectionId = DB::table('sections')
+                    ->where('program_id', $programId)
+                    ->where('name', $sectionCurrent)
+                    ->value('id');
+                if (!$sectionId) {
+                    $sectionId = DB::table('sections')->insertGetId([
+                        'program_id' => $programId,
+                        'name' => $sectionCurrent,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+            }
+
+            if ($en && !$planOrDeptChanged) {
+                DB::table('enrollments')->where('id', $en->id)->update([
+                    'campus_id' => $newCampusId,
+                    'program_id' => $programId,
+                    'section_id' => $sectionId,
+                    'grade_label' => $newGradeLabel,
+                    'subject_name' => $subjectName,
+                    'class_days_per_week' => $classDaysPerWeek,
+                    'updated_at' => now(),
+                ]);
+            } elseif (!$en) {
+                $enrollmentId = DB::table('enrollments')->insertGetId([
+                    'student_id' => $student,
+                    'campus_id' => $newCampusId,
+                    'department_id' => $targetDeptId,
+                    'program_id' => $programId,
+                    'section_id' => $sectionId,
+                    'grade_label' => $newGradeLabel,
+                    'subject_name' => $subjectName,
+                    'class_days_per_week' => $classDaysPerWeek,
+                    'currency' => $newCurrency ?: 'SAR',
+                    'monthly_fee_minor' => $newMonthlyFeeMinor ?: 0,
+                    'status' => 'active',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                if ($newMonthlyFeeMinor > 0) {
+                    DB::table('fee_plan_items')->insertGetId([
+                        'enrollment_id' => $enrollmentId,
+                        'fee_type_id' => $monthlyFeeType ? $monthlyFeeType->id : 1,
+                        'description' => ($deptCode === 'tuition' && !empty($subjectName)) ? "Tuition Fee - {$subjectName}" : 'Monthly Fee',
+                        'frequency' => 'monthly',
+                        'subject_name' => $subjectName,
+                        'class_days_per_week' => $classDaysPerWeek,
+                        'currency' => $newCurrency ?: 'SAR',
+                        'amount_minor' => $newMonthlyFeeMinor,
+                        'effective_from' => now()->startOfMonth()->toDateString(),
+                        'effective_to' => null,
+                        'is_active' => true,
+                        'status' => 'active',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+            }
+
+            if ($planOrDeptChanged && $en) {
                 $latestItem = $monthlyFeeType ? DB::table('invoice_items as ii')
                     ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
                     ->where('ii.student_id', $student)
@@ -535,13 +599,17 @@ class StudentAdmissionController
                     ->where('is_active', true)
                     ->get();
 
+                $planDescription = ($deptCode === 'tuition' && !empty($subjectName))
+                    ? "Tuition Fee - {$subjectName}"
+                    : ($latestPlan ? ($latestPlan->description ?: 'Monthly Fee') : 'Monthly Fee');
+
                 $targetPlanId = DB::table('fee_plan_items')->insertGetId([
                     'enrollment_id' => $en->id,
                     'fee_type_id' => $monthlyFeeType ? $monthlyFeeType->id : 1,
-                    'description' => $latestPlan ? ($latestPlan->description ?: 'Monthly Fee') : 'Monthly Fee',
+                    'description' => $planDescription,
                     'frequency' => 'monthly',
-                    'subject_name' => $latestPlan ? $latestPlan->subject_name : null,
-                    'class_days_per_week' => $latestPlan ? $latestPlan->class_days_per_week : null,
+                    'subject_name' => $subjectName,
+                    'class_days_per_week' => $classDaysPerWeek,
                     'currency' => $newCurrency,
                     'amount_minor' => $newMonthlyFeeMinor,
                     'discount_kind' => $latestPlan ? $latestPlan->discount_kind : null,
@@ -576,7 +644,12 @@ class StudentAdmissionController
                 }
 
                 $history = json_decode($en->fee_history ?: '[]', true) ?: [];
-                $history[] = [
+                $oldDept = DB::table('departments')->where('id', $oldDepartmentId)->first();
+                $newDept = DB::table('departments')->where('id', $newDepartmentId)->first();
+                $oldDeptName = $oldDept?->name ?? 'Unknown';
+                $newDeptName = $newDept?->name ?? 'Unknown';
+
+                $historyEntry = [
                     'previous_minor' => $oldMonthlyFeeMinor,
                     'new_minor' => $newMonthlyFeeMinor,
                     'previous_currency' => $oldCurrency,
@@ -586,18 +659,41 @@ class StudentAdmissionController
                     'effective_from' => $effectiveFromDate,
                     'user_id' => $request->user()->id,
                     'administrator' => $request->user()->name,
-                    'reason' => "Monthly fee and currency updated via registration edit form. Effective from {$effectivePeriodLabel}.",
                     'timestamp' => now()->toDateTimeString(),
                 ];
 
+                if ($departmentChanged && $feePlanChanged) {
+                    $historyEntry['previous_department_id'] = $oldDepartmentId;
+                    $historyEntry['new_department_id'] = $newDepartmentId;
+                    $historyEntry['previous_department'] = $oldDeptName;
+                    $historyEntry['new_department'] = $newDeptName;
+                    $historyEntry['reason'] = "Department changed from {$oldDeptName} to {$newDeptName} and monthly fee updated via registration edit form. Effective from {$effectivePeriodLabel}.";
+                } elseif ($departmentChanged) {
+                    $historyEntry['previous_department_id'] = $oldDepartmentId;
+                    $historyEntry['new_department_id'] = $newDepartmentId;
+                    $historyEntry['previous_department'] = $oldDeptName;
+                    $historyEntry['new_department'] = $newDeptName;
+                    $historyEntry['reason'] = "Department changed from {$oldDeptName} to {$newDeptName} via registration edit form. Effective from {$effectivePeriodLabel}.";
+                } else {
+                    $historyEntry['reason'] = "Monthly fee and currency updated via registration edit form. Effective from {$effectivePeriodLabel}.";
+                }
+                $history[] = $historyEntry;
+
                 DB::table('enrollments')->where('id', $en->id)->update([
+                    'campus_id' => $newCampusId,
+                    'department_id' => $targetDeptId,
+                    'program_id' => $programId,
+                    'section_id' => $sectionId,
+                    'grade_label' => $newGradeLabel,
+                    'subject_name' => $subjectName,
+                    'class_days_per_week' => $classDaysPerWeek,
                     'monthly_fee_minor' => $newMonthlyFeeMinor,
                     'currency' => $newCurrency,
                     'fee_history' => json_encode($history),
                     'updated_at' => now(),
                 ]);
 
-                if ($monthlyFeeType) {
+                if ($feeChanged && $monthlyFeeType) {
                     DB::table('fee_rate_changes')->insert([
                         'fee_type_id' => $monthlyFeeType->id,
                         'user_id' => $request->user()->id,
@@ -612,35 +708,83 @@ class StudentAdmissionController
                     ]);
                 }
 
-                DB::table('audit_logs')->insert([
-                    'actor_id' => $request->user()->id,
-                    'action' => 'student_monthly_fee_updated',
-                    'subject_type' => 'student',
-                    'subject_id' => $student,
-                    'metadata' => json_encode([
-                        'previous_minor' => $oldMonthlyFeeMinor,
-                        'new_minor' => $newMonthlyFeeMinor,
-                        'previous_currency' => $oldCurrency,
-                        'new_currency' => $newCurrency,
-                        'currency' => $newCurrency,
-                        'effective_period' => $effectivePeriodLabel,
-                        'effective_from' => $effectiveFromDate,
-                        'administrator' => $request->user()->name,
-                        'administrator_id' => $request->user()->id,
-                        'reason' => "Monthly fee and currency updated via registration edit form. Effective from {$effectivePeriodLabel}.",
-                        'enrollment_id' => $en->id,
-                        'fee_plan_item_id' => $targetPlanId,
-                    ]),
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
+                if ($departmentChanged) {
+                    DB::table('audit_logs')->insert([
+                        'actor_id' => $request->user()->id,
+                        'action' => 'student_department_updated',
+                        'subject_type' => 'student',
+                        'subject_id' => $student,
+                        'metadata' => json_encode([
+                            'previous_department_id' => $oldDepartmentId,
+                            'new_department_id' => $newDepartmentId,
+                            'previous_department' => $oldDeptName,
+                            'new_department' => $newDeptName,
+                            'effective_period' => $effectivePeriodLabel,
+                            'effective_from' => $effectiveFromDate,
+                            'administrator' => $request->user()->name,
+                            'administrator_id' => $request->user()->id,
+                            'reason' => "Department changed from {$oldDeptName} to {$newDeptName} via registration edit form. Effective from {$effectivePeriodLabel}.",
+                            'enrollment_id' => $en->id,
+                            'fee_plan_item_id' => $targetPlanId,
+                        ]),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+
+                if ($feePlanChanged) {
+                    DB::table('audit_logs')->insert([
+                        'actor_id' => $request->user()->id,
+                        'action' => 'student_monthly_fee_updated',
+                        'subject_type' => 'student',
+                        'subject_id' => $student,
+                        'metadata' => json_encode([
+                            'previous_minor' => $oldMonthlyFeeMinor,
+                            'new_minor' => $newMonthlyFeeMinor,
+                            'previous_currency' => $oldCurrency,
+                            'new_currency' => $newCurrency,
+                            'currency' => $newCurrency,
+                            'effective_period' => $effectivePeriodLabel,
+                            'effective_from' => $effectiveFromDate,
+                            'administrator' => $request->user()->name,
+                            'administrator_id' => $request->user()->id,
+                            'reason' => "Monthly fee and currency updated via registration edit form. Effective from {$effectivePeriodLabel}.",
+                            'enrollment_id' => $en->id,
+                            'fee_plan_item_id' => $targetPlanId,
+                        ]),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
 
                 $oldFmt = ($oldMonthlyFeeMinor % 100 === 0) ? (string)($oldMonthlyFeeMinor / 100) : Money::format($oldMonthlyFeeMinor);
                 $newFmt = ($newMonthlyFeeMinor % 100 === 0) ? (string)($newMonthlyFeeMinor / 100) : Money::format($newMonthlyFeeMinor);
-                $notice = "Previous monthly fee: {$oldCurrency} {$oldFmt}. New monthly fee: {$newCurrency} {$newFmt}. Applies from {$effectivePeriodLabel}. Existing invoices remain unchanged.";
+
+                if ($departmentChanged && $feePlanChanged) {
+                    $notice = "Department changed from {$oldDeptName} to {$newDeptName}. Previous monthly fee: {$oldCurrency} {$oldFmt}. New monthly fee: {$newCurrency} {$newFmt}. Applies from {$effectivePeriodLabel}. Existing invoices remain unchanged.";
+                } elseif ($departmentChanged) {
+                    $notice = "Department changed from {$oldDeptName} to {$newDeptName}. Applies from {$effectivePeriodLabel}. Existing invoices remain unchanged.";
+                } else {
+                    $notice = "Previous monthly fee: {$oldCurrency} {$oldFmt}. New monthly fee: {$newCurrency} {$newFmt}. Applies from {$effectivePeriodLabel}. Existing invoices remain unchanged.";
+                }
             }
 
-            DB::table('audit_logs')->insert(['actor_id'=>$request->user()->id,'action'=>'student_updated','subject_type'=>'student','subject_id'=>$student,'metadata'=>json_encode(['gr_number'=>$d['registration_number'],'family_code'=>$code,'previous_class'=>$oldGradeLabel,'new_class'=>$newGradeLabel]),'created_at'=>now(),'updated_at'=>now()]);
+            DB::table('audit_logs')->insert([
+                'actor_id' => $request->user()->id,
+                'action' => 'student_updated',
+                'subject_type' => 'student',
+                'subject_id' => $student,
+                'metadata' => json_encode([
+                    'gr_number' => $d['registration_number'],
+                    'family_code' => $code,
+                    'previous_class' => $oldGradeLabel,
+                    'new_class' => $newGradeLabel,
+                    'previous_department_id' => $oldDepartmentId,
+                    'new_department_id' => $targetDeptId,
+                ]),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
         });
         return redirect('/manage-student/'.$student)->with('notice', $notice ?: 'Student details and family assignment updated successfully.');
     }

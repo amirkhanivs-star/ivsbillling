@@ -184,34 +184,23 @@
 
     {{-- DASHBOARD KPI SUMMARY CARDS (SECTION 8) --}}
     <div class="kpi-grid">
-        {{-- Card 1: Billing Month Selector --}}
+        {{-- Card 1: Billing Scope --}}
         <div class="kpi-card" style="border-left: 4px solid #7c3aed;">
-            <div class="kpi-label">📅 Billing Month</div>
-            <form method="get" action="/invoices" id="month-selector-form" style="margin:4px 0 0 0;">
-                <input type="hidden" name="tab" value="{{ $currentTab }}">
-                @if($currentTab === 'paid')
-                    <input type="hidden" name="paid_status" value="{{ $currentPaidStatus }}">
-                    <input type="hidden" name="per_page" value="{{ $perPage }}">
-                    @if(request()->filled('search'))<input type="hidden" name="search" value="{{ request('search') }}">@endif
-                    @if(request()->filled('contact_status'))<input type="hidden" name="contact_status" value="{{ request('contact_status') }}">@endif
+            <div class="kpi-label">📅 Billing Scope</div>
+            <div class="kpi-val" style="color:#7c3aed; font-size:20px; font-weight:700; margin:4px 0;">
+                @if(!empty($isAllPeriod))
+                    All Periods
+                @else
+                    {{ \Carbon\Carbon::createFromFormat('!Y-m', $selectedPeriod)->format('F Y') }}
                 @endif
-                @if(!empty($currentFilters['grade']))
-                    <input type="hidden" name="grade" value="{{ $currentFilters['grade'] }}">
+            </div>
+            <div class="kpi-desc">
+                @if(!empty($isAllPeriod))
+                    Unified all-period billing workflow
+                @else
+                    Selected campaign: {{ $selectedPeriod }}
                 @endif
-                @if(!empty($currentFilters['department_id']))
-                    <input type="hidden" name="department_id" value="{{ $currentFilters['department_id'] }}">
-                @endif
-                @if(!empty($currentFilters['campus_id']))
-                    <input type="hidden" name="campus_id" value="{{ $currentFilters['campus_id'] }}">
-                @endif
-                <select name="period" class="input" style="font-weight:700; font-size:14px; padding:4px 8px; width:100%; border-color:#cbd5e1; background:#f8fafc;" onchange="this.form.submit()" title="Change Billing Month">
-                    @foreach($availableMonths as $m)
-                        @php($mLabel = \Carbon\Carbon::createFromFormat('!Y-m', $m)->format('F Y'))
-                        <option value="{{ $m }}" @selected($selectedPeriod === $m)>{{ $mLabel }}</option>
-                    @endforeach
-                </select>
-            </form>
-            <div class="kpi-desc">Current or selected billing campaign</div>
+            </div>
         </div>
 
         {{-- Card 2: Awaiting Review --}}
@@ -278,11 +267,11 @@
 
     {{-- 5 CLEAR WORKFLOW SECTIONS (SECTION 5) --}}
     <nav class="iq-nav-tabs" aria-label="Invoice Delivery Workflow Sections">
-        <a href="?tab=ready&period={{ $selectedPeriod }}" class="iq-tab-item @if($currentTab === 'ready') active @endif">
+        <a href="?tab=ready&period=all" class="iq-tab-item @if($currentTab === 'ready') active @endif">
             📤 <strong>Ready to Send</strong>
             <span class="iq-tab-badge" style="background:#ede9fe; color:#6d28d9;">{{ number_format($dashboardStats['awaiting_review']) }}</span>
         </a>
-        <a href="?tab=paid&period={{ $selectedPeriod }}" class="iq-tab-item @if($currentTab === 'paid') active @endif">
+        <a href="?tab=paid&period={{ $isAllPeriod ? 'all' : $selectedPeriod }}" class="iq-tab-item @if($currentTab === 'paid') active @endif">
             💳 <strong>Paid Invoices</strong>
             @if(($dashboardStats['paid_invoices'] ?? 0) > 0)
                 <span class="iq-tab-badge" style="background:#dcfce7; color:#166534;">{{ number_format($dashboardStats['paid_invoices']) }}</span>
@@ -304,8 +293,8 @@
                 <span class="iq-tab-badge" style="background:#fee2e2; color:#991b1b;">{{ number_format($dashboardStats['attention']) }}</span>
             @endif
         </a>
-        <a href="?tab=history&period={{ $selectedPeriod }}" class="iq-tab-item @if($currentTab === 'history') active @endif">
-            📜 <strong>Financial Invoice History</strong>
+        <a href="?tab=history&period={{ $isAllPeriod ? 'all' : $selectedPeriod }}" class="iq-tab-item @if($currentTab === 'history') active @endif">
+            📜 <strong>Financial History</strong>
         </a>
     </nav>
 
@@ -314,7 +303,7 @@
         {{-- FILTERS BAR --}}
         <form method="get" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
             <input type="hidden" name="tab" value="ready">
-            <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+            <input type="hidden" name="period" value="{{ $isAllPeriod ? 'all' : $selectedPeriod }}">
 
             @if(in_array(auth()->user()->role, ['super_admin', 'finance_admin'], true))
                 <select class="input" name="campus_id" style="min-width:140px;">
@@ -354,7 +343,7 @@
             </select>
 
             <button type="submit" class="btn small" style="background:#7c3aed; color:#fff; font-weight:600; padding:6px 14px;">Filter</button>
-            <a href="?tab=ready&period={{ $selectedPeriod }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
+            <a href="?tab=ready&period={{ $isAllPeriod ? 'all' : $selectedPeriod }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
         </form>
 
         {{-- SELECTION RECONCILIATION & SNAPSHOT BANNER --}}
@@ -407,6 +396,23 @@
         @endif
 
         {{-- BATCH ACTION & SEND CONTROLS --}}
+        @if(!empty($isAllPeriod))
+            <div style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:10px 16px; margin:12px 0; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:16px;">📋</span>
+                    <div>
+                        <strong style="color:#1e40af; font-size:13px;">Ready to Send — All Billing Periods (Unified Consolidated Batch Delivery)</strong>
+                        <div style="font-size:12px; color:#1e3a8a;">
+                            Consolidated family listing covering all applicable outstanding fee obligations across billing periods.
+                        </div>
+                    </div>
+                </div>
+                <span class="badge" style="background:#dbeafe; color:#1e40af; font-weight:700; font-size:11px; padding:3px 8px; border-radius:4px;">
+                    All Periods Mode
+                </span>
+            </div>
+        @endif
+
         <form method="post" action="/invoices/send-batch" id="iq-send-form">
             @csrf
             <input type="hidden" name="webhook_type" value="monthly">
@@ -414,7 +420,7 @@
             <input type="hidden" name="campus_id" value="{{ request('campus_id') }}">
             <input type="hidden" name="department_id" value="{{ request('department_id') }}">
             <input type="hidden" name="grade" value="{{ request('grade') }}">
-            <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+            <input type="hidden" name="period" value="{{ $isAllPeriod ? 'all' : $selectedPeriod }}">
             <input type="hidden" name="contact_status" value="{{ request('contact_status', 'all') }}">
             <input type="hidden" name="search" value="{{ request('search') }}">
             <input type="hidden" name="snapshot_id" value="{{ $selectionSnapshot['snapshot_id'] ?? '' }}">
@@ -461,7 +467,9 @@
                 <table class="table iq-invoice-review">
                     <thead>
                         <tr>
-                            <th style="width:40px;"><input id="invoice-select-all" type="checkbox" aria-label="Select all on this page"></th>
+                            <th style="width:40px;">
+                                <input id="invoice-select-all" type="checkbox" aria-label="Select all on this page">
+                            </th>
                             <th>Invoice / Period</th>
                             <th>Family &amp; Guardian</th>
                             <th>Students &amp; Siblings</th>
@@ -666,7 +674,7 @@
         </div>
         <nav class="iq-subtabs-bar" aria-label="Paid invoice stages" style="display:flex; gap:8px; margin-bottom:14px; border-bottom:2px solid #e2e8f0; padding-bottom:10px; flex-wrap:wrap;">
             @foreach(['unqueued' => 'Unqueued', 'queued' => 'In Queue', 'processing' => 'Processing', 'submitted' => 'Submitted', 'attention' => 'Needs Attention', 'all' => 'All Paid Invoices'] as $stage => $label)
-                <a href="{{ request()->fullUrlWithQuery(['tab' => 'paid', 'period' => $selectedPeriod, 'paid_status' => $stage, 'page' => null, 'paid_tracking' => null, 'paid_refresh' => null]) }}"
+                <a href="{{ request()->fullUrlWithQuery(['tab' => 'paid', 'period' => $isAllPeriod ? 'all' : $selectedPeriod, 'paid_status' => $stage, 'page' => null, 'paid_tracking' => null, 'paid_refresh' => null]) }}"
                    data-paid-tab="{{ $stage }}"
                    @if($currentPaidStatus === $stage) aria-current="page" @endif
                    class="btn small {{ $currentPaidStatus === $stage ? 'green' : 'gray' }}"
@@ -684,6 +692,9 @@
                     <form id="paid-queued-send-form" method="post" action="{{ route('invoices.paid.send_queue') }}" style="margin-top:12px;">
                         @csrf
                         <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+                        @if(!empty($isAllPeriod))
+                            <input type="hidden" name="all_period" value="1">
+                        @endif
                         @foreach(['search', 'campus_id', 'department_id', 'grade', 'contact_status', 'send_mode', 'per_page', 'page'] as $contextKey)
                             @if(is_scalar(request()->query($contextKey)) && (string)request()->query($contextKey) !== '')
                                 <input type="hidden" name="{{ $contextKey }}" value="{{ request()->query($contextKey) }}">
@@ -709,8 +720,8 @@
         <form method="get" id="paid-filter-form" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
             <input type="hidden" name="per_page" value="{{ $perPage }}">
             <input type="hidden" name="tab" value="paid">
-            <input type="hidden" name="paid_status" value="{{ $currentPaidStatus ?? 'unqueued' }}">
-            <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+            <input type="hidden" name="paid_status" value="{{ $currentPaidStatus ?? 'all' }}">
+            <input type="hidden" name="period" value="{{ $isAllPeriod ? 'all' : $selectedPeriod }}">
 
             @if(in_array(auth()->user()->role, ['super_admin', 'finance_admin'], true))
                 <select class="input" name="campus_id" style="min-width:140px;" title="Filter by Campus">
@@ -750,11 +761,11 @@
             </select>
 
             <button type="submit" class="btn small" style="background:#16a34a; color:#fff; font-weight:600; padding:6px 14px;">Filter</button>
-            <a href="?tab=paid&period={{ $selectedPeriod }}&paid_status={{ $currentPaidStatus ?? 'unqueued' }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
+            <a href="?tab=paid&period={{ $isAllPeriod ? 'all' : $selectedPeriod }}&paid_status={{ $currentPaidStatus ?? 'all' }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
         </form>
 
         {{-- SELECTION RECONCILIATION & SNAPSHOT BANNER --}}
-        @if($selectionSnapshot && in_array($currentPaidStatus ?? 'unqueued', ['unqueued', 'all'], true))
+        @if($selectionSnapshot && in_array($currentPaidStatus ?? 'all', ['unqueued', 'all'], true))
             <div class="batch-snapshot-card" style="border-left-color:#16a34a;">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
                     <div>
@@ -779,6 +790,9 @@
                         @if(!empty($selectionSnapshot['already_submitted_recipients_count']))
                             <strong>{{ $selectionSnapshot['already_submitted_recipients_count'] }}</strong> was already submitted to webhook.
                         @endif
+                        @if(!empty($selectionSnapshot['excluded_breakdown']['already_queued']))
+                            <strong>{{ $selectionSnapshot['excluded_breakdown']['already_queued'] }}</strong> is already in queue.
+                        @endif
                         @if(!empty($selectionSnapshot['contact_ineligible_count']))
                             <strong>{{ $selectionSnapshot['contact_ineligible_count'] }}</strong> is excluded pending contact verification/consent.
                         @endif
@@ -801,6 +815,9 @@
             <input type="hidden" name="department_id" value="{{ request('department_id') }}">
             <input type="hidden" name="grade" value="{{ request('grade') }}">
             <input type="hidden" name="period" value="{{ $selectedPeriod }}">
+            @if(!empty($isAllPeriod))
+                <input type="hidden" name="all_period" value="1">
+            @endif
             <input type="hidden" name="contact_status" value="{{ request('contact_status', 'all') }}">
             <input type="hidden" name="search" value="{{ request('search') }}">
             <input type="hidden" name="snapshot_id" value="{{ $selectionSnapshot['snapshot_id'] ?? '' }}">
@@ -916,14 +933,19 @@
                             <td>
                                 @if(!empty($row->receipts) && count($row->receipts) > 0)
                                     @foreach($row->receipts as $rc)
-                                        <div style="margin-bottom:4px; padding:3px 6px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:4px; font-size:11.5px;">
+                                        <div style="margin-bottom:4px; padding:4px 7px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:4px; font-size:11.5px;">
                                             <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
                                                 <a href="{{ $rc['receipt_pdf_url'] }}" target="_blank" rel="noopener" style="font-weight:700; color:#166534; text-decoration:none;">
                                                     🧾 {{ $rc['receipt_number'] }}
                                                 </a>
-                                                <span style="font-weight:700; color:#166534;">{{ $rc['currency'] }} {{ $rc['formatted_amount'] }}</span>
+                                                <span style="font-weight:700; color:#166534;" title="Original Receipt Total">{{ $rc['currency'] }} {{ $rc['formatted_amount'] }}</span>
                                             </div>
                                             <div class="muted" style="font-size:10.5px;">Paid on: {{ $rc['payment_date'] }}</div>
+                                            @if(!empty($rc['allocated_amount_minor']) && $rc['allocated_amount_minor'] !== $rc['amount_minor'])
+                                                <div style="font-size:10.5px; color:#15803d; margin-top:2px; font-weight:600;">
+                                                    {{ $rc['currency'] }} {{ $rc['formatted_allocated_amount'] }} allocated to this SCH
+                                                </div>
+                                            @endif
                                         </div>
                                     @endforeach
                                 @else
@@ -931,7 +953,12 @@
                                 @endif
                             </td>
                             <td>
-                                <strong style="color:#16a34a; font-size:13px;">{{ $row->currency }} {{ \App\Services\Money::format($row->paid_minor) }}</strong>
+                                <strong style="color:#16a34a; font-size:13px;">{{ $row->currency }} {{ $row->formatted_paid_amount ?? \App\Services\Money::format($row->paid_minor) }}</strong>
+                                @if(!empty($row->allocated_paid_minor) && (int)$row->allocated_paid_minor !== (int)($row->receipt_paid_minor ?? $row->paid_minor))
+                                    <div class="muted" style="font-size:10.5px; color:#15803d; margin-top:2px;">
+                                        {{ $row->currency }} {{ $row->formatted_allocated_paid ?? \App\Services\Money::format($row->allocated_paid_minor) }} allocated to this SCH
+                                    </div>
+                                @endif
                                 <div style="margin-top:2px;">
                                     <span class="badge" style="background:#dcfce7; color:#166534; font-size:10px; padding:2px 6px; font-weight:700;">Fully Paid</span>
                                 </div>
@@ -1096,7 +1123,11 @@
                                 <td><strong>{{ $b->billing_period ?: '—' }}</strong></td>
                                 <td>
                                     <strong>{{ number_format($b->total_recipients) }}</strong>
-                                    <div class="muted" style="font-size:10.5px;">{{ $b->queued_recipients }} queued ? {{ $b->processing_recipients }} processing</div>
+                                    @if($b->is_all_superseded ?? false)
+                                        <div class="muted" style="font-size:10.5px; color:#b45309;">All {{ $b->total_recipients }} superseded</div>
+                                    @else
+                                        <div class="muted" style="font-size:10.5px;">{{ $b->queued_recipients }} queued &middot; {{ $b->processing_recipients }} processing</div>
+                                    @endif
                                 </td>
                                 <td><span style="font-weight:700;">{{ $b->chunks_total }}</span></td>
                                 <td>
@@ -1113,15 +1144,18 @@
                                     </span>
                                 </td>
                                 <td>
-                                    @if($b->status === 'submitted')
+                                    @php($bStatus = $b->display_status ?? $b->status)
+                                    @if($bStatus === 'superseded')
+                                        <span class="badge-status badge-superseded" style="background:#fef3c7; color:#92400e; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">SUPERSEDED</span>
+                                    @elseif($bStatus === 'submitted')
                                         <span class="badge-status badge-paid" style="font-size:10px;">SUBMITTED</span>
-                                    @elseif($b->status === 'processing')
+                                    @elseif($bStatus === 'processing')
                                         <span style="background:#dbeafe; color:#1e40af; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">PROCESSING</span>
-                                    @elseif($b->status === 'partially_submitted')
+                                    @elseif($bStatus === 'partially_submitted')
                                         <span style="background:#fef3c7; color:#92400e; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">PARTIAL</span>
-                                    @elseif($b->status === 'failed')
+                                    @elseif($bStatus === 'failed')
                                         <span style="background:#fee2e2; color:#991b1b; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">FAILED</span>
-                                    @elseif($b->status === 'blocked')
+                                    @elseif($bStatus === 'blocked')
                                         <span style="background:#f1f5f9; color:#475569; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; display:inline-block;">BLOCKED</span>
                                     @else
                                         <span class="badge-status badge-queued" style="font-size:10px;">QUEUED</span>
@@ -1145,7 +1179,7 @@
                                 </td>
                                 <td style="text-align:right;">
                                     <div style="display:flex; justify-content:flex-end; gap:4px;">
-                                        @if(in_array($b->status, ['failed', 'partially_submitted'], true) || $b->chunks_failed > 0)
+                                        @if((!($b->is_all_superseded ?? false)) && (in_array($b->status, ['failed', 'partially_submitted'], true) || $b->chunks_failed > 0))
                                             <form method="post" action="{{ route('invoices.batches.retry_failed', $b->batch_id) }}" style="margin:0;">
                                                 @csrf
                                                 <button type="submit" class="btn small" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-size:10.5px; padding:3px 7px;">
@@ -1473,88 +1507,290 @@
             {{ $tabQueuePage->links() }}
         </div>
 
-    {{-- TAB 5: FINANCIAL INVOICE HISTORY --}}
+    {{-- TAB 5: FINANCIAL HISTORY --}}
     @elseif($currentTab === 'history')
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
             <div>
-                <h3 style="margin:0; color:#0f172a;">Financial Invoice History &amp; Complete Ledger</h3>
-                <p class="muted" style="margin:2px 0 0 0; font-size:12px;">All historical financial invoice records, including MySkool opening balances, previous months, superseded invoices, and settled receipts.</p>
+                <h3 style="margin:0; color:#0f172a;">Financial History &amp; Complete Ledger</h3>
+                <p class="muted" style="margin:2px 0 0 0; font-size:12px;">Canonical historical financial records across all billing periods, including opening balances, invoices, and payment receipts.</p>
             </div>
         </div>
 
-        {{-- HISTORY FILTERS --}}
-        <form method="get" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
-            <input type="hidden" name="tab" value="history">
+        {{-- FINANCIAL HISTORY SUB-TABS --}}
+        <nav class="iq-subtabs-bar" aria-label="Financial history sections" style="display:flex; gap:8px; margin-bottom:14px; border-bottom:2px solid #e2e8f0; padding-bottom:10px; flex-wrap:wrap;">
+            <a href="{{ request()->fullUrlWithQuery(['tab' => 'history', 'history_type' => 'sch', 'page' => null]) }}"
+               @if(($historyType ?? 'sch') === 'sch') aria-current="page" @endif
+               class="btn small"
+               style="font-weight:700; padding:6px 14px; border-radius:20px; text-decoration:none; display:inline-flex; align-items:center; gap:6px; {{ ($historyType ?? 'sch') === 'sch' ? 'background:#7c3aed; color:#fff;' : 'background:#f1f5f9; color:#475569;' }}">
+                📄 SCH Invoices
+                <span class="badge" style="background:rgba(255,255,255,0.25); color:inherit; padding:1px 6px; border-radius:10px; font-size:11px;">{{ number_format($historyCounts['sch'] ?? 0) }}</span>
+            </a>
+            <a href="{{ request()->fullUrlWithQuery(['tab' => 'history', 'history_type' => 'rcp', 'page' => null]) }}"
+               @if(($historyType ?? 'sch') === 'rcp') aria-current="page" @endif
+               class="btn small"
+               style="font-weight:700; padding:6px 14px; border-radius:20px; text-decoration:none; display:inline-flex; align-items:center; gap:6px; {{ ($historyType ?? 'sch') === 'rcp' ? 'background:#16a34a; color:#fff;' : 'background:#f1f5f9; color:#475569;' }}">
+                🧾 RCP Payment Receipts
+                <span class="badge" style="background:rgba(255,255,255,0.25); color:inherit; padding:1px 6px; border-radius:10px; font-size:11px;">{{ number_format($historyCounts['rcp'] ?? 0) }}</span>
+            </a>
+        </nav>
 
-            <select class="input" name="payment_status" style="min-width:130px;">
-                <option value="all" @selected(request('payment_status') === 'all')>All Payment Statuses</option>
-                <option value="paid" @selected(request('payment_status') === 'paid')>Fully Paid</option>
-                <option value="partial" @selected(request('payment_status') === 'partial')>Partially Paid</option>
-                <option value="unpaid" @selected(request('payment_status') === 'unpaid')>Unpaid Only</option>
-            </select>
+        @if(($historyType ?? 'sch') === 'rcp')
+            {{-- SUB-TAB 2: RCP PAYMENT RECEIPTS --}}
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <div>
+                    <h4 style="margin:0; color:#0f172a; font-size:15px; font-weight:700;">RCP Payment Receipts History</h4>
+                    <p class="muted" style="margin:2px 0 0 0; font-size:12px;">One row per genuine RCP receipt number. Full allocation details are preserved without duplicating receipts that pay multiple invoices.</p>
+                </div>
+            </div>
 
-            <input type="text" name="search" class="input" value="{{ request('search') }}" placeholder="Search invoice, family, guardian..." style="min-width:220px;">
+            {{-- RCP FILTERS --}}
+            <form method="get" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
+                <input type="hidden" name="tab" value="history">
+                <input type="hidden" name="history_type" value="rcp">
 
-            <select class="input" name="per_page" style="width:90px;">
-                <option value="25" @selected($perPage == 25)>25 / page</option>
-                <option value="50" @selected($perPage == 50)>50 / page</option>
-                <option value="100" @selected($perPage == 100)>100 / page</option>
-            </select>
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="rcp_from_date" style="font-size:12px; font-weight:600; color:#475569;">From Date:</label>
+                    <input type="date" id="rcp_from_date" name="from_date" class="input" value="{{ request('from_date') }}" style="padding:4px 8px; font-size:12px; height:32px;">
+                </div>
 
-            <button type="submit" class="btn small" style="background:#7c3aed; color:#fff; font-weight:600; padding:6px 14px;">Filter</button>
-            <a href="?tab=history" class="btn small gray" style="padding:6px 12px;">Reset</a>
-        </form>
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="rcp_to_date" style="font-size:12px; font-weight:600; color:#475569;">To Date:</label>
+                    <input type="date" id="rcp_to_date" name="to_date" class="input" value="{{ request('to_date') }}" style="padding:4px 8px; font-size:12px; height:32px;">
+                </div>
 
-        <div class="table-wrap">
-            <table class="table">
-                <thead>
-                    <tr>
-                        <th>Invoice #</th>
-                        <th>Family</th>
-                        <th>Period / Type</th>
-                        <th>Department</th>
-                        <th>Total Billed</th>
-                        <th>Paid</th>
-                        <th>Balance</th>
-                        <th>Status</th>
-                        <th>PDF</th>
-                    </tr>
-                </thead>
-                <tbody>
-                @forelse($financialHistoryPage as $hRow)
-                    @php($hBal = max(0, (int)$hRow->total_minor - (int)$hRow->paid_minor))
-                    <tr>
-                        <td><strong>{{ $hRow->invoice_number }}</strong></td>
-                        <td>{{ $hRow->family_code ?: ('Family #' . $hRow->family_id) }}</td>
-                        <td>
-                            @if($hRow->billing_period)
-                                {{ \Carbon\Carbon::parse($hRow->billing_period)->format('M Y') }}
-                            @else
-                                <span class="badge" style="background:#f1f5f9; color:#475569; font-size:10px;">MySkool Opening</span>
-                            @endif
-                        </td>
-                        <td>{{ $hRow->department_name ?: 'General' }}</td>
-                        <td>{{ $hRow->currency }} {{ \App\Services\Money::format($hRow->total_minor) }}</td>
-                        <td>{{ \App\Services\Money::format($hRow->paid_minor) }}</td>
-                        <td><strong style="color:{{ $hBal > 0 ? '#b91c1c' : '#166534' }};">{{ \App\Services\Money::format($hBal) }}</strong></td>
-                        <td><span class="badge" style="font-size:10.5px;">{{ ucfirst($hRow->status) }}</span></td>
-                        <td>
-                            <a href="/invoices/{{ $hRow->id }}/pdf" target="_blank" rel="noopener" class="btn small gray" style="font-size:10px; padding:2px 6px;">Invoice PDF</a>
-                        </td>
-                    </tr>
-                @empty
-                    <tr>
-                        <td colspan="9" style="text-align:center; padding:30px; color:#64748b;">
-                            No financial invoices found.
-                        </td>
-                    </tr>
-                @endforelse
-                </tbody>
-            </table>
-        </div>
-        <div style="margin-top:14px;">
-            {{ $financialHistoryPage->links() }}
-        </div>
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="rcp_receipt_status" class="sr-only" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0;">Receipt Status</label>
+                    <select id="rcp_receipt_status" class="input" name="receipt_status" style="min-width:140px; height:32px; font-size:12px;">
+                        <option value="all" @selected(request('receipt_status') === 'all')>All Receipt Statuses</option>
+                        <option value="received" @selected(request('receipt_status') === 'received')>Active / Received</option>
+                        <option value="reversed" @selected(request('receipt_status') === 'reversed')>Reversed Only</option>
+                    </select>
+                </div>
+
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="rcp_search" class="sr-only" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0;">Search</label>
+                    <input type="text" id="rcp_search" name="search" class="input" value="{{ request('search') }}" placeholder="Search RCP #, family, SCH invoice #..." style="min-width:200px; height:32px; font-size:12px;">
+                </div>
+
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="rcp_per_page" class="sr-only" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0;">Per Page</label>
+                    <select id="rcp_per_page" class="input" name="per_page" style="width:90px; height:32px; font-size:12px;">
+                        <option value="25" @selected($perPage == 25)>25 / page</option>
+                        <option value="50" @selected($perPage == 50)>50 / page</option>
+                        <option value="100" @selected($perPage == 100)>100 / page</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn small" style="background:#16a34a; color:#fff; font-weight:600; padding:6px 14px; height:32px; display:inline-flex; align-items:center;">Apply Filter</button>
+                <a href="{{ request()->fullUrlWithQuery(['from_date' => null, 'to_date' => null, 'page' => null]) }}" class="btn small gray" style="padding:6px 12px; height:32px; display:inline-flex; align-items:center; text-decoration:none;">Clear Filter</a>
+            </form>
+
+            <div class="table-wrap" tabindex="0" role="region" aria-label="RCP Payment Receipts Financial History">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Receipt #</th>
+                            <th scope="col">Family</th>
+                            <th scope="col">Created Date/Time</th>
+                            <th scope="col">Payment Date</th>
+                            <th scope="col">Department</th>
+                            <th scope="col">Receipt Amount</th>
+                            <th scope="col">Allocations / Invoices Paid</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">PDF</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @forelse($financialReceiptsPage as $pRow)
+                        @php($isReversed = !empty($pRow->reversed_at) || $pRow->status === 'reversed')
+                        <tr @if($isReversed) style="background:#fff1f2;" @endif>
+                            <td>
+                                <strong style="color:#166534; white-space:nowrap;">🧾 {{ $pRow->receipt_number }}</strong>
+                            </td>
+                            <td>
+                                <div>{{ $pRow->family_code ?: ('Family #' . $pRow->family_id) }}</div>
+                                @if(!empty($pRow->guardian_name))
+                                    <div class="muted" style="font-size:11px;">{{ $pRow->guardian_name }}</div>
+                                @endif
+                            </td>
+                            <td>
+                                <span style="font-size:12px; white-space:nowrap;">{{ \Carbon\Carbon::parse($pRow->created_at)->format('d M Y H:i') }}</span>
+                            </td>
+                            <td>
+                                <span style="font-size:12px; white-space:nowrap;">{{ $pRow->received_on ? \Carbon\Carbon::parse($pRow->received_on)->format('d M Y') : '—' }}</span>
+                                @if(!empty($pRow->selected_period))
+                                    <div class="muted" style="font-size:10.5px;">Period: {{ $pRow->selected_period }}</div>
+                                @endif
+                            </td>
+                            <td>{{ $pRow->department_name ?: 'General' }}</td>
+                            <td>
+                                <strong style="font-size:13px; color:#166534; white-space:nowrap;">
+                                    {{ $pRow->currency }} {{ $pRow->formatted_amount }}
+                                </strong>
+                                @if((int)$pRow->unallocated_minor > 0)
+                                    <div class="muted" style="font-size:11px; color:#b45309;">
+                                        Unallocated: {{ \App\Services\Money::format($pRow->unallocated_minor) }}
+                                    </div>
+                                @endif
+                            </td>
+                            <td>
+                                @if(!empty($pRow->allocations_by_invoice) && count($pRow->allocations_by_invoice) > 0)
+                                    <div style="display:flex; flex-direction:column; gap:4px;">
+                                        @foreach($pRow->allocations_by_invoice as $allocInv)
+                                            <div style="font-size:11.5px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:3px 6px; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                                                <a href="{{ $allocInv['invoice_pdf_url'] }}" target="_blank" rel="noopener" style="font-weight:700; color:#1e40af; text-decoration:none;">
+                                                    📄 {{ $allocInv['invoice_number'] }}
+                                                </a>
+                                                <span style="color:#166534; font-weight:600;">
+                                                    {{ $pRow->currency }} {{ \App\Services\Money::format($allocInv['amount_minor']) }}
+                                                </span>
+                                                @if(!empty($allocInv['billing_period']))
+                                                    <span class="muted" style="font-size:10.5px;">({{ \Carbon\Carbon::parse($allocInv['billing_period'])->format('M Y') }})</span>
+                                                @endif
+                                            </div>
+                                        @endforeach
+                                    </div>
+                                @else
+                                    <span class="muted" style="font-size:11px;">No allocation records</span>
+                                @endif
+                            </td>
+                            <td>
+                                @if($isReversed)
+                                    <span class="badge" style="background:#fee2e2; color:#991b1b; font-size:10.5px;">Reversed</span>
+                                @else
+                                    <span class="badge" style="background:#dcfce7; color:#166534; font-size:10.5px;">Received</span>
+                                @endif
+                            </td>
+                            <td>
+                                <a href="{{ $pRow->receipt_pdf_url ?? ('/receipts/' . $pRow->id . '/pdf') }}" target="_blank" rel="noopener" class="btn small" style="background:#16a34a; color:#fff; font-size:10px; padding:2px 6px; font-weight:700; white-space:nowrap;">Receipt PDF</a>
+                            </td>
+                        </tr>
+                    @empty
+                        <tr>
+                            <td colspan="9" style="text-align:center; padding:30px; color:#64748b;">
+                                No RCP payment receipts found.
+                            </td>
+                        </tr>
+                    @endforelse
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top:14px;">
+                {{ $financialReceiptsPage->links() }}
+            </div>
+
+        @else
+            {{-- SUB-TAB 1: SCH INVOICES --}}
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <div>
+                    <h4 style="margin:0; color:#0f172a; font-size:15px; font-weight:700;">SCH Invoices History</h4>
+                    <p class="muted" style="margin:2px 0 0 0; font-size:12px;">One row per genuine SCH invoice number, sorted by creation date/time. Billing months are displayed as details.</p>
+                </div>
+            </div>
+
+            {{-- SCH FILTERS --}}
+            <form method="get" class="iq-filter-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:14px;">
+                <input type="hidden" name="tab" value="history">
+                <input type="hidden" name="history_type" value="sch">
+
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="sch_from_date" style="font-size:12px; font-weight:600; color:#475569;">From Date:</label>
+                    <input type="date" id="sch_from_date" name="from_date" class="input" value="{{ request('from_date') }}" style="padding:4px 8px; font-size:12px; height:32px;">
+                </div>
+
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="sch_to_date" style="font-size:12px; font-weight:600; color:#475569;">To Date:</label>
+                    <input type="date" id="sch_to_date" name="to_date" class="input" value="{{ request('to_date') }}" style="padding:4px 8px; font-size:12px; height:32px;">
+                </div>
+
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="sch_payment_status" class="sr-only" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0;">Payment Status</label>
+                    <select id="sch_payment_status" class="input" name="payment_status" style="min-width:130px; height:32px; font-size:12px;">
+                        <option value="all" @selected(request('payment_status') === 'all')>All Payment Statuses</option>
+                        <option value="paid" @selected(request('payment_status') === 'paid')>Fully Paid</option>
+                        <option value="partial" @selected(request('payment_status') === 'partial')>Partially Paid</option>
+                        <option value="unpaid" @selected(request('payment_status') === 'unpaid')>Unpaid Only</option>
+                    </select>
+                </div>
+
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="sch_search" class="sr-only" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0;">Search</label>
+                    <input type="text" id="sch_search" name="search" class="input" value="{{ request('search') }}" placeholder="Search SCH #, family, guardian..." style="min-width:200px; height:32px; font-size:12px;">
+                </div>
+
+                <div style="display:inline-flex; align-items:center; gap:4px;">
+                    <label for="sch_per_page" class="sr-only" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0;">Per Page</label>
+                    <select id="sch_per_page" class="input" name="per_page" style="width:90px; height:32px; font-size:12px;">
+                        <option value="25" @selected($perPage == 25)>25 / page</option>
+                        <option value="50" @selected($perPage == 50)>50 / page</option>
+                        <option value="100" @selected($perPage == 100)>100 / page</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn small" style="background:#7c3aed; color:#fff; font-weight:600; padding:6px 14px; height:32px; display:inline-flex; align-items:center;">Apply Filter</button>
+                <a href="{{ request()->fullUrlWithQuery(['from_date' => null, 'to_date' => null, 'page' => null]) }}" class="btn small gray" style="padding:6px 12px; height:32px; display:inline-flex; align-items:center; text-decoration:none;">Clear Filter</a>
+            </form>
+
+            <div class="table-wrap" tabindex="0" role="region" aria-label="SCH Invoices Financial History">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Invoice #</th>
+                            <th scope="col">Family</th>
+                            <th scope="col">Created Date/Time</th>
+                            <th scope="col">Billing Month</th>
+                            <th scope="col">Department</th>
+                            <th scope="col">Total Billed</th>
+                            <th scope="col">Paid</th>
+                            <th scope="col">Balance</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">PDF</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @forelse($financialHistoryPage as $hRow)
+                        @php($hBal = max(0, (int)$hRow->total_minor - (int)$hRow->paid_minor))
+                        <tr>
+                            <td><strong>{{ $hRow->invoice_number }}</strong></td>
+                            <td>
+                                <div>{{ $hRow->family_code ?: ('Family #' . $hRow->family_id) }}</div>
+                                @if(!empty($hRow->guardian_name))
+                                    <div class="muted" style="font-size:11px;">{{ $hRow->guardian_name }}</div>
+                                @endif
+                            </td>
+                            <td>
+                                <span style="font-size:12px; white-space:nowrap;">{{ \Carbon\Carbon::parse($hRow->created_at)->format('d M Y H:i') }}</span>
+                            </td>
+                            <td>
+                                @if($hRow->billing_period)
+                                    <span class="badge" style="background:#e0f2fe; color:#0369a1; font-size:11px;">{{ \Carbon\Carbon::parse($hRow->billing_period)->format('M Y') }}</span>
+                                @else
+                                    <span class="badge" style="background:#f1f5f9; color:#475569; font-size:10px;">Opening Balance</span>
+                                @endif
+                            </td>
+                            <td>{{ $hRow->department_name ?: 'General' }}</td>
+                            <td><strong>{{ $hRow->currency }} {{ $hRow->formatted_total ?? \App\Services\Money::format($hRow->total_minor) }}</strong></td>
+                            <td>{{ $hRow->formatted_paid ?? \App\Services\Money::format($hRow->paid_minor) }}</td>
+                            <td><strong style="color:{{ $hBal > 0 ? '#b91c1c' : '#166534' }};">{{ $hRow->formatted_balance ?? \App\Services\Money::format($hBal) }}</strong></td>
+                            <td><span class="badge" style="font-size:10.5px;">{{ ucfirst($hRow->status) }}</span></td>
+                            <td>
+                                <a href="{{ $hRow->invoice_pdf_url ?? ('/invoices/' . $hRow->id . '/pdf') }}" target="_blank" rel="noopener" class="btn small gray" style="font-size:10px; padding:2px 6px; white-space:nowrap;">Invoice PDF</a>
+                            </td>
+                        </tr>
+                    @empty
+                        <tr>
+                            <td colspan="10" style="text-align:center; padding:30px; color:#64748b;">
+                                No SCH financial invoices found.
+                            </td>
+                        </tr>
+                    @endforelse
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top:14px;">
+                {{ $financialHistoryPage->links() }}
+            </div>
+        @endif
     @endif
 </div>
 

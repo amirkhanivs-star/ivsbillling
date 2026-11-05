@@ -140,7 +140,7 @@
         </div>
 
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            @if($selectedBatch && $stats['failed'] > 0)
+            @if($selectedBatch && empty($selectedBatch->is_all_superseded) && $stats['failed'] > 0)
                 <form method="post" action="{{ route('invoices.batches.retry_failed', $selectedBatch->batch_id) }}" style="margin:0;" onsubmit="return confirm('Authorize retry for {{ $stats['failed'] }} failed recipient(s) in batch {{ $selectedBatch->batch_id }}? Successful and already-submitted recipients will NOT be resent.');">
                     @csrf
                     <button class="btn" type="submit" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:700; padding:6px 14px; border-radius:4px; font-size:12px; cursor:pointer;">
@@ -174,8 +174,9 @@
                         <span style="font-size:16px; font-weight:700; color:#1e293b;">
                             {{ ucfirst($selectedBatch->webhook_type) }} Batch Campaign
                         </span>
-                        <span class="badge-status {{ $selectedBatch->status === 'submitted' ? 'badge-submitted' : ($selectedBatch->status === 'failed' ? 'badge-failed' : 'badge-queued') }}">
-                            {{ strtoupper($selectedBatch->status) }}
+                        @php($bStatus = $selectedBatch->display_status ?? $selectedBatch->status)
+                        <span class="badge-status {{ $bStatus === 'superseded' ? 'badge-superseded' : ($bStatus === 'submitted' ? 'badge-submitted' : ($bStatus === 'failed' ? 'badge-failed' : 'badge-queued')) }}">
+                            {{ strtoupper($bStatus) }}
                         </span>
                     </div>
                     <div style="font-size:12px; color:#475569;">
@@ -203,6 +204,12 @@
             @if($selectedBatch->error)
                 <div style="margin-top:10px; background:#fff1f2; border:1px solid #fecdd3; border-radius:4px; padding:8px 12px; color:#9f1239; font-size:12px;">
                     <strong>Diagnostic Error:</strong> {{ $selectedBatch->error }}
+                </div>
+            @endif
+
+            @if(!empty($selectedBatch->is_all_superseded))
+                <div style="margin-top:10px; background:#fef3c7; border:1px solid #fde68a; border-radius:4px; padding:8px 12px; color:#92400e; font-size:12px;">
+                    ℹ️ <strong>All notifications in this batch were superseded</strong> by newer authoritative invoices. No messages were transmitted.
                 </div>
             @endif
         </div>
@@ -322,6 +329,7 @@
                     <option value="submitted" {{ ($filters['submission_status'] ?? '') === 'submitted' ? 'selected' : '' }}>Submitted (200/202)</option>
                     <option value="failed" {{ ($filters['submission_status'] ?? '') === 'failed' ? 'selected' : '' }}>Submission Failed</option>
                     <option value="blocked" {{ ($filters['submission_status'] ?? '') === 'blocked' ? 'selected' : '' }}>Blocked / Unverified</option>
+                    <option value="superseded" {{ ($filters['submission_status'] ?? '') === 'superseded' ? 'selected' : '' }}>Superseded</option>
                 </select>
             </div>
 
@@ -334,6 +342,7 @@
                     <option value="delivered" {{ ($filters['delivery_status'] ?? '') === 'delivered' ? 'selected' : '' }}>Delivered</option>
                     <option value="read" {{ ($filters['delivery_status'] ?? '') === 'read' ? 'selected' : '' }}>Read</option>
                     <option value="failed" {{ ($filters['delivery_status'] ?? '') === 'failed' ? 'selected' : '' }}>Delivery Failed</option>
+                    <option value="superseded" {{ ($filters['delivery_status'] ?? '') === 'superseded' ? 'selected' : '' }}>Superseded</option>
                 </select>
             </div>
 
@@ -387,10 +396,12 @@
             <tbody>
             @forelse($notifications as $row)
                 <?php
+                    $isSuperseded = (bool)($row->is_superseded || $row->notification_status === 'superseded');
                     $whBadge = match($row->webhook_submission_status) {
                         'submitted' => 'badge-submitted',
                         'failed' => 'badge-failed',
                         'blocked' => 'badge-blocked',
+                        'superseded' => 'badge-superseded',
                         default => 'badge-queued',
                     };
 
@@ -399,10 +410,11 @@
                         'read' => 'badge-read',
                         'failed' => 'badge-failed',
                         'blocked' => 'badge-blocked',
+                        'superseded' => 'badge-superseded',
                         default => 'badge-pending',
                     };
                 ?>
-                <tr style="{{ $row->is_superseded ? 'background:#fffbeb;' : '' }}">
+                <tr style="{{ $isSuperseded ? 'background:#fffbeb;' : '' }}">
                     {{-- 1. Notification ID & Batch ID --}}
                     <td>
                         <div><strong>#{{ $row->notification_id }}</strong></div>
@@ -422,9 +434,9 @@
                             <div class="muted" style="font-size:10px;">Single Send</div>
                         @endif
 
-                        @if($row->is_superseded)
+                        @if($isSuperseded)
                             <div style="margin-top:4px;">
-                                <span class="badge-status badge-superseded" title="Dues rolled into consolidated challan">Superseded</span>
+                                <span class="badge-status badge-superseded" title="Superseded by newer authoritative SCH invoice">Superseded</span>
                             </div>
                         @endif
                     </td>
@@ -436,6 +448,14 @@
                                 {{ $row->invoice_number }} 📄
                             </a>
                         </div>
+                        @if($isSuperseded && !empty($row->superseded_by_invoice_number))
+                            <div style="margin-top:4px; font-size:11px; background:#fef3c7; color:#92400e; padding:3px 6px; border-radius:4px; border:1px solid #fde68a;">
+                                <span>Replaced by:</span>
+                                <a href="{{ $row->superseded_by_invoice_url ?? '#' }}" target="_blank" style="font-weight:700; color:#b45309; text-decoration:underline;" title="View Newer Authoritative Invoice">
+                                    {{ $row->superseded_by_invoice_number }} ↗
+                                </a>
+                            </div>
+                        @endif
                         <div class="muted" style="font-size:11px; margin-top:2px;">
                             {{ $row->billing_period ?: '—' }}
                         </div>
@@ -545,7 +565,7 @@
                         <span class="badge-status {{ $whBadge }}">
                             {{ strtoupper($row->webhook_submission_status) }}
                         </span>
-                        @if($row->submitted_at)
+                        @if(!$isSuperseded && $row->submitted_at)
                             <div class="muted" style="font-size:10px; margin-top:2px;">
                                 {{ substr($row->submitted_at, 0, 16) }}
                             </div>
@@ -557,7 +577,7 @@
                         <span class="badge-status {{ $waBadge }}">
                             {{ strtoupper($row->whatsapp_delivery_status) }}
                         </span>
-                        @if($row->delivered_at)
+                        @if(!$isSuperseded && $row->delivered_at)
                             <div class="muted" style="font-size:10px; margin-top:2px;">
                                 {{ substr($row->delivered_at, 0, 16) }}
                             </div>
@@ -588,7 +608,7 @@
 
                     {{-- 9. Action --}}
                     <td>
-                        @if(in_array($row->notification_status, ['failed', 'blocked'], true))
+                        @if(!$isSuperseded && in_array($row->notification_status, ['failed', 'blocked'], true))
                             <form method="post" action="{{ route('invoices.notifications.retry', $row->notification_id) }}" style="margin:0;">
                                 @csrf
                                 <button class="btn small" type="submit" style="background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; font-weight:700; padding:2px 8px; font-size:11px; border-radius:3px;">

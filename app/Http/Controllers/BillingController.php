@@ -304,6 +304,9 @@ class BillingController {
    }
    return $total;
   });
+  if(!empty($result['invoices'])){
+   app(\App\Services\SafeSchReplacementService::class)->processNewInvoices($result['invoices'],$r->user());
+  }
   return redirect('/invoices')->with('notice',"Created {$result['created']} invoices across ".count($periods)." period(s); skipped {$result['skipped']} previously billed items. Nothing has been sent.");
  }
  public function invoices(Request $r){
@@ -311,14 +314,26 @@ class BillingController {
    $queueService = app(\App\Services\InvoiceDeliveryQueueService::class);
 
    $availableMonths = $queueService->getAvailableBillingMonths();
-   $selectedPeriod = $r->filled('period') ? $r->query('period') : $queueService->getLatestBillingMonth();
+   $isAllPeriod = (!$r->filled('period') || $r->query('period') === 'all');
+   $selectedPeriod = ($r->filled('period') && $r->query('period') !== 'all') ? $r->query('period') : $queueService->getLatestBillingMonth();
    $currentTab = $r->boolean('paid_only') ? 'paid' : $r->query('tab', 'ready');
    $perPage = in_array((int)$r->query('per_page'), [25, 50, 100], true) ? (int)$r->query('per_page') : 25;
 
+   if ($r->filled('from_date') || $r->filled('to_date')) {
+    $r->validate([
+     'from_date' => 'nullable|date_format:Y-m-d',
+     'to_date' => 'nullable|date_format:Y-m-d|after_or_equal:from_date',
+    ], [
+     'from_date.date_format' => 'From Date must be a valid date in YYYY-MM-DD format.',
+     'to_date.date_format' => 'To Date must be a valid date in YYYY-MM-DD format.',
+     'to_date.after_or_equal' => 'To Date must be greater than or equal to From Date.',
+    ]);
+   }
+
    $isPaidTab = ($currentTab === 'paid') || $r->boolean('paid_only');
    $webhookType = $isPaidTab ? 'paid' : 'monthly';
-   $paidStatus = $isPaidTab ? $r->query('paid_status', 'unqueued') : 'all';
-   if (!in_array($paidStatus, ['unqueued', 'queued', 'processing', 'submitted', 'attention', 'all'], true)) $paidStatus = 'unqueued';
+   $paidStatus = $isPaidTab ? $r->query('paid_status', 'all') : 'all';
+   if (!in_array($paidStatus, ['unqueued', 'queued', 'processing', 'submitted', 'attention', 'all'], true)) $paidStatus = 'all';
 
    $filters = [
     'campus_id' => $r->query('campus_id'),
@@ -332,17 +347,21 @@ class BillingController {
     'webhook_type' => $webhookType,
     'send_mode' => $r->query('send_mode'),
     'search' => $r->query('search'),
+    'from_date' => $r->query('from_date'),
+    'to_date' => $r->query('to_date'),
    ];
+
+   $paidFilters = $isAllPeriod ? array_merge($filters, ['period' => 'all']) : $filters;
 
    if ($isPaidTab && $r->boolean('paid_refresh')) {
     $tracking = $r->query('paid_tracking', '');
     $trackingIds = is_string($tracking) ? array_slice(array_values(array_unique(array_filter(array_map('intval', explode(',', $tracking)), fn($id) => $id > 0))), 0, 100) : [];
-    return response()->json($queueService->getPaidWorkflowRefresh($filters, $r->user(), $perPage, $trackingIds))
+    return response()->json($queueService->getPaidWorkflowRefresh($paidFilters, $r->user(), $perPage, $trackingIds))
      ->header('Cache-Control', 'no-store');
    }
 
-   $dashboardStats = $queueService->getDashboardKpiStats($selectedPeriod, $r->user(), $filters);
-   $paidWorkflowStats = $isPaidTab ? $queueService->getPaidWorkflowStats($selectedPeriod, $r->user(), $filters) : [
+   $dashboardStats = $queueService->getDashboardKpiStats($selectedPeriod, $r->user(), $isAllPeriod ? array_merge($filters, ['all_period' => true]) : $filters);
+   $paidWorkflowStats = $isPaidTab ? $queueService->getPaidWorkflowStats($isAllPeriod ? 'all' : $selectedPeriod, $r->user(), $paidFilters) : [
        'unqueued' => 0,
        'queued' => 0,
        'processing' => 0,
@@ -356,15 +375,24 @@ class BillingController {
    $paidInvoicesPage = null;
    $tabQueuePage = null;
    $financialHistoryPage = null;
+   $financialReceiptsPage = null;
+   $historyType = 'sch';
+   $historyCounts = ['sch' => 0, 'rcp' => 0];
    $selectionSnapshot = null;
 
    if ($currentTab === 'ready') {
-    $readyChallans = $queueService->getReadyToSendChallans($filters, $r->user(), $perPage);
-    $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
+    $readyFilters = $isAllPeriod ? array_merge($filters, ['period' => 'all']) : $filters;
+    $readyChallans = $queueService->getReadyToSendChallans($readyFilters, $r->user(), $perPage);
+    $selectionSnapshot = $batchService->resolveFilteredSelection($readyFilters, $r->user(), ['whatsapp']);
+
    } elseif ($currentTab === 'paid') {
-    $paidInvoicesPage = $queueService->getPaidInvoices($filters, $r->user(), $perPage);
+    $paidInvoicesPage = $queueService->getPaidInvoices($paidFilters, $r->user(), $perPage);
     if (in_array($paidStatus, ['unqueued', 'all'], true)) {
-     $selectionSnapshot = $batchService->resolveFilteredSelection(array_merge($filters, ['paid_only' => true, 'webhook_type' => 'paid', 'paid_status' => 'unqueued']), $r->user(), ['whatsapp']);
+     $snapshotFilters = array_merge($filters, ['paid_only' => true, 'webhook_type' => 'paid', 'paid_status' => $paidStatus]);
+     if ($isAllPeriod) {
+      $snapshotFilters['all_period'] = true;
+     }
+     $selectionSnapshot = $batchService->resolveFilteredSelection($snapshotFilters, $r->user(), ['whatsapp']);
     }
    } elseif ($currentTab === 'processing') {
     $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'queued']), $r->user(), $perPage);
@@ -373,12 +401,35 @@ class BillingController {
    } elseif ($currentTab === 'attention') {
     $tabQueuePage = $queueService->getNeedsAttentionCases($filters, $r->user(), $perPage);
    } elseif ($currentTab === 'history') {
-    $financialHistoryPage = $queueService->getFinancialHistory($filters, $r->user(), $perPage);
+    $historyType = $r->query('history_type', $r->query('subtab', 'sch'));
+    if (!in_array($historyType, ['sch', 'rcp'], true)) {
+     $historyType = 'sch';
+    }
+    $historyFilters = $isAllPeriod ? array_merge($filters, ['period' => 'all']) : $filters;
+    if (!$r->filled('period')) {
+     $historyFilters['period'] = 'all';
+    }
+
+    $historyCounts = $queueService->getFinancialHistoryCounts($historyFilters, $r->user());
+
+    if ($historyType === 'rcp') {
+     $receiptFilters = $historyFilters;
+     if ($r->filled('receipt_status')) {
+      $receiptFilters['receipt_status'] = $r->query('receipt_status');
+     }
+     $financialReceiptsPage = $queueService->getFinancialReceiptHistory($receiptFilters, $r->user(), $perPage);
+     $financialHistoryPage = null;
+    } else {
+     $financialHistoryPage = $queueService->getFinancialHistory($historyFilters, $r->user(), $perPage);
+     $financialReceiptsPage = null;
+    }
    } else {
     // Default fallback to ready
     $currentTab = 'ready';
-    $readyChallans = $queueService->getReadyToSendChallans($filters, $r->user(), $perPage);
-    $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
+    $readyFilters = $isAllPeriod ? array_merge($filters, ['period' => 'all']) : $filters;
+    $readyChallans = $queueService->getReadyToSendChallans($readyFilters, $r->user(), $perPage);
+    $selectionSnapshot = $batchService->resolveFilteredSelection($readyFilters, $r->user(), ['whatsapp']);
+
    }
 
    $gradeOptions = \Illuminate\Support\Facades\DB::table('enrollments')->whereNotNull('grade_label')->distinct()->orderBy('grade_label')->pluck('grade_label');
@@ -398,11 +449,15 @@ class BillingController {
     'paidRefreshSignature' => $isPaidTab ? $queueService->paidWorkflowSignature($paidWorkflowStats, $paidInvoicesPage ?? []) : null,
     'availableMonths' => $availableMonths,
     'selectedPeriod' => $selectedPeriod,
+    'isAllPeriod' => $isAllPeriod,
     'dashboardStats' => $dashboardStats,
     'readyChallans' => $readyChallans,
     'paidInvoicesPage' => $paidInvoicesPage,
     'tabQueuePage' => $tabQueuePage,
     'financialHistoryPage' => $financialHistoryPage,
+    'financialReceiptsPage' => $financialReceiptsPage,
+    'historyType' => $historyType,
+    'historyCounts' => $historyCounts,
     'selectionSnapshot' => $selectionSnapshot,
     'currentFilters' => $filters,
     'perPage' => $perPage,
@@ -420,11 +475,14 @@ class BillingController {
   abort_if($r->user()->role==='auditor',403);
   $batchService = app(BatchDeliveryService::class);
   $isPaid = $r->boolean('paid_only') || $r->query('tab') === 'paid' || $r->query('webhook_type') === 'paid';
+  $reqPeriod = $r->query('period');
+  $isAllPeriod = $isPaid && ($reqPeriod === 'all' || $r->boolean('all_period'));
   $filters = [
    'campus_id' => $r->query('campus_id'),
    'department_id' => $r->query('department_id'),
    'grade' => $r->query('grade'),
-   'period' => $r->query('period'),
+   'period' => $isAllPeriod ? app(InvoiceDeliveryQueueService::class)->getLatestBillingMonth() : $reqPeriod,
+   'all_period' => $isAllPeriod,
    'contact_status' => $r->query('contact_status', 'all'),
    'payment_status' => $r->query('payment_status', 'all'),
    'paid_only' => $isPaid,
@@ -456,25 +514,39 @@ class BillingController {
    'campus_id'=>'nullable|integer',
    'department_id'=>'nullable|integer',
    'grade'=>'nullable|string|max:190',
-   'period'=>'nullable|string|max:20',
+   'period'=>['nullable', 'regex:/^(\d{4}-(?:0[1-9]|1[0-2])|all)$/'],
    'contact_status'=>'nullable|in:all,eligible_only,ineligible_only',
    'payment_status'=>'nullable|in:all,unpaid,partial,paid',
   ], [
+   'period.regex'=>'Unified all-period batch delivery is not permitted. Please select a specific billing month (YYYY-MM).',
    'review_confirmed.accepted'=>'Please acknowledge: "I have reviewed the selected families, their included students and grades, and approve this delivery batch."',
   ]);
 
   $webhookType=$d['webhook_type']??($r->boolean('paid_only')?'paid':'monthly');
+
+  // Server-side protection: Unified all-period batch delivery is accepted ONLY through
+  // the authorized Ready to Send workflow with verified recipient selection and permission verification.
+  // Arbitrary POSTs containing period=all without snapshot or for paid receipts are strictly rejected.
+  if (($d['period'] ?? null) === 'all') {
+   if ($webhookType !== 'monthly' || empty($d['snapshot_id'])) {
+    throw \Illuminate\Validation\ValidationException::withMessages([
+     'period' => 'Unified all-period batch delivery is not permitted without an authorized Ready to Send workflow and verified selection snapshot.',
+    ]);
+   }
+  }
+
   if($webhookType==='monthly'){
    abort_unless(app(\App\Services\ConsolidatedInvoiceBuilder::class)->canDispatchFullFamilyStatement($r->user()),403,'Unauthorized: Restricted staff cannot dispatch unrestricted full-family consolidated fee statements.');
   }
   $actionType=$d['action_type']??$r->input('action_type', 'send_now');
   $dispatchNow=($actionType !== 'add_to_queue');
 
+  $targetPeriod = $d['period'] ?? app(\App\Services\InvoiceDeliveryQueueService::class)->getLatestBillingMonth();
   $filters=[
    'campus_id'=>$d['campus_id']??null,
    'department_id'=>$d['department_id']??null,
    'grade'=>$d['grade']??null,
-   'period'=>$d['period']??null,
+   'period'=>$targetPeriod,
    'contact_status'=>$d['contact_status']??'all',
    'payment_status'=>$d['payment_status']??'all',
    'paid_only'=>($webhookType==='paid'),
@@ -483,6 +555,9 @@ class BillingController {
    'send_mode'=>$d['send_mode']??null,
    'search'=>$r->input('search'),
   ];
+  if ($webhookType === 'paid' && $r->boolean('all_period')) {
+   $filters['all_period'] = true;
+  }
 
   $explicitIds=null;
   if($d['selection_mode']==='page'){
@@ -492,6 +567,18 @@ class BillingController {
     ]);
    }
    $explicitIds=array_values(array_unique(array_map('intval',$d['invoice_ids'])));
+   if ($webhookType === 'monthly' && $targetPeriod !== 'all') {
+    $mismatchCount = DB::table('invoices as i')
+     ->join('billing_runs as b', 'b.id', '=', 'i.billing_run_id')
+     ->whereIn('i.id', $explicitIds)
+     ->where('b.period_start', 'not like', $targetPeriod . '%')
+     ->count();
+    if ($mismatchCount > 0) {
+     throw \Illuminate\Validation\ValidationException::withMessages([
+      'invoice_ids' => "Selected invoice(s) do not belong to the target billing period {$targetPeriod}.",
+     ]);
+    }
+   }
   }
 
   $batchService=app(BatchDeliveryService::class);
@@ -501,7 +588,7 @@ class BillingController {
     $d['confirmed_grades'] ?? [],
     $d['channels'],
     $r->user(),
-    $d['period']??null,
+    $targetPeriod,
     $explicitIds,
     $d['snapshot_id']??null,
     $r->boolean('review_confirmed'),
@@ -515,8 +602,8 @@ class BillingController {
   }
 
   if (!$dispatchNow) {
-      $targetPeriod = $filters['period'] ?: '2026-10';
-      $query = $this->paidWorkflowReturnQuery($r, $targetPeriod, 'queued');
+      $returnPeriod = ($webhookType === 'paid' && $r->boolean('all_period')) ? 'all' : ($filters['period'] ?: '2026-10');
+      $query = $this->paidWorkflowReturnQuery($r, $returnPeriod, 'queued');
       unset($query['page']);
       return redirect('/invoices?'.http_build_query($query))->with('notice', $result['message']);
   }
@@ -532,17 +619,19 @@ class BillingController {
    'invoice_ids.*' => 'required|integer|distinct|min:1',
   ]);
   $period = $data['period'];
+  $isAllPeriod = $r->boolean('all_period');
+  $returnPeriod = $isAllPeriod ? 'all' : $period;
   $batchService = app(BatchDeliveryService::class);
   try {
-   $result = $batchService->sendQueuedPaidInvoices($r->user(), $period, $data['invoice_ids']);
+   $result = $batchService->sendQueuedPaidInvoices($r->user(), $isAllPeriod ? null : $period, $data['invoice_ids']);
   } catch (\RuntimeException $e) {
-   return redirect('/invoices?'.http_build_query($this->paidWorkflowReturnQuery($r, $period, 'queued')))->withErrors(['queue' => $e->getMessage()]);
+   return redirect('/invoices?'.http_build_query($this->paidWorkflowReturnQuery($r, $returnPeriod, 'queued')))->withErrors(['queue' => $e->getMessage()]);
   }
 
   $queueService = app(\App\Services\InvoiceDeliveryQueueService::class);
-  $stages = $queueService->paidInvoiceStages($data['invoice_ids'], ['period' => $period], $r->user());
+  $stages = $queueService->paidInvoiceStages($data['invoice_ids'], ['period' => $returnPeriod], $r->user());
   $stage = $queueService->preferredPaidStage(array_values($stages));
-  $query = $this->paidWorkflowReturnQuery($r, $period, $stage);
+  $query = $this->paidWorkflowReturnQuery($r, $returnPeriod, $stage);
   if ($stage !== 'queued') unset($query['page']);
   $query['paid_tracking'] = implode(',', array_slice($data['invoice_ids'], 0, 100));
   return redirect('/invoices?'.http_build_query($query))->with('notice', $result['message']);
@@ -662,7 +751,9 @@ class BillingController {
    'webhook_type'=>'nullable|in:monthly,paid',
    'send_mode'=>'nullable|in:whatsapp,email',
    'selected_grade'=>'nullable|string|max:190',
+   'period'=>['nullable', 'regex:/^\d{4}-(?:0[1-9]|1[0-2])$/'],
   ], [
+   'period.regex'=>'Unified all-period batch delivery is not permitted. Please select a specific billing month (YYYY-MM).',
    'review_confirmed.accepted'=>'Please acknowledge: "I have reviewed the selected families, their included students and grades, and approve this delivery batch."',
   ]);
 
@@ -708,6 +799,17 @@ class BillingController {
    }
    if($webhookType==='paid'&&!$isSettled){
     throw \Illuminate\Validation\ValidationException::withMessages(['invoice_ids'=>'Only fully paid invoices can be sent to the Paid Invoice Webhook. Remove unsettled invoices from the selection.']);
+   }
+  }
+
+  if (!empty($d['period']) && $webhookType === 'monthly') {
+   foreach ($invoices as $invoice) {
+    $invPeriod = substr((string) DB::table('billing_runs')->where('id', $invoice->billing_run_id)->value('period_start'), 0, 7);
+    if ($invPeriod !== $d['period']) {
+     throw \Illuminate\Validation\ValidationException::withMessages([
+      'invoice_ids' => "Selected invoice {$invoice->invoice_number} belongs to period {$invPeriod}, which does not match requested period {$d['period']}.",
+     ]);
+    }
    }
   }
 
@@ -974,6 +1076,10 @@ class BillingController {
   $consolidatedBuilder=app(\App\Services\ConsolidatedInvoiceBuilder::class);
   if($webhookType==='monthly'){
    abort_unless($consolidatedBuilder->canDispatchFullFamilyStatement($r->user()),403,'Unauthorized: Restricted staff cannot dispatch unrestricted full-family consolidated fee statements.');
+  }
+
+  if(!empty($notification->is_superseded) || $notification->status === 'superseded'){
+   return back()->with('error','Superseded notifications cannot be retried.');
   }
 
   if(!in_array($notification->status,['failed','blocked'],true)){

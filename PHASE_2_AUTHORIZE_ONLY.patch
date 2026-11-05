@@ -1,0 +1,58 @@
+﻿diff --git a/app/Http/Controllers/BillingController.php b/app/Http/Controllers/BillingController.php
+index fdf9c3a..dba3e6e 100644
+--- a/app/Http/Controllers/BillingController.php
++++ b/app/Http/Controllers/BillingController.php
+@@ -311,7 +311,8 @@ class BillingController {
+    $queueService = app(\App\Services\InvoiceDeliveryQueueService::class);
+ 
+    $availableMonths = $queueService->getAvailableBillingMonths();
+-   $selectedPeriod = $r->filled('period') ? $r->query('period') : $queueService->getLatestBillingMonth();
++   $isAllPeriod = ($r->query('period') === 'all');
++   $selectedPeriod = ($r->filled('period') && !$isAllPeriod) ? $r->query('period') : $queueService->getLatestBillingMonth();
+    $currentTab = $r->boolean('paid_only') ? 'paid' : $r->query('tab', 'ready');
+    $perPage = in_array((int)$r->query('per_page'), [25, 50, 100], true) ? (int)$r->query('per_page') : 25;
+ 
+@@ -362,7 +363,8 @@ class BillingController {
+     $readyChallans = $queueService->getReadyToSendChallans($filters, $r->user(), $perPage);
+     $selectionSnapshot = $batchService->resolveFilteredSelection($filters, $r->user(), ['whatsapp']);
+    } elseif ($currentTab === 'paid') {
+-    $paidInvoicesPage = $queueService->getPaidInvoices($filters, $r->user(), $perPage);
++    $paidFilters = $isAllPeriod ? array_merge($filters, ['period' => 'all']) : $filters;
++    $paidInvoicesPage = $queueService->getPaidInvoices($paidFilters, $r->user(), $perPage);
+     if (in_array($paidStatus, ['unqueued', 'all'], true)) {
+      $selectionSnapshot = $batchService->resolveFilteredSelection(array_merge($filters, ['paid_only' => true, 'webhook_type' => 'paid', 'paid_status' => 'unqueued']), $r->user(), ['whatsapp']);
+     }
+@@ -373,7 +375,8 @@ class BillingController {
+    } elseif ($currentTab === 'attention') {
+     $tabQueuePage = $queueService->getNeedsAttentionCases($filters, $r->user(), $perPage);
+    } elseif ($currentTab === 'history') {
+-    $financialHistoryPage = $queueService->getFinancialHistory($filters, $r->user(), $perPage);
++    $historyFilters = $isAllPeriod ? array_merge($filters, ['period' => 'all']) : $filters;
++    $financialHistoryPage = $queueService->getFinancialHistory($historyFilters, $r->user(), $perPage);
+    } else {
+     // Default fallback to ready
+     $currentTab = 'ready';
+diff --git a/app/Services/InvoiceDeliveryQueueService.php b/app/Services/InvoiceDeliveryQueueService.php
+index 8cea3b9..a4997fa 100644
+--- a/app/Services/InvoiceDeliveryQueueService.php
++++ b/app/Services/InvoiceDeliveryQueueService.php
+@@ -1331,7 +1331,9 @@ class InvoiceDeliveryQueueService
+             })
+             ->leftJoin('notification_batches as paid_b', 'paid_b.batch_id', '=', 'paid_n.batch_id');
+ 
+-        if ($period === '2026-10') {
++        if ($period === 'all') {
++            // All-period listing: do not restrict by billing period start
++        } elseif ($period === '2026-10') {
+             $q->where(function ($periodQ) {
+                 $periodQ->where('b.period_start', 'like', '2026-10%')
+                     ->orWhere(function ($older) {
+@@ -1883,7 +1885,7 @@ class InvoiceDeliveryQueueService
+         if (!empty($filters['department_id'])) {
+             $q->where('i.department_id', (int)$filters['department_id']);
+         }
+-        if (!empty($filters['period'])) {
++        if (!empty($filters['period']) && $filters['period'] !== 'all') {
+             $q->where('b.period_start', 'like', $filters['period'] . '%');
+         }
+         if (!empty($filters['payment_status']) && $filters['payment_status'] !== 'all') {

@@ -1,0 +1,80 @@
+﻿diff --git b/app/Services/BatchDeliveryService.php a/app/Services/BatchDeliveryService.php
+index b6267b2..022c65a 100644
+--- b/app/Services/BatchDeliveryService.php
++++ a/app/Services/BatchDeliveryService.php
+@@ -313,9 +313,6 @@ class BatchDeliveryService
+         $coverage = $webhookType === 'monthly'
+             ? app(InvoiceSubmissionCoverageService::class)->forPeriod($periodForSummary, $user)
+             : [];
+-        $activeInFlightFamilies = $webhookType === 'monthly'
+-            ? array_flip($this->getActiveOverlappingDeliveryFamilyIds($allInvoices->pluck('family_id')->unique()->filter()->values()->all(), $user))
+-            : [];
+ 
+         foreach ($grouped as $groupKey => $invoicesGroup) {
+             // Sort group so that the latest appropriate invoice comes first
+@@ -334,15 +331,9 @@ class BatchDeliveryService
+ 
+             $primaryInvoice = $sorted->first();
+ 
+-            if ($webhookType === 'monthly' && (isset($coverage[(int) $primaryInvoice->family_id]) || isset($activeInFlightFamilies[(int) $primaryInvoice->family_id]))) {
+-                $isPending = isset($activeInFlightFamilies[(int) $primaryInvoice->family_id]) || !empty($coverage[(int) $primaryInvoice->family_id]['pending']);
+-                if ($isPending) {
+-                    $excludedBreakdown['already_queued']++;
+-                    $excludedReasons[$primaryInvoice->id] = 'Dues already included in a pending initial submission across billing periods; wait for delivery before staging additional batches.';
+-                } else {
+-                    $excludedBreakdown['already_submitted']++;
+-                    $excludedReasons[$primaryInvoice->id] = 'Dues already included in an accepted webhook submission or pending initial submission; reminders require separate authorization.';
+-                }
++            if ($webhookType === 'monthly' && isset($coverage[(int) $primaryInvoice->family_id])) {
++                $excludedBreakdown['already_submitted']++;
++                $excludedReasons[$primaryInvoice->id] = 'Dues already included in an accepted webhook submission or pending initial submission; reminders require separate authorization.';
+                 continue;
+             }
+ 
+@@ -781,8 +772,7 @@ class BatchDeliveryService
+                 sort($familyIds);
+                 DB::table('families')->whereIn('id', $familyIds)->orderBy('id')->lockForUpdate()->get();
+                 $coverage = app(InvoiceSubmissionCoverageService::class)->forPeriod($billingPeriod ?: $snapshot['billing_cycle'], $user);
+-                $activeOverlapping = $this->getActiveOverlappingDeliveryFamilyIds($familyIds, $user);
+-                if (array_intersect($familyIds, array_keys($coverage)) || !empty($activeOverlapping)) {
++                if (array_intersect($familyIds, array_keys($coverage))) {
+                     throw new RuntimeException('Selection changed: dues are already covered or pending. Refresh before staging initial invoices.');
+                 }
+             }
+@@ -1103,36 +1093,6 @@ class BatchDeliveryService
+         ]);
+     }
+ 
+-    /**
+-     * Identify families with active in-flight initial monthly delivery attempts
+-     * (status 'queued' or 'processing') across all billing periods that overlap
+-     * with consolidated family obligations.
+-     */
+-    protected function getActiveOverlappingDeliveryFamilyIds(array $familyIds, object $user): array
+-    {
+-        if (empty($familyIds)) {
+-            return [];
+-        }
+-
+-        $query = DB::table('notifications as n')
+-            ->join('invoices as i', 'i.id', '=', 'n.invoice_id')
+-            ->whereIn('i.family_id', $familyIds)
+-            ->where(function ($q) {
+-                $q->where('n.webhook_type', 'monthly')
+-                  ->orWhere('n.kind', 'monthly');
+-            })
+-            ->whereIn('n.status', ['queued', 'processing']);
+-
+-        if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+-            $query->where('i.campus_id', $user->campus_id);
+-            if (!empty($user->department_id)) {
+-                $query->where('i.department_id', $user->department_id);
+-            }
+-        }
+-
+-        return $query->pluck('i.family_id')->map(fn($id) => (int)$id)->unique()->values()->all();
+-    }
+-
+     private function enqueueDispatch(string $batchId, ?array $notificationIds, string $webhookType): void
+     {
+         if ($webhookType !== 'paid') {

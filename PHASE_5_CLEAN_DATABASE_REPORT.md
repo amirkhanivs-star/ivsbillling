@@ -111,8 +111,8 @@ The database was seeded using `php artisan db:seed` (excluding demo seeders):
   * ID 2: `Tuition` (code: `tuition`)
   * ID 3: `Quran` (code: `quran`)
 * **Department Branding (2):**
-  * School: Display name `"IQRA Virtual School"`, support email `"accounts@iqra.edu.pk"`
-  * Tuition: Display name `"IQRA Virtual Tuition"`, support email `"tuition@iqra.edu.pk"`
+  * School: Display name `"IQRA Virtual School"`, support email `"acivs2021@gmail.com"`
+  * Tuition: Display name `"IQRA Virtual Tuition"`, support email `"acivs2021@gmail.com"`
 * **Standard Fee Types (8):**
   * `monthly` — Monthly Fee
   * `registration` — Registration Fee
