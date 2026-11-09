@@ -1156,17 +1156,70 @@ class BillingController {
   elseif($searchBy==='invoice'&&$invQuery!==''){$term=$invQuery;}
   elseif($searchBy==='family'&&$famQuery!==''){$term=$famQuery;}
   else{$term=$grQuery!==''?$grQuery:($invQuery!==''?$invQuery:$famQuery);}
+
+  $feeHistoryService = app(\App\Services\FeeHistoryService::class);
+  $searchedReceipt = null;
+  $searchedInvoice = null;
+  $selectedStudent = null;
+  $receiptStudentIds = [];
+  $invoiceStudentIds = [];
+
   if($term!==''){
-   $findByGr=fn()=>DB::table('families as f')->join('students as s','s.family_id','=','f.id')->where('s.gr_number',$term)->select('f.*')->first();
-   $findByFamilyCode=fn()=>DB::table('families')->where('family_code',$term)->first();
-   $findByInvoice=fn()=>DB::table('families as f')->join('invoices as i','i.family_id','=','f.id')->where('i.invoice_number',$term)->select('f.*')->first();
-   if($searchBy==='gr'||($grQuery!==''&&$searchBy==='')){
-    $family=$findByGr()??$findByFamilyCode()??$findByInvoice();
-   }elseif($searchBy==='invoice'||($invQuery!==''&&$searchBy==='')){
-    $family=$findByInvoice()??$findByFamilyCode()??$findByGr();
-   }else{
-    $family=$findByFamilyCode()??$findByGr()??$findByInvoice();
+   $findByGr = function() use ($term, &$selectedStudent) {
+    $selectedStudent = DB::table('students')->where('gr_number', $term)->first();
+    if ($selectedStudent) {
+     return DB::table('families')->where('id', $selectedStudent->family_id)->first();
+    }
+    return null;
+   };
+   $findByFamilyCode = fn() => DB::table('families')->where('family_code', $term)->first();
+   $findByReceipt = function() use ($term, $feeHistoryService, $r, &$searchedReceipt, &$receiptStudentIds) {
+    $searchedReceipt = $feeHistoryService->getReceiptByNumber($term, $r->user());
+    if ($searchedReceipt) {
+     $famId = $searchedReceipt->family_id ?? null;
+     $receiptStudentIds = collect($searchedReceipt->students ?? [])->pluck('id')->filter()->all();
+     if (!$famId && !empty($searchedReceipt->student_grs)) {
+      $stRow = DB::table('students')->whereIn('gr_number', $searchedReceipt->student_grs)->first();
+      $famId = $stRow?->family_id;
+      if (empty($receiptStudentIds)) {
+       $receiptStudentIds = DB::table('students')->whereIn('gr_number', $searchedReceipt->student_grs)->pluck('id')->all();
+      }
+     }
+     if ($famId) {
+      return DB::table('families')->where('id', $famId)->first();
+     }
+    }
+    return null;
+   };
+   $findByInvoice = function() use ($term, &$searchedInvoice, &$invoiceStudentIds) {
+    $searchedInvoice = DB::table('invoices as i')->join('departments as d', 'd.id', '=', 'i.department_id')
+     ->where('i.invoice_number', $term)
+     ->select('i.*', 'd.name as department_name')->first();
+    if ($searchedInvoice) {
+     $invoiceStudentIds = DB::table('invoice_items')->where('invoice_id', $searchedInvoice->id)
+      ->where('status', '!=', 'voided')->pluck('student_id')->unique()->all();
+     return DB::table('families')->where('id', $searchedInvoice->family_id)->first();
+    }
+    return null;
+   };
+
+   if ($searchBy === 'gr') {
+    $family = $findByGr() ?? $findByFamilyCode();
+   } elseif ($searchBy === 'invoice') {
+    $family = $findByReceipt() ?? $findByInvoice() ?? $findByFamilyCode() ?? $findByGr();
+   } elseif ($searchBy === 'family') {
+    $family = $findByFamilyCode() ?? $findByGr();
+    $selectedStudent = null;
+   } else {
+    if ($grQuery !== '') {
+     $family = $findByGr() ?? $findByFamilyCode() ?? $findByReceipt() ?? $findByInvoice();
+    } elseif ($invQuery !== '') {
+     $family = $findByReceipt() ?? $findByInvoice() ?? $findByFamilyCode() ?? $findByGr();
+    } else {
+     $family = $findByFamilyCode() ?? $findByGr() ?? $findByReceipt() ?? $findByInvoice();
+    }
    }
+
    if($family&&!in_array($r->user()->role,['super_admin','finance_admin'],true)){
     $visible=DB::table('enrollments as e')->join('students as s','s.id','=','e.student_id')
      ->where('s.family_id',$family->id)->where('e.campus_id',$r->user()->campus_id)
@@ -1177,13 +1230,16 @@ class BillingController {
    }
   }
   if($family){
-   $invoices=DB::table('invoices as i')->join('departments as d','d.id','=','i.department_id')->join('billing_runs as b','b.id','=','i.billing_run_id')->where('i.family_id',$family->id)
-    ->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id)))
-    ->select('i.*','d.name as department_name','b.period_start')->orderBy('i.due_date')->get();
+   $invQ=DB::table('invoices as i')->join('departments as d','d.id','=','i.department_id')->join('billing_runs as b','b.id','=','i.billing_run_id')->where('i.family_id',$family->id)
+    ->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id)));
+   if($searchedInvoice){
+    $invQ->where('i.id', $searchedInvoice->id);
+   }
+   $invoices=$invQ->select('i.*','d.name as department_name','b.period_start')->orderBy('i.due_date')->get();
 
    $invoiceIds=$invoices->pluck('id')->all();
    if($invoiceIds){
-    $invoiceItems=DB::table('invoice_items as ii')
+    $itemsQ=DB::table('invoice_items as ii')
      ->join('invoices as i','i.id','=','ii.invoice_id')
      ->join('billing_runs as br','br.id','=','i.billing_run_id')
      ->join('departments as d','d.id','=','i.department_id')
@@ -1192,8 +1248,17 @@ class BillingController {
      ->leftJoin('fee_types as ft','ft.id','=','ii.fee_type_id')
      ->whereIn('ii.invoice_id',$invoiceIds)
      ->where('ii.status','!=','voided')
-     ->whereNotIn('i.status',['void','voided'])
-     ->select('ii.*','i.invoice_number','i.due_date','br.frequency as billing_run_frequency','d.name as department_name','s.name as student_name','s.gr_number',DB::raw("COALESCE(en.grade_label, (SELECT e2.grade_label FROM enrollments as e2 WHERE e2.student_id = s.id ORDER BY CASE WHEN e2.status = 'active' THEN 0 ELSE 1 END, e2.id DESC LIMIT 1)) as class_name"),'ft.name as fee_type_name','ft.code as fee_type_code')
+     ->whereNotIn('i.status',['void','voided']);
+
+    if($selectedStudent){
+     $itemsQ->where('ii.student_id', $selectedStudent->id);
+    }elseif($searchedInvoice && !empty($invoiceStudentIds)){
+     $itemsQ->whereIn('ii.student_id', $invoiceStudentIds);
+    }elseif($searchedReceipt && !empty($receiptStudentIds)){
+     $itemsQ->whereIn('ii.student_id', $receiptStudentIds);
+    }
+
+    $invoiceItems=$itemsQ->select('ii.*','i.invoice_number','i.due_date','br.frequency as billing_run_frequency','d.name as department_name','s.name as student_name','s.gr_number',DB::raw("COALESCE(en.grade_label, (SELECT e2.grade_label FROM enrollments as e2 WHERE e2.student_id = s.id ORDER BY CASE WHEN e2.status = 'active' THEN 0 ELSE 1 END, e2.id DESC LIMIT 1)) as class_name"),'ft.name as fee_type_name','ft.code as fee_type_code')
      ->orderBy('ii.period_start')->orderBy('ii.id')->get();
 
     $itemIds=$invoiceItems->pluck('id')->all();
@@ -1328,7 +1393,34 @@ class BillingController {
     'total_due_minor'=>$singleCurrSummary ? $singleCurrSummary['total_due_minor'] : ($isMultiCurrSummary ? null : 0),
    ];
 
-   $dueGroups=DB::table('invoices as i')->join('departments as d','d.id','=','i.department_id')->where('i.family_id',$family->id)->whereNotIn('i.status',['void','voided'])->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id)))->select('d.name as department','i.currency')->selectRaw('SUM(CASE WHEN i.total_minor > i.paid_minor THEN i.total_minor-i.paid_minor ELSE 0 END) AS balance')->groupBy('d.name','i.currency')->orderBy('i.currency')->get();
+   if($searchedReceipt){
+    $dueGroups = collect();
+    $summaryMetrics['total_due_minor'] = 0;
+    foreach ($summaryMetrics['by_currency'] as $k => $v) {
+     $summaryMetrics['by_currency'][$k]['total_due_minor'] = 0;
+    }
+   }elseif($searchedInvoice){
+    $dueGroups = DB::table('invoices as i')->join('departments as d','d.id','=','i.department_id')
+     ->where('i.id', $searchedInvoice->id)
+     ->whereNotIn('i.status', ['void', 'voided'])
+     ->when(!in_array($r->user()->role, ['super_admin', 'finance_admin'], true), fn($q) => $q->where('i.campus_id', $r->user()->campus_id)->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id)))
+     ->select('d.name as department', 'i.currency')
+     ->selectRaw('SUM(CASE WHEN i.total_minor > i.paid_minor THEN i.total_minor-i.paid_minor ELSE 0 END) AS balance')
+     ->groupBy('d.name', 'i.currency')->orderBy('i.currency')->get();
+   }elseif($selectedStudent){
+    $dueGroups = DB::table('invoice_items as ii')
+     ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+     ->join('departments as d', 'd.id', '=', 'i.department_id')
+     ->where('ii.student_id', $selectedStudent->id)
+     ->where('ii.status', '!=', 'voided')
+     ->whereNotIn('i.status', ['void', 'voided'])
+     ->when(!in_array($r->user()->role, ['super_admin', 'finance_admin'], true), fn($q) => $q->where('i.campus_id', $r->user()->campus_id)->when($r->user()->department_id, fn($v) => $v->where('i.department_id', $r->user()->department_id)))
+     ->select('d.name as department', 'ii.currency')
+     ->selectRaw('SUM(CASE WHEN ii.net_minor > ii.paid_minor THEN ii.net_minor - ii.paid_minor ELSE 0 END) AS balance')
+     ->groupBy('d.name', 'ii.currency')->orderBy('ii.currency')->get();
+   }else{
+    $dueGroups=DB::table('invoices as i')->join('departments as d','d.id','=','i.department_id')->where('i.family_id',$family->id)->whereNotIn('i.status',['void','voided'])->when(!in_array($r->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('i.campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($v)=>$v->where('i.department_id',$r->user()->department_id)))->select('d.name as department','i.currency')->selectRaw('SUM(CASE WHEN i.total_minor > i.paid_minor THEN i.total_minor-i.paid_minor ELSE 0 END) AS balance')->groupBy('d.name','i.currency')->orderBy('i.currency')->get();
+   }
   }
   $scopes=collect();
   if($family){
@@ -1343,14 +1435,28 @@ class BillingController {
     ->unique(fn($scope)=>$scope->campus_id.':'.$scope->department_id.':'.$scope->currency)->values();
   }
   $feeTypes = DB::table('fee_types')->orderBy('id')->get();
-  $familyStudents = $family ? DB::table('students as s')
+  $familyStudentsQ = $family ? DB::table('students as s')
    ->join('enrollments as e', 'e.student_id', '=', 's.id')
    ->where('s.family_id', $family->id)
-   ->where('e.status', 'active')
-   ->select('s.*', 'e.id as enrollment_id', 'e.grade_label', 'e.campus_id', 'e.department_id', 'e.currency', 'e.monthly_fee_minor')
-   ->get() : collect();
+   ->where('e.status', 'active') : null;
+
+  if ($familyStudentsQ) {
+   if ($selectedStudent) {
+    $familyStudentsQ->where('s.id', $selectedStudent->id);
+   } elseif ($searchedInvoice && !empty($invoiceStudentIds)) {
+    $familyStudentsQ->whereIn('s.id', $invoiceStudentIds);
+   } elseif ($searchedReceipt && !empty($receiptStudentIds)) {
+    $familyStudentsQ->whereIn('s.id', $receiptStudentIds);
+   }
+   $familyStudents = $familyStudentsQ->select('s.*', 'e.id as enrollment_id', 'e.grade_label', 'e.campus_id', 'e.department_id', 'e.currency', 'e.monthly_fee_minor')->get();
+  } else {
+   $familyStudents = collect();
+  }
+  $invoiceStudents = ($searchedInvoice && !empty($invoiceStudentIds))
+   ? DB::table('students')->whereIn('id', $invoiceStudentIds)->get()
+   : collect();
   $catalogRates = DB::table('fee_catalog_rates')->get();
-  $studentFeePlans = $family ? DB::table('fee_plan_items as fpi')
+  $plansQuery = $family ? DB::table('fee_plan_items as fpi')
    ->join('enrollments as e', 'e.id', '=', 'fpi.enrollment_id')
    ->join('students as s', 's.id', '=', 'e.student_id')
    ->join('fee_types as ft', 'ft.id', '=', 'fpi.fee_type_id')
@@ -1361,22 +1467,35 @@ class BillingController {
     $q->whereNull('fpi.status')->orWhere('fpi.status', 'active');
    })
    ->whereNull('fpi.superseded_by_plan_id')
-   ->whereColumn('fpi.currency', 'e.currency')
-   ->orderByRaw('CASE WHEN fpi.effective_to IS NULL THEN 0 ELSE 1 END')
-   ->orderByDesc('fpi.effective_from')
-   ->orderByDesc('fpi.id')
-   ->select('fpi.*', 's.name as student_name', 's.gr_number', 'e.grade_label', 'ft.name as fee_type_name', 'ft.code as fee_type_code')
-   ->get()
-   ->unique(function ($p) {
-    return sprintf(
-     '%d|%d|%s|%s',
-     (int) $p->enrollment_id,
-     (int) ($p->fee_type_id ?? 0),
-     strtolower((string) ($p->frequency ?? 'monthly')),
-     strtolower(trim((string) ($p->subject_name ?? '')))
-    );
-   })
-   ->values() : collect();
+   ->whereColumn('fpi.currency', 'e.currency') : null;
+
+  if ($plansQuery) {
+   if ($selectedStudent) {
+    $plansQuery->where('s.id', $selectedStudent->id);
+   } elseif ($searchedInvoice && !empty($invoiceStudentIds)) {
+    $plansQuery->whereIn('s.id', $invoiceStudentIds);
+   } elseif ($searchedReceipt && !empty($receiptStudentIds)) {
+    $plansQuery->whereIn('s.id', $receiptStudentIds);
+   }
+   $studentFeePlans = $plansQuery
+    ->orderByRaw('CASE WHEN fpi.effective_to IS NULL THEN 0 ELSE 1 END')
+    ->orderByDesc('fpi.effective_from')
+    ->orderByDesc('fpi.id')
+    ->select('fpi.*', 's.name as student_name', 's.gr_number', 'e.grade_label', 'ft.name as fee_type_name', 'ft.code as fee_type_code')
+    ->get()
+    ->unique(function ($p) {
+     return sprintf(
+      '%d|%d|%s|%s',
+      (int) $p->enrollment_id,
+      (int) ($p->fee_type_id ?? 0),
+      strtolower((string) ($p->frequency ?? 'monthly')),
+      strtolower(trim((string) ($p->subject_name ?? '')))
+     );
+    })
+    ->values();
+  } else {
+   $studentFeePlans = collect();
+  }
   $advanceCredits = $family ? DB::table('payments')
    ->where('family_id', $family->id)
    ->where('status', 'received')
@@ -1464,9 +1583,15 @@ class BillingController {
    $myskoolDisputes = $dispQuery->limit(50)->get();
   }
 
-  $feeHistoryService = app(\App\Services\FeeHistoryService::class);
-  $feeHistory = $family ? $feeHistoryService->getFamilyFeeHistory($family->id, $r->all(), $r->user()) : new \Illuminate\Pagination\LengthAwarePaginator([], 0, 20);
-  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','feeHistory','dueGroups','scopes','registrationStatus','summaryMetrics','summaryByCurrency','feeTypes','familyStudents','catalogRates','studentFeePlans','advanceCredits','advanceCreditsByCurrency','historicalCollections','historicalDues','myskoolDisputes'));
+  $historyFilters = $r->all();
+  if ($selectedStudent) {
+   $feeHistory = $feeHistoryService->getStudentFeeHistory($selectedStudent->id, $historyFilters, $r->user());
+  } elseif ($family) {
+   $feeHistory = $feeHistoryService->getFamilyFeeHistory($family->id, $historyFilters, $r->user());
+  } else {
+   $feeHistory = new \Illuminate\Pagination\LengthAwarePaginator([], 0, 20);
+  }
+  return view('collection',$this->basics($r)+compact('family','invoices','invoiceItems','payments','feeHistory','dueGroups','scopes','registrationStatus','summaryMetrics','summaryByCurrency','feeTypes','familyStudents','catalogRates','studentFeePlans','advanceCredits','advanceCreditsByCurrency','historicalCollections','historicalDues','myskoolDisputes','selectedStudent','searchedReceipt','searchedInvoice','invoiceStudents'));
  }
 
  public function createChallanFee(Request $r){

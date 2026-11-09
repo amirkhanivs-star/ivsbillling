@@ -205,9 +205,106 @@ class FeeHistoryService
     }
 
     /**
+     * Look up a payment receipt by its receipt number (portal) or legacy slip number (MySkool).
+     */
+    public function getReceiptByNumber(string $identifier, ?object $user = null): ?object
+    {
+        $term = trim($identifier);
+        if ($term === '') {
+            return null;
+        }
+
+        // 1. Search live portal payments by receipt_number
+        $paymentQuery = DB::table('payments as p')
+            ->leftJoin('users as u', 'u.id', '=', 'p.received_by')
+            ->leftJoin('users as rev', 'rev.id', '=', 'p.reversed_by')
+            ->where('p.receipt_number', $term);
+
+        if ($user && !in_array($user->role, ['super_admin', 'finance_admin'], true)) {
+            $paymentQuery->where('p.campus_id', $user->campus_id)
+                ->when($user->department_id, fn($q) => $q->where('p.department_id', $user->department_id));
+        }
+
+        $payment = $paymentQuery->select('p.*', 'u.name as received_by_name', 'rev.name as reversed_by_name')
+            ->first();
+
+        if ($payment) {
+            $allocations = DB::table('payment_allocations as pa')
+                ->join('invoice_items as ii', 'ii.id', '=', 'pa.invoice_item_id')
+                ->leftJoin('enrollments as en', 'en.id', '=', 'ii.enrollment_id')
+                ->leftJoin('fee_types as ft', 'ft.id', '=', 'ii.fee_type_id')
+                ->leftJoin('students as s', 's.id', '=', 'ii.student_id')
+                ->where('pa.payment_id', $payment->id)
+                ->select(
+                    'pa.id as allocation_id',
+                    'pa.payment_id',
+                    'pa.amount_minor',
+                    'ii.description',
+                    'ii.discount_minor',
+                    'ii.period_start',
+                    'en.grade_label',
+                    DB::raw("COALESCE(ft.name, ii.description, 'Monthly Fee') as fee_type_name"),
+                    's.id as student_id',
+                    's.name as student_name',
+                    's.gr_number'
+                )
+                ->get();
+
+            $receipt = $this->formatPortalReceipt($payment, $allocations, $user);
+            $receipt->allocations = $allocations;
+            $receipt->family_id = $payment->family_id;
+            $receipt->payment_id = $payment->id;
+            $receipt->payment_account = $payment->method ?? 'Cash';
+            return $receipt;
+        }
+
+        // 2. Search historical staged collections by slip_number
+        if (Schema::hasTable('qa_staged_collections')) {
+            $stagedRows = DB::table('qa_staged_collections')
+                ->where('slip_number', $term)
+                ->orderBy('payment_date_parsed')
+                ->orderBy('source_row')
+                ->get();
+
+            if ($stagedRows->isNotEmpty()) {
+                $grNumbers = $stagedRows->pluck('gr_number')->filter()->unique()->all();
+                $famCode = $stagedRows->pluck('family_code')->filter()->first();
+                $historicalReceipts = $this->fetchHistoricalReceipts($grNumbers, $famCode, $user);
+                $matched = $historicalReceipts->first(fn($r) => strcasecmp((string) $r->slip_number, $term) === 0);
+                if ($matched) {
+                    return $matched;
+                }
+            }
+        }
+
+        // 3. Search historical settlements if slip number is stored differently
+        if (Schema::hasTable('qa_historical_settlements')) {
+            $settlement = DB::table('qa_historical_settlements')
+                ->where(function ($q) use ($term) {
+                    $q->where('reconciliation_id', $term)
+                      ->orWhere('myskool_slip_numbers', 'like', '%' . $term . '%');
+                })
+                ->first();
+
+            if ($settlement && !empty($settlement->active_primary_collection_id)) {
+                $primaryRow = DB::table('qa_staged_collections')->where('id', $settlement->active_primary_collection_id)->first();
+                if ($primaryRow && !empty($primaryRow->slip_number)) {
+                    $historicalReceipts = $this->fetchHistoricalReceipts([$primaryRow->gr_number], $primaryRow->family_code, $user);
+                    $matched = $historicalReceipts->first(fn($r) => strcasecmp((string) $r->slip_number, (string) $primaryRow->slip_number) === 0);
+                    if ($matched) {
+                        return $matched;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Format a portal payment into the unified receipt object.
      */
-    protected function formatPortalReceipt(object $p, Collection $allocs, ?object $user = null, bool $forStudentOnly = false): object
+    public function formatPortalReceipt(object $p, Collection $allocs, ?object $user = null, bool $forStudentOnly = false): object
     {
         $isReversed = ($p->status === 'reversed');
         $feeTypes = $allocs->pluck('fee_type_name')->filter()->unique()->values()->all();

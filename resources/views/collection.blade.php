@@ -11,24 +11,52 @@
         }
     })->filter()->unique()->sort()->values();
     $defaultSelectedPeriod = old('selected_period', $invoiceMonths->first());
-    $searchTerm = trim((string) (request('gr', '') ?: request('invoice', '') ?: request('family', '')));
     $searchBy = strtolower(trim((string) request('search_by', '')));
+    if ($searchBy === 'gr') {
+        $searchTerm = trim((string) request('gr', ''));
+    } elseif ($searchBy === 'family') {
+        $searchTerm = trim((string) request('family', ''));
+    } elseif ($searchBy === 'invoice') {
+        $searchTerm = trim((string) request('invoice', ''));
+    } else {
+        $searchTerm = trim((string) (request('gr', '') ?: (request('family', '') ?: request('invoice', ''))));
+    }
 
     $matchedStudent = null;
-    if ($family && isset($familyStudents) && $familyStudents instanceof \Illuminate\Support\Collection && $familyStudents->isNotEmpty()) {
+    if (isset($selectedStudent) && $selectedStudent) {
+        $matchedStudent = $selectedStudent;
+    } elseif ($family && isset($familyStudents) && $familyStudents instanceof \Illuminate\Support\Collection && $familyStudents->isNotEmpty()) {
         if ($searchTerm !== '') {
             $matchedStudent = $familyStudents->first(fn($st) => strcasecmp((string) $st->gr_number, $searchTerm) === 0);
         }
     }
 
     $firstInvoiceItem = $invoiceItems->first();
-    if ($matchedStudent) {
+    if (isset($searchedReceipt) && $searchedReceipt) {
+        $receiptStudentNames = collect($searchedReceipt->students)->pluck('name')->implode(' & ');
+        $receiptStudentGrs = collect($searchedReceipt->students)->pluck('gr_number')->implode(', ');
+        $firstStudent = (object) [
+            'id' => $searchedReceipt->students[0]['id'] ?? null,
+            'gr_number' => $receiptStudentGrs,
+            'student_name' => $receiptStudentNames,
+            'class_name' => ($searchedReceipt->classes_str ?? '') !== '—' ? $searchedReceipt->classes_str : ($invoiceItems->first()?->class_name ?? '—'),
+        ];
+    } elseif (isset($searchedInvoice) && $searchedInvoice && isset($invoiceStudents) && $invoiceStudents->isNotEmpty()) {
+        $invStudentNames = $invoiceStudents->pluck('name')->implode(' & ');
+        $invStudentGrs = $invoiceStudents->pluck('gr_number')->implode(', ');
+        $firstStudent = (object) [
+            'id' => $invoiceStudents->first()->id,
+            'gr_number' => $invStudentGrs,
+            'student_name' => $invStudentNames,
+            'class_name' => ($invoiceItems->first()?->class_name) ?: '—',
+        ];
+    } elseif ($matchedStudent) {
         $matchedInvoiceItem = $invoiceItems->first(fn($it) => (int) ($it->student_id ?? 0) === (int) $matchedStudent->id);
         $firstStudent = (object) [
             'id' => $matchedStudent->id,
             'gr_number' => $matchedStudent->gr_number,
             'student_name' => $matchedStudent->name,
-            'class_name' => $matchedStudent->grade_label ?: ($matchedInvoiceItem?->class_name ?? ($firstInvoiceItem?->class_name ?? '')),
+            'class_name' => ($matchedStudent->grade_label ?? '') ?: ($matchedInvoiceItem?->class_name ?? ($firstInvoiceItem?->class_name ?? '')),
         ];
     } else {
         $fallbackFamilyStudent = (isset($familyStudents) && $familyStudents instanceof \Illuminate\Support\Collection)
@@ -55,14 +83,37 @@
     }
 
     if ($family) {
-        $displayGr = $matchedStudent?->gr_number
-            ?? ($firstStudent?->gr_number ?? ($familyStudents?->first()?->gr_number ?? ''));
-        $displayFamilyCode = $family->family_code ?? '';
-        $displayInvoice = ($searchBy === 'invoice') ? $searchTerm : '';
+        if ($searchBy === 'gr' || (!empty($selectedStudent) && empty($searchedReceipt) && empty($searchedInvoice))) {
+            $displayGr = $selectedStudent?->gr_number ?? ($matchedStudent?->gr_number ?? request('gr', ''));
+            $displayFamilyCode = $family->family_code ?? '';
+            $displayInvoice = '';
+        } elseif ($searchBy === 'family') {
+            $candidateGr = request('gr', '');
+            $displayGr = '';
+            if ($candidateGr !== '' && $family) {
+                $belongsToFamily = \Illuminate\Support\Facades\DB::table('students')
+                    ->where('family_id', $family->id)
+                    ->where('gr_number', $candidateGr)
+                    ->exists();
+                if ($belongsToFamily) {
+                    $displayGr = $candidateGr;
+                }
+            }
+            $displayFamilyCode = $family->family_code ?? request('family', '');
+            $displayInvoice = '';
+        } elseif ($searchBy === 'invoice') {
+            $displayGr = '';
+            $displayFamilyCode = $family->family_code ?? '';
+            $displayInvoice = request('invoice', $searchTerm);
+        } else {
+            $displayGr = $selectedStudent?->gr_number ?? ($matchedStudent?->gr_number ?? request('gr', ''));
+            $displayFamilyCode = $family->family_code ?? '';
+            $displayInvoice = '';
+        }
     } else {
-        $displayGr = ($searchBy !== 'family' && $searchBy !== 'invoice') ? $searchTerm : '';
-        $displayFamilyCode = ($searchBy === 'family') ? $searchTerm : '';
-        $displayInvoice = ($searchBy === 'invoice') ? $searchTerm : '';
+        $displayGr = ($searchBy === 'gr' || ($searchBy === '' && request('gr'))) ? request('gr', $searchTerm) : '';
+        $displayFamilyCode = ($searchBy === 'family' || ($searchBy === '' && request('family'))) ? request('family', $searchTerm) : '';
+        $displayInvoice = ($searchBy === 'invoice' || ($searchBy === '' && request('invoice'))) ? request('invoice', $searchTerm) : '';
     }
 
     $outstandingItems = $invoiceItems->filter(fn($it) => max(0, (int)$it->net_minor - (int)$it->paid_minor) > 0)->values();
@@ -93,8 +144,11 @@
     $singleCurrencyCode = $currencyDuesMap->count() === 1 ? $currencyDuesMap->keys()->first() : null;
     $singleCurrencyDueMinor = $singleCurrencyCode ? (int) $currencyDuesMap->get($singleCurrencyCode, 0) : 0;
 
-    if ($currencyDuesMap->isEmpty()) {
+    if ($currencyDuesMap->isEmpty() || (isset($searchedReceipt) && $searchedReceipt)) {
         $defaultDuesDisplay = '0';
+        if (isset($searchedReceipt) && $searchedReceipt) {
+            $currencyDuesMap = collect();
+        }
     } elseif ($isMultiCurrencyDues) {
         $defaultDuesDisplay = $currencyDuesMap
             ->map(fn($balMinor, $curr) => $curr . ' ' . number_format($balMinor / 100, 2))
@@ -204,12 +258,194 @@
                     </label>
                 </div>
 
-                <input id="search-query-hidden" type="hidden" name="family" value="{{ $searchTerm }}">
+                <input id="search-query-hidden" type="hidden" name="{{ $searchBy === 'gr' ? 'gr' : ($searchBy === 'invoice' ? 'invoice' : 'family') }}" value="{{ $searchTerm }}">
                 <input id="search-by-hidden" type="hidden" name="search_by" value="{{ $searchBy }}">
+                <input id="search-preserved-gr-hidden" type="hidden" name="gr" value="{{ $displayGr }}" {{ ($searchBy === 'family' && $displayGr !== '') ? '' : 'disabled' }}>
                 <button type="submit" class="btn-ms-purple">Show</button>
                 <button type="button" class="btn-ms-icon" title="Reset filter" onclick="location.href='/challan'">Q</button>
                 <button type="button" class="btn-ms-purple" id="btn-open-create-fee">Create Fee</button>
             </form>
+
+            {{-- SEARCHED PAYMENT RECEIPT DETAILS CARD (Requirement 2 & 3) --}}
+            @if(isset($searchedReceipt) && $searchedReceipt)
+                <div id="searched-receipt-card" style="margin-bottom: 14px; border: 1px solid #a7f3d0; border-left: 4px solid #10b981; border-radius: 6px; background: #fff; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #e2e8f0; background: #f0fdf4;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 16px;">🧾</span>
+                            <div>
+                                <strong style="color: #065f46; font-size: 13px;">
+                                    Payment Receipt: <span style="font-family: monospace; font-weight: 700;">{{ $searchedReceipt->receipt_number ?? $searchedReceipt->slip_number }}</span>
+                                </strong>
+                                <span style="font-size: 10px; background: #d1fae5; color: #065f46; padding: 2px 7px; border-radius: 12px; font-weight: 700; margin-left: 6px;">
+                                    {{ $searchedReceipt->is_historical ? 'Historical MySkool Record' : 'Paid Payment Receipt' }}
+                                </span>
+                                <span style="font-size: 10px; background: {{ $searchedReceipt->is_reversed ? '#fee2e2; color: #991b1b;' : '#dcfce7; color: #166534;' }}; padding: 2px 7px; border-radius: 12px; font-weight: 700; margin-left: 4px;">
+                                    {{ $searchedReceipt->is_reversed ? 'REVERSED' : 'PAID' }}
+                                </span>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 6px;">
+                            <button type="button" class="btn-ms-purple" style="font-size: 11px; padding: 4px 10px; cursor: pointer;" onclick='showReceiptDetails(@json($searchedReceipt->details_payload))'>
+                                👁 View Details
+                            </button>
+                            @if(!empty($searchedReceipt->print_url))
+                                <a href="{{ $searchedReceipt->print_url }}" target="_blank" class="btn-ms-white" style="font-size: 11px; padding: 4px 10px; text-decoration: none; display: inline-flex; align-items: center; border: 1px solid #d8d6de; border-radius: 4px; background: #fff; color: #5e5873;">
+                                    🖨 Print PDF
+                                </a>
+                            @endif
+                        </div>
+                    </div>
+                    <div style="padding: 12px 14px; font-size: 12px; color: #334155;">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 12px;">
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Associated Student(s):</span>
+                                <strong style="color: #1e293b; font-size: 13px;">
+                                    @foreach($searchedReceipt->students as $st)
+                                        <span>{{ $st['name'] }} (GR {{ $st['gr_number'] }})</span>{{ !$loop->last ? ', ' : '' }}
+                                    @endforeach
+                                </strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Billing Period / Month:</span>
+                                <strong style="color: #1e293b; font-size: 13px;">{{ $searchedReceipt->period_formatted ?? ($searchedReceipt->months_str ?: 'September 2026') }}</strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Paid Amount:</span>
+                                <strong style="color: #059669; font-size: 14px;">{{ $searchedReceipt->currency }} {{ number_format($searchedReceipt->amount_minor / 100, 2) }}</strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Receiving Date:</span>
+                                <strong style="color: #1e293b; font-size: 13px;">{{ $searchedReceipt->received_on_formatted ?? ($searchedReceipt->received_on ? \Carbon\Carbon::parse($searchedReceipt->received_on)->format('d M Y') : '—') }}</strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Payment Account / Method:</span>
+                                <strong style="color: #1e293b;">{{ $searchedReceipt->payment_account ?? ($searchedReceipt->payment_method ?? 'Cash') }}</strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Received By:</span>
+                                <strong style="color: #1e293b;">{{ $searchedReceipt->received_by_name ?? 'Staff' }}</strong>
+                            </div>
+                        </div>
+
+                        {{-- Original Payment Allocations Table --}}
+                        <div style="border-top: 1px solid #f1f5f9; padding-top: 8px;">
+                            <div style="font-weight: 600; color: #475569; margin-bottom: 6px; font-size: 11px; text-transform: uppercase;">
+                                Original Payment Allocations &amp; Fee Details
+                            </div>
+                            <table class="myskool-table" style="font-size: 11px; width: 100%;">
+                                <thead>
+                                    <tr style="background: #f8fafc;">
+                                        <th>Student</th>
+                                        <th>GR #</th>
+                                        <th>Fee Particular</th>
+                                        <th>Period</th>
+                                        <th style="text-align: right;">Allocated Paid Amount</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @php
+                                        $displayAllocItems = $searchedReceipt->allocations ?? collect();
+                                        if ($displayAllocItems->isEmpty() && !empty($searchedReceipt->items)) {
+                                            $displayAllocItems = collect($searchedReceipt->items)->map(fn($it) => (object) [
+                                                'student_name' => $it['student_name'] ?? '',
+                                                'gr_number' => $it['gr_number'] ?? '',
+                                                'fee_type_name' => $it['fee_particular'] ?? '',
+                                                'description' => $it['fee_particular'] ?? '',
+                                                'period_start' => null,
+                                                'period_label' => $it['period'] ?? ($searchedReceipt->months_str ?: '—'),
+                                                'amount_minor' => (int) round(((float) str_replace(',', '', (string) ($it['amount'] ?? 0))) * 100),
+                                            ]);
+                                        }
+                                    @endphp
+                                    @foreach($displayAllocItems as $alloc)
+                                        <tr>
+                                            <td><strong>{{ $alloc->student_name }}</strong></td>
+                                            <td>{{ $alloc->gr_number }}</td>
+                                            <td>{{ $alloc->fee_type_name ?? $alloc->description }}</td>
+                                            <td><span class="ms-pill-lavender">{{ $alloc->period_label ?? (!empty($alloc->period_start) ? \Carbon\Carbon::parse($alloc->period_start)->format('M Y') : ($searchedReceipt->period_formatted ?? '—')) }}</span></td>
+                                            <td style="text-align: right; font-weight: 700; color: #166534;">
+                                                {{ $searchedReceipt->currency }} {{ number_format($alloc->amount_minor / 100, 2) }}
+                                            </td>
+                                            <td>
+                                                <span style="background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 4px; font-weight: 600; font-size: 10px;">Paid in full</span>
+                                            </td>
+                                        </tr>
+                                    @endforeach
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            @endif
+
+            {{-- SEARCHED FEE CHALLAN / INVOICE CARD (Requirement 1) --}}
+            @if(isset($searchedInvoice) && $searchedInvoice)
+                @php
+                    $invStatus = strtolower((string)$searchedInvoice->status);
+                    $invStatusBadgeStyle = match($invStatus) {
+                        'paid' => 'background: #dcfce7; color: #166534;',
+                        'partial' => 'background: #fef3c7; color: #92400e;',
+                        'void', 'voided' => 'background: #fee2e2; color: #991b1b;',
+                        default => 'background: #e0e7ff; color: #4338ca;'
+                    };
+                    $invBalanceMinor = max(0, (int)$searchedInvoice->total_minor - (int)$searchedInvoice->paid_minor);
+                @endphp
+                <div id="searched-invoice-card" style="margin-bottom: 14px; border: 1px solid #c7d2fe; border-left: 4px solid #7367f0; border-radius: 6px; background: #fff; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #e2e8f0; background: #f8fafc;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 16px;">📄</span>
+                            <div>
+                                <strong style="color: #334155; font-size: 13px;">
+                                    Fee Challan / Invoice: <span style="font-family: monospace; font-weight: 700;">{{ $searchedInvoice->invoice_number }}</span>
+                                </strong>
+                                <span style="font-size: 10px; padding: 2px 7px; border-radius: 12px; font-weight: 700; margin-left: 6px; {{ $invStatusBadgeStyle }}">
+                                    {{ strtoupper($invStatus) }}
+                                </span>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 6px;">
+                            <a href="/invoices/{{ $searchedInvoice->id }}/pdf" target="_blank" class="btn-ms-white" style="font-size: 11px; padding: 4px 10px; text-decoration: none; display: inline-flex; align-items: center; border: 1px solid #d8d6de; border-radius: 4px; background: #fff; color: #5e5873;">
+                                🖨 Print Invoice PDF
+                            </a>
+                        </div>
+                    </div>
+                    <div style="padding: 12px 14px; font-size: 12px; color: #334155;">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Associated Student(s):</span>
+                                <strong style="color: #1e293b; font-size: 13px;">
+                                    @foreach($invoiceStudents ?? collect() as $ist)
+                                        <span>{{ $ist->name }} (GR {{ $ist->gr_number }})</span>{{ !$loop->last ? ', ' : '' }}
+                                    @endforeach
+                                </strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Payment Status:</span>
+                                <strong style="text-transform: capitalize; color: {{ $invStatus === 'paid' ? '#166534' : ($invStatus === 'partial' ? '#b45309' : '#1e293b') }};">
+                                    {{ $invStatus }}
+                                </strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Total Invoice Amount:</span>
+                                <strong style="color: #1e293b;">{{ $searchedInvoice->currency }} {{ number_format($searchedInvoice->total_minor / 100, 2) }}</strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Paid Amount:</span>
+                                <strong style="color: #059669;">{{ $searchedInvoice->currency }} {{ number_format($searchedInvoice->paid_minor / 100, 2) }}</strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Outstanding Balance:</span>
+                                <strong style="color: {{ $invBalanceMinor > 0 ? '#dc2626' : '#166534' }}; font-size: 14px;">{{ $searchedInvoice->currency }} {{ number_format($invBalanceMinor / 100, 2) }}</strong>
+                            </div>
+                            <div>
+                                <span style="color: #64748b; font-size: 11px; display: block;">Due Date:</span>
+                                <strong style="color: #1e293b;">{{ $searchedInvoice->due_date ? \Carbon\Carbon::parse($searchedInvoice->due_date)->format('d M Y') : '—' }}</strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            @endif
 
             @if($searchTerm !== '' && !$family)
                 <div id="search-no-results-banner" style="background: #fef2f2; border: 1px solid #fecaca; border-left: 4px solid #ef4444; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; color: #991b1b; font-size: 12px;">
@@ -615,6 +851,9 @@
                     @if($searchBy !== '')
                         <input type="hidden" name="search_by" value="{{ $searchBy }}">
                     @endif
+                    @if($searchBy === 'family' && $displayGr !== '')
+                        <input type="hidden" name="gr" value="{{ $displayGr }}">
+                    @endif
                     
                     {{-- Search Input --}}
                     <div style="flex: 1; min-width: 170px;">
@@ -653,7 +892,7 @@
                     <button type="submit" class="btn-ms-purple" style="height: 32px; padding: 0 12px; font-size: 12px; border-radius: 4px;">Filter</button>
                     
                     @if(request()->hasAny(['search', 'source', 'student_gr', 'date_from', 'date_to']))
-                        <a href="{{ url()->current() }}?family={{ urlencode($searchTerm !== '' ? $searchTerm : ($family->family_code ?: (string)$family->id)) }}{{ $searchBy !== '' ? '&search_by=' . urlencode($searchBy) : '' }}" style="font-size: 11px; color: #7367f0; text-decoration: none; padding: 4px 6px;">Clear</a>
+                        <a href="{{ url()->current() }}?family={{ urlencode($searchTerm !== '' ? $searchTerm : ($family->family_code ?: (string)$family->id)) }}{{ $searchBy !== '' ? '&search_by=' . urlencode($searchBy) : '' }}{{ ($searchBy === 'family' && $displayGr !== '') ? '&gr=' . urlencode($displayGr) : '' }}" style="font-size: 11px; color: #7367f0; text-decoration: none; padding: 4px 6px;">Clear</a>
                     @endif
                 </form>
 
@@ -954,6 +1193,15 @@
                     </div>
                 </div>
 
+                @if(!empty($searchedReceipt))
+                    <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; color: #166534;">
+                        <strong>ℹ️ Paid Receipt Lookup (Read-Only)</strong>
+                        <div style="margin-top: 3px;">
+                            Payment of <strong>{{ $searchedReceipt->currency }} {{ number_format($searchedReceipt->amount, 2) }}</strong> was recorded on <strong>{{ $searchedReceipt->received_on_formatted ?? $searchedReceipt->received_on }}</strong>. No collection is required for this receipt.
+                        </div>
+                    </div>
+                @endif
+
                 {{-- Total Dues --}}
                 <div class="myskool-form-group">
                     <label style="display: flex; justify-content: space-between; align-items: center;">
@@ -1056,8 +1304,8 @@
                 @endif
 
                 {{-- Receive Button --}}
-                <button type="submit" class="myskool-btn-receive" id="btn-submit-receive" @disabled(!$family)>
-                    Receive
+                <button type="submit" class="myskool-btn-receive" id="btn-submit-receive" @disabled(!$family || !empty($searchedReceipt))>
+                    {{ !empty($searchedReceipt) ? 'Receipt Already Paid' : 'Receive' }}
                 </button>
             </form>
         </div>
@@ -1253,6 +1501,7 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
   const inv = document.getElementById('search-invoice');
   const hiddenQ = document.getElementById('search-query-hidden');
   const hiddenBy = document.getElementById('search-by-hidden');
+  const preservedGrHidden = document.getElementById('search-preserved-gr-hidden');
 
   if (form && gr && fam && inv && hiddenQ) {
     const initialVals = {
@@ -1263,18 +1512,31 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
     let activeSearchField = (hiddenBy && hiddenBy.value) ? hiddenBy.value : '';
 
     const searchInputs = [
-      { mode: 'gr', el: gr, others: [fam, inv] },
-      { mode: 'family', el: fam, others: [gr, inv] },
-      { mode: 'invoice', el: inv, others: [gr, fam] }
+      { mode: 'gr', el: gr },
+      { mode: 'family', el: fam },
+      { mode: 'invoice', el: inv }
     ];
 
-    searchInputs.forEach(({ mode, el, others }) => {
+    searchInputs.forEach(({ mode, el }) => {
       const syncFromInput = () => {
         activeSearchField = mode;
         const currentVal = (el.value || '').trim();
-        if (currentVal !== '') {
-          others.forEach(otherEl => { otherEl.value = ''; });
+        if (mode === 'gr') {
+          if (inv) inv.value = '';
+          if (currentVal !== '' && initialVals.gr && currentVal !== initialVals.gr) {
+            if (fam) fam.value = '';
+          }
+        } else if (mode === 'family') {
+          if (inv) inv.value = '';
+          if (currentVal !== '' && initialVals.family && currentVal !== initialVals.family) {
+            if (gr) gr.value = '';
+          }
+        } else if (mode === 'invoice') {
+          if (gr) gr.value = '';
+          if (fam) fam.value = '';
         }
+
+        hiddenQ.name = mode;
         hiddenQ.value = currentVal;
         if (hiddenBy) {
           hiddenBy.value = mode;
@@ -1283,6 +1545,9 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
 
       el.addEventListener('input', syncFromInput);
       el.addEventListener('change', syncFromInput);
+      el.addEventListener('focus', () => {
+        activeSearchField = mode;
+      });
       el.addEventListener('keydown', e => {
         if (e.key === 'Enter') {
           activeSearchField = mode;
@@ -1311,6 +1576,8 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
         chosenMode = 'family';
       } else if (document.activeElement === inv && invVal) {
         chosenMode = 'invoice';
+      } else if (hiddenBy && hiddenBy.value && valByMode[hiddenBy.value]) {
+        chosenMode = hiddenBy.value;
       } else if (grVal) {
         chosenMode = 'gr';
       } else if (famVal) {
@@ -1326,9 +1593,20 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
         return;
       }
 
+      hiddenQ.name = chosenMode;
       hiddenQ.value = chosenVal;
       if (hiddenBy) {
         hiddenBy.value = chosenMode;
+      }
+
+      if (preservedGrHidden) {
+        if (chosenMode === 'family' && grVal !== '' && (!initialVals.family || famVal === initialVals.family)) {
+          preservedGrHidden.value = grVal;
+          preservedGrHidden.disabled = false;
+        } else {
+          preservedGrHidden.value = '';
+          preservedGrHidden.disabled = true;
+        }
       }
     });
   }
