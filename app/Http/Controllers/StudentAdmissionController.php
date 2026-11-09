@@ -230,6 +230,41 @@ class StudentAdmissionController
             $curFamily=DB::table('families')->where('id',$s->family_id)->lockForUpdate()->first();
             $code=trim($d['family_code']??'')?:null;
             $targetFamily=$code?DB::table('families')->where('family_code',$code)->lockForUpdate()->first():null;
+            $otherStudentsCount=DB::table('students')->where('family_id',$s->family_id)->where('id','!=',$student)->count();
+
+            // A student must detach into their own new family if they currently share a family with other siblings
+            // and their family code is removed (null) or changed to an unassigned code.
+            $shouldDetachIntoNewFamily = ($otherStudentsCount > 0) && (
+                $code === null ||
+                ($code !== $curFamily->family_code && !$targetFamily)
+            );
+
+            if($shouldDetachIntoNewFamily){
+                abort_unless(
+                    in_array($request->user()->role, ['super_admin', 'finance_admin'], true),
+                    403,
+                    'Separating a student from a shared family requires Super Admin or Finance Admin privileges.'
+                );
+                $submittedGuardian = GuardianNameResolver::clean($d['guardian_name'] ?? null);
+                $submittedFather = GuardianNameResolver::clean($d['father_name'] ?? null);
+                $newVerified = $request->boolean('contact_verified');
+                $newOptIn = $request->boolean('messaging_opt_in');
+
+                $newFamilyId = DB::table('families')->insertGetId([
+                    'family_code' => $code,
+                    'guardian_name' => $submittedGuardian ?: ($submittedFather ?: null),
+                    'email' => $d['family_email'],
+                    'whatsapp' => $d['family_whatsapp'],
+                    'contact_verified' => $newVerified,
+                    'whatsapp_verified' => $newVerified,
+                    'email_verified' => $newVerified,
+                    'messaging_opt_in' => $newOptIn,
+                    'is_provisional' => 0,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                $targetFamily = DB::table('families')->where('id', $newFamilyId)->first();
+            }
 
             if($targetFamily && $targetFamily->id !== $s->family_id){
                 abort_unless(
