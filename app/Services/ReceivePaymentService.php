@@ -333,12 +333,25 @@ final class ReceivePaymentService
                         }
                     }
 
-                    // Sort items chronologically by period_start, then due_date, then id
-                    $monthlyItems = $items->sortBy([
-                        ['period_start', 'asc'],
-                        ['due_date', 'asc'],
-                        ['id', 'asc'],
-                    ])->values();
+                    // Sort items in ascending order of current outstanding balance (smallest outstanding fee first), with deterministic tie-breaker
+                    $monthlyItems = $items->sort(function ($a, $b) {
+                        $dueA = max(0, (int) $a->net_minor - (int) $a->paid_minor);
+                        $dueB = max(0, (int) $b->net_minor - (int) $b->paid_minor);
+                        if ($dueA !== $dueB) {
+                            return $dueA <=> $dueB;
+                        }
+                        $periodStartA = (string) ($a->period_start ?? '');
+                        $periodStartB = (string) ($b->period_start ?? '');
+                        if ($periodStartA !== $periodStartB) {
+                            return $periodStartA <=> $periodStartB;
+                        }
+                        $dueDateA = (string) ($a->due_date ?? '');
+                        $dueDateB = (string) ($b->due_date ?? '');
+                        if ($dueDateA !== $dueDateB) {
+                            return $dueDateA <=> $dueDateB;
+                        }
+                        return (int) $a->id <=> (int) $b->id;
+                    })->values();
                 } else {
                     // Fallback query across all unpaid obligations in ledger
                     $monthlyQuery = DB::table('invoice_items as ii')

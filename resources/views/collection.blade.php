@@ -663,9 +663,12 @@
                                 <td style="text-align: center;">
                                     <input type="checkbox" class="js-item-checkbox" value="{{ $item->id }}"
                                            data-balance="{{ number_format($balanceMinor / 100, 2, '.', '') }}"
+                                           data-balance-minor="{{ $balanceMinor }}"
                                            data-currency="{{ $item->currency }}"
                                            data-period="{{ $periodKey }}"
                                            data-period-label="{{ $periodLabel }}"
+                                           data-period-start="{{ $item->period_start ?? '' }}"
+                                           data-due-date="{{ $item->due_date ?? '' }}"
                                            data-student="{{ $item->student_name }}"
                                            data-gr="{{ $item->gr_number }}"
                                            data-type="{{ $item->description ?: 'Monthly Fee' }}"
@@ -1650,11 +1653,14 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
 
   function getSelectedItems() {
     return itemCheckboxes.filter(cb => cb.checked).map(cb => ({
-      id: cb.value,
+      id: parseInt(cb.value, 10),
       balance: parseFloat(cb.dataset.balance) || 0,
+      balanceMinor: parseInt(cb.dataset.balanceMinor || Math.round((parseFloat(cb.dataset.balance) || 0) * 100), 10),
       currency: cb.dataset.currency,
       period: cb.dataset.period,
       periodLabel: cb.dataset.periodLabel,
+      periodStart: cb.dataset.periodStart || '',
+      dueDate: cb.dataset.dueDate || '',
       student: cb.dataset.student,
       gr: cb.dataset.gr,
       type: cb.dataset.type,
@@ -1674,7 +1680,28 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
   }
 
   function updateAllocationBreakdown(preselected) {
-    const selected = Array.isArray(preselected) ? preselected : getSelectedItems();
+    const rawSelected = Array.isArray(preselected) ? preselected : getSelectedItems();
+
+    // Sort selected items ascending by current outstanding balance (smallest outstanding fee first), with deterministic tie-breaker
+    const selected = [...rawSelected].sort((a, b) => {
+      const dueA = Number(a.balanceMinor ?? Math.round((a.balance || 0) * 100));
+      const dueB = Number(b.balanceMinor ?? Math.round((b.balance || 0) * 100));
+      if (dueA !== dueB) {
+        return dueA - dueB;
+      }
+      const periodA = String(a.periodStart || '');
+      const periodB = String(b.periodStart || '');
+      if (periodA !== periodB) {
+        return periodA.localeCompare(periodB);
+      }
+      const dueDtA = String(a.dueDate || '');
+      const dueDtB = String(b.dueDate || '');
+      if (dueDtA !== dueDtB) {
+        return dueDtA.localeCompare(dueDtB);
+      }
+      return Number(a.id) - Number(b.id);
+    });
+
     renderHiddenInputs(hiddenSelectedItems, 'selected_item_ids[]', selected.map(item => item.id));
 
     const monthlyVal = Number(inputMonthly?.value) || 0;
@@ -1713,20 +1740,22 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
       selectedSum.textContent = `${curr} ${totalSelectedBal.toFixed(2)}`;
     }
 
-    // Compute live allocation per item (chronological order)
+    // Compute live allocation per item (smallest outstanding fee first, integer minor units)
     if (breakdownCard && breakdownList) {
       breakdownCard.style.display = 'block';
       breakdownList.innerHTML = '';
 
-      let availablePayment = monthlyVal;
+      let availablePaymentMinor = Math.round(monthlyVal * 100);
 
       selected.forEach(item => {
-        const itemDue = item.balance;
-        const allocated = Math.min(availablePayment, itemDue);
-        availablePayment -= allocated;
+        const itemDueMinor = Number(item.balanceMinor ?? Math.round((item.balance || 0) * 100));
+        const allocatedMinor = Math.min(availablePaymentMinor, itemDueMinor);
+        availablePaymentMinor -= allocatedMinor;
 
-        const isFull = (allocated >= itemDue - 0.001);
-        const isPartial = (allocated > 0 && !isFull);
+        const allocated = allocatedMinor / 100;
+        const itemDue = itemDueMinor / 100;
+        const isFull = (allocatedMinor >= itemDueMinor);
+        const isPartial = (allocatedMinor > 0 && !isFull);
 
         const rowDiv = document.createElement('div');
         rowDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 3px 0; border-bottom: 1px dashed #e2e8f0;';
@@ -1748,11 +1777,12 @@ window.IQRA_FAMILY_ID = {{ $family ? $family->id : 'null' }};
       });
 
       // Check for excess payment (Advance Credit)
-      if (availablePayment > 0.009) {
+      const excessMinor = availablePaymentMinor;
+      if (excessMinor > 0) {
         if (advanceCreditBox) {
           advanceCreditBox.style.display = 'block';
           if (advanceCreditText) {
-            advanceCreditText.innerHTML = `Receiving amount exceeds selected dues by <strong>${curr} ${availablePayment.toFixed(2)}</strong>. This excess will be recorded as advance credit for future billing.`;
+            advanceCreditText.innerHTML = `Receiving amount exceeds selected dues by <strong>${curr} ${(excessMinor / 100).toFixed(2)}</strong>. This excess will be recorded as advance credit for future billing.`;
           }
         }
       } else {
