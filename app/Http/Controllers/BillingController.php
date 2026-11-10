@@ -394,6 +394,63 @@ class BillingController {
      }
      $selectionSnapshot = $batchService->resolveFilteredSelection($snapshotFilters, $r->user(), ['whatsapp']);
     }
+
+    if ($r->filled('search')) {
+     $searchTerm = trim((string)$r->query('search'));
+     $feeHistoryService = app(\App\Services\FeeHistoryService::class);
+     $searchedReceipt = $feeHistoryService->getReceiptByNumber($searchTerm, $r->user());
+
+     if ($searchedReceipt) {
+      $paymentId = $searchedReceipt->payment_id ?? $searchedReceipt->id ?? null;
+      $linkedInvoiceIds = [];
+      if ($paymentId) {
+       $linkedInvoiceIds = DB::table('payment_allocations as pa')
+        ->join('invoice_items as ii', 'ii.id', '=', 'pa.invoice_item_id')
+        ->where('pa.payment_id', $paymentId)
+        ->pluck('ii.invoice_id')
+        ->unique()
+        ->filter()
+        ->all();
+      }
+
+      if (empty($linkedInvoiceIds)) {
+       $searchedReceiptExplanation = 'Receipt ' . ($searchedReceipt->slip_number ?? $searchTerm) . ' is recorded in the system, but has no billing invoice allocations associated with it.';
+      } elseif ($paidInvoicesPage && $paidInvoicesPage->total() === 0) {
+       if ($paidStatus !== 'all') {
+        $stageLabels = ['unqueued' => 'Unqueued', 'queued' => 'In Queue', 'processing' => 'Processing', 'submitted' => 'Submitted', 'attention' => 'Needs Attention'];
+        $receiptFilterExclusion = [
+         'filter_name' => "Delivery Stage ('" . ($stageLabels[$paidStatus] ?? ucfirst($paidStatus)) . "')",
+         'clear_param' => 'paid_status',
+         'clear_value' => 'all',
+        ];
+       } elseif ($r->filled('campus_id')) {
+        $receiptFilterExclusion = [
+         'filter_name' => 'Campus',
+         'clear_param' => 'campus_id',
+         'clear_value' => '',
+        ];
+       } elseif ($r->filled('department_id')) {
+        $receiptFilterExclusion = [
+         'filter_name' => 'Department',
+         'clear_param' => 'department_id',
+         'clear_value' => '',
+        ];
+       } elseif ($r->filled('grade')) {
+        $receiptFilterExclusion = [
+         'filter_name' => 'Grade',
+         'clear_param' => 'grade',
+         'clear_value' => '',
+        ];
+       } elseif ($r->filled('contact_status') && $r->query('contact_status') !== 'all') {
+        $receiptFilterExclusion = [
+         'filter_name' => 'Contact Status',
+         'clear_param' => 'contact_status',
+         'clear_value' => 'all',
+        ];
+       }
+      }
+     }
+    }
    } elseif ($currentTab === 'processing') {
     $tabQueuePage = $queueService->getPaginatedQueue(array_merge($filters, ['submission_status' => 'queued']), $r->user(), $perPage);
    } elseif ($currentTab === 'sent') {
@@ -468,6 +525,9 @@ class BillingController {
     'workerStatus' => $workerStatus,
     'monthlyWebhookSetting' => $monthlyWebhookSetting,
     'paidWebhookSetting' => $paidWebhookSetting,
+    'searchedReceipt' => $searchedReceipt ?? null,
+    'searchedReceiptExplanation' => $searchedReceiptExplanation ?? null,
+    'receiptFilterExclusion' => $receiptFilterExclusion ?? null,
    ]);
   }
 
@@ -2921,6 +2981,7 @@ class BillingController {
   @set_time_limit(360);
   $jobsBefore = DB::table('jobs')->whereIn('queue', ['notifications', 'paid-future', 'default'])->count();
   \Illuminate\Support\Facades\Artisan::call('queue:work',[
+   'connection'=>'database',
    '--queue'=>'paid-future,notifications,default',
    '--stop-when-empty'=>true,
    '--max-jobs'=>50,

@@ -685,6 +685,27 @@
             @endforeach
         </nav>
 
+        {{-- WORKER STATUS BANNER (If jobs are buffered in queue and worker is offline) --}}
+        @if(!empty($workerStatus) && $workerStatus['pending_jobs'] > 0 && empty($workerStatus['is_running']))
+            <div style="background:#fffbeb; border:1px solid #fde68a; border-left:4px solid #f59e0b; border-radius:6px; padding:12px 16px; margin-bottom:14px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                <div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="font-size:16px;">⚠️</span>
+                        <strong style="color:#92400e; font-size:13px;">Queue Worker is Offline — {{ $workerStatus['pending_jobs'] }} Dispatch Job(s) Buffered in Queue</strong>
+                    </div>
+                    <div style="margin-top:2px; color:#78350f; font-size:12px;">
+                        Selected invoices are queued for background dispatch. Click the button to process and dispatch them to the Paid Webhook immediately.
+                    </div>
+                </div>
+                <form method="post" action="{{ route('invoices.notifications.process_queue') }}" style="margin:0;">
+                    @csrf
+                    <button type="submit" class="btn" style="background:#d97706; color:#fff; font-weight:700; font-size:12px; padding:8px 14px; border:none; border-radius:4px; cursor:pointer; display:flex; align-items:center; gap:6px; box-shadow:0 1px 2px rgba(0,0,0,0.1);">
+                        <span>⚡</span> Process Pending Queue Now
+                    </button>
+                </form>
+            </div>
+        @endif
+
         <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:14px 18px; margin-bottom:14px;">
             @if($currentPaidStatus === 'queued')
                 <strong>Staged paid invoices awaiting dispatch.</strong> Select invoices and click Send Selected. Their progress appears here automatically.
@@ -763,6 +784,59 @@
             <button type="submit" class="btn small" style="background:#16a34a; color:#fff; font-weight:600; padding:6px 14px;">Filter</button>
             <a href="?tab=paid&period={{ $isAllPeriod ? 'all' : $selectedPeriod }}&paid_status={{ $currentPaidStatus ?? 'all' }}" class="btn small gray" style="padding:6px 12px;">Reset</a>
         </form>
+
+        {{-- RECEIPT SEARCH BANNERS --}}
+        @if(!empty($searchedReceipt))
+            @if(!empty($receiptFilterExclusion))
+                <div style="background:#fffbeb; border:1px solid #fde68a; border-left:4px solid #f59e0b; border-radius:6px; padding:12px 16px; margin-bottom:14px; font-size:12.5px; color:#92400e;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                        <div>
+                            <strong>Receipt {{ $searchedReceipt->slip_number }} found</strong> ({{ $searchedReceipt->currency }} {{ number_format($searchedReceipt->amount, 2) }} for Family {{ $searchedReceipt->family_code ?? '' }}), but its invoice is currently excluded by the <strong>{{ $receiptFilterExclusion['filter_name'] }}</strong> filter.
+                        </div>
+                        <div>
+                            <a href="{{ request()->fullUrlWithQuery([$receiptFilterExclusion['clear_param'] => $receiptFilterExclusion['clear_value'], 'page' => null]) }}" class="btn small" style="background:#f59e0b; color:#fff; font-weight:700; text-decoration:none; padding:4px 10px;">
+                                Clear {{ $receiptFilterExclusion['filter_name'] }} Filter
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            @elseif(!empty($searchedReceiptExplanation))
+                <div style="background:#fffbeb; border:1px solid #fde68a; border-left:4px solid #f59e0b; border-radius:6px; padding:12px 16px; margin-bottom:14px; font-size:12.5px; color:#92400e;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                        <div>
+                            <strong>Receipt {{ $searchedReceipt->slip_number }} found</strong> ({{ $searchedReceipt->currency }} {{ number_format($searchedReceipt->amount, 2) }} received on {{ $searchedReceipt->received_on_formatted }} for Family {{ $searchedReceipt->family_code ?? '' }}), but has no qualifying invoice record in the Paid Invoices section.
+                            <div style="margin-top:3px; font-size:11.5px; color:#78350f;">
+                                {{ $searchedReceiptExplanation }}
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            <a href="{{ route('challan.index', ['search_by' => 'invoice', 'invoice' => $searchedReceipt->slip_number]) }}" class="btn small" style="background:#16a34a; color:#fff; text-decoration:none; padding:5px 12px; font-weight:700;">
+                                💳 View in Fee Collection
+                            </a>
+                            @if(!empty($searchedReceipt->print_url))
+                                <a href="{{ $searchedReceipt->print_url }}" target="_blank" rel="noopener" class="btn small" style="background:#f8fafc; color:#334155; border:1px solid #cbd5e1; text-decoration:none; padding:5px 12px; font-weight:700;">
+                                    🧾 Receipt PDF
+                                </a>
+                            @endif
+                        </div>
+                    </div>
+                </div>
+            @elseif(($paidInvoicesPage ? $paidInvoicesPage->total() : 0) > 0)
+                <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-left:4px solid #16a34a; border-radius:6px; padding:10px 14px; margin-bottom:14px; font-size:12px; color:#166534; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <div>
+                        <strong>Receipt Reference:</strong> Matched receipt <strong>{{ $searchedReceipt->slip_number }}</strong> &bull; {{ $searchedReceipt->currency }} {{ number_format($searchedReceipt->amount, 2) }} received on {{ $searchedReceipt->received_on_formatted }}
+                        @if(!empty($searchedReceipt->months_str))
+                            &bull; Period: {{ $searchedReceipt->months_str }}
+                        @endif
+                    </div>
+                    @if(!empty($searchedReceipt->print_url))
+                        <a href="{{ $searchedReceipt->print_url }}" target="_blank" rel="noopener" class="btn small" style="background:#16a34a; color:#fff; text-decoration:none; padding:3px 8px; font-size:11px; font-weight:700;">
+                            🧾 Open Receipt PDF
+                        </a>
+                    @endif
+                </div>
+            @endif
+        @endif
 
         {{-- SELECTION RECONCILIATION & SNAPSHOT BANNER --}}
         @if($selectionSnapshot && in_array($currentPaidStatus ?? 'all', ['unqueued', 'all'], true))
@@ -894,6 +968,13 @@
                                            data-status="{{ $row->delivery_status }}"
                                            title="Already queued or sent in batch {{ $row->delivery_batch_id }}"
                                            disabled>
+                                @elseif(empty($row->is_delivery_eligible))
+                                    <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->id }}"
+                                           data-invoice="{{ $row->invoice_number }}"
+                                           data-family="{{ $row->family_code }}"
+                                           data-status="{{ $row->invoice_status }}"
+                                           title="{{ $row->invoice_status !== 'paid' ? 'Partially paid invoice — not eligible for Paid Delivery Queue' : (!$row->is_contact_eligible ? 'Contact ineligible for WhatsApp' : 'Not eligible for paid delivery') }}"
+                                           disabled>
                                 @else
                                     <input type="checkbox" class="invoice-check" name="invoice_ids[]" value="{{ $row->id }}"
                                            data-invoice="{{ $row->invoice_number }}"
@@ -960,7 +1041,14 @@
                                     </div>
                                 @endif
                                 <div style="margin-top:2px;">
-                                    <span class="badge" style="background:#dcfce7; color:#166534; font-size:10px; padding:2px 6px; font-weight:700;">Fully Paid</span>
+                                    @if($row->invoice_status === 'paid' || (int)$row->paid_minor >= (int)$row->total_minor)
+                                        <span class="badge" style="background:#dcfce7; color:#166534; font-size:10px; padding:2px 6px; font-weight:700;">Fully Paid</span>
+                                    @else
+                                        <span class="badge" style="background:#fef3c7; color:#92400e; font-size:10px; padding:2px 6px; font-weight:700;">Partially Paid</span>
+                                        <div class="muted" style="font-size:10px; margin-top:1px;">
+                                            ({{ $row->currency }} {{ \App\Services\Money::format($row->paid_minor) }} of {{ \App\Services\Money::format($row->total_minor) }})
+                                        </div>
+                                    @endif
                                 </div>
                             </td>
                             <td>
@@ -1008,7 +1096,16 @@
                     @empty
                         <tr>
                             <td colspan="9" style="text-align:center; padding:30px; color:#64748b;">
-                                @if(($currentPaidStatus ?? 'unqueued') === 'queued')
+                                @if(!empty($currentFilters['search']) || request()->filled('search'))
+                                    @php($term = !empty($currentFilters['search']) ? $currentFilters['search'] : request('search'))
+                                    @if(str_starts_with(strtoupper(trim($term)), 'RCP-'))
+                                        <strong>No receipt or paid invoices found matching "{{ $term }}".</strong><br>
+                                        <span class="muted" style="font-size:12px;">Please check the receipt reference or verify in Fee Collection.</span>
+                                    @else
+                                        <strong>No paid invoices found matching "{{ $term }}".</strong><br>
+                                        <span class="muted" style="font-size:12px;">Please check your search term or clear active filters.</span>
+                                    @endif
+                                @elseif(($currentPaidStatus ?? 'unqueued') === 'queued')
                                     <strong>No queued paid invoices found waiting to be sent for {{ $dashboardStats['selected_month'] }}.</strong><br>
                                     <span class="muted" style="font-size:12px;">Add invoices to the queue from the "Unqueued" subtab.</span>
                                 @elseif(($currentPaidStatus ?? 'unqueued') === 'submitted')
@@ -1053,7 +1150,7 @@
                             Approved monthly challan batches are waiting in the local queue table because no background worker is running. Notifications will not reach n8n until a worker process is running or the queue is processed.
                         </p>
                         <div style="margin:8px 0 0 24px; font-size:11.5px; color:#b45309;">
-                            <strong>Persistent Worker Command:</strong> <code style="background:#fef3c7; padding:2px 6px; border-radius:4px; font-weight:700;">php artisan queue:work --queue=notifications,default --tries=3</code>
+                            <strong>Persistent Worker Command:</strong> <code style="background:#fef3c7; padding:2px 6px; border-radius:4px; font-weight:700;">php artisan queue:work database --queue=paid-future,notifications,default --tries=3</code>
                         </div>
                     </div>
                     <form method="post" action="{{ route('invoices.notifications.process_queue') }}" style="margin:0;">

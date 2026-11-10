@@ -1293,6 +1293,8 @@ class InvoiceDeliveryQueueService
             $rowNotif = $notifs->get($row->authoritative_notification_id);
             $isContactEligible = (bool)$row->contact_verified && (bool)$row->messaging_opt_in && !empty($row->whatsapp);
             $isAlreadySentOrQueued = $row->paid_workflow_stage !== 'unqueued';
+            $isDeliveryEligible = PaidInvoiceEligibility::eligible((int)$row->id) && $isContactEligible && !$isAlreadySentOrQueued && in_array($row->invoice_status, ['paid'], true);
+            $row->is_delivery_eligible = $isDeliveryEligible;
 
             // Authoritative paid amount specifically allocated to this SCH invoice.
             // If payment allocations exist, sum their amounts for this invoice.
@@ -1362,33 +1364,126 @@ class InvoiceDeliveryQueueService
             })
             ->leftJoin('notification_batches as paid_b', 'paid_b.batch_id', '=', 'paid_n.batch_id');
 
-        if ($period === 'all') {
-            // All-period listing: do not restrict by billing period start
-        } elseif ($period === '2026-10') {
-            $q->where(function ($periodQ) {
-                $periodQ->where('b.period_start', 'like', '2026-10%')
-                    ->orWhere(function ($older) {
-                        $older->where('b.period_start', '<', '2026-10-01')
-                            ->where(fn ($delivery) => $delivery->whereNull('paid_n.id')
-                                ->orWhere('paid_b.billing_period', '2026-10'));
-                    });
-            });
-        } else {
-            $q->where('b.period_start', 'like', $period . '%');
-        }
+        $searchTerm = !empty($filters['search']) ? trim((string)$filters['search']) : '';
 
-        $q->where(function ($sub) {
-            $sub->where('i.status', 'paid')
-                ->orWhere(function ($sq) {
-                    $sq->where('i.total_minor', '>', 0)
-                       ->whereColumn('i.paid_minor', '>=', 'i.total_minor');
+        if ($searchTerm === '') {
+            if ($period === 'all') {
+                // All-period listing: do not restrict by billing period start
+            } elseif ($period === '2026-10') {
+                $q->where(function ($periodQ) {
+                    $periodQ->where('b.period_start', 'like', '2026-10%')
+                        ->orWhere(function ($older) {
+                            $older->where('b.period_start', '<', '2026-10-01')
+                                ->where(fn ($delivery) => $delivery->whereNull('paid_n.id')
+                                    ->orWhere('paid_b.billing_period', '2026-10'));
+                        });
                 });
-        })
-        ->whereNotIn('i.status', ['void', 'voided']);
+            } else {
+                $q->where('b.period_start', 'like', $period . '%');
+            }
 
-        // Paid delivery begins with actual receipts dated October 9, 2026 or later.
-        // Use payment allocations, not invoice issue/billing dates, to avoid sending older paid records.
-        PaidInvoiceEligibility::constrain($q);
+            $q->where(function ($sub) {
+                $sub->where('i.status', 'paid')
+                    ->orWhere(function ($sq) {
+                        $sq->where('i.total_minor', '>', 0)
+                           ->whereColumn('i.paid_minor', '>=', 'i.total_minor');
+                    });
+            })
+            ->whereNotIn('i.status', ['void', 'voided']);
+
+            // Paid delivery begins with actual receipts dated October 9, 2026 or later.
+            // Use payment allocations, not invoice issue/billing dates, to avoid sending older paid records.
+            PaidInvoiceEligibility::constrain($q);
+        } else {
+            // Search mode: lookup reference across all invoice periods without selected-month restriction
+            $q->whereNotIn('i.status', ['void', 'voided']);
+
+            // Resolve receipt numbers from payments table
+            $matchedReceiptPaymentIds = DB::table('payments')
+                ->where('status', 'received')
+                ->whereNull('reversed_at')
+                ->where(function ($pq) use ($searchTerm) {
+                    $pq->where('receipt_number', $searchTerm)
+                       ->orWhere('receipt_number', 'like', "%{$searchTerm}%");
+                })
+                ->pluck('id')
+                ->all();
+
+            $receiptInvoiceIds = [];
+            if (!empty($matchedReceiptPaymentIds)) {
+                $receiptInvoiceIds = DB::table('payment_allocations as pa')
+                    ->join('invoice_items as ii', 'ii.id', '=', 'pa.invoice_item_id')
+                    ->whereIn('pa.payment_id', $matchedReceiptPaymentIds)
+                    ->pluck('ii.invoice_id')
+                    ->unique()
+                    ->filter()
+                    ->all();
+            }
+
+            $isExactReceipt = DB::table('payments')
+                ->where('receipt_number', $searchTerm)
+                ->where('status', 'received')
+                ->whereNull('reversed_at')
+                ->exists();
+
+            $isExactInvoice = DB::table('invoices')->where('invoice_number', $searchTerm)->exists();
+            $isExactFamily = DB::table('families')->where('family_code', $searchTerm)->exists();
+            $isExactGr = DB::table('students')->where('gr_number', $searchTerm)->exists();
+
+            if ($isExactReceipt) {
+                if (!empty($receiptInvoiceIds)) {
+                    $q->whereIn('i.id', $receiptInvoiceIds);
+                } else {
+                    $q->whereRaw('0 = 1');
+                }
+            } elseif ($isExactInvoice) {
+                $q->where('i.invoice_number', $searchTerm);
+            } elseif ($isExactFamily) {
+                $q->where('f.family_code', $searchTerm);
+                $q->where(function ($paidQ) {
+                    $paidQ->where('i.status', 'paid')
+                          ->orWhere('i.paid_minor', '>', 0);
+                });
+            } elseif ($isExactGr) {
+                $q->whereExists(function ($stSub) use ($searchTerm) {
+                    $stSub->selectRaw('1')
+                        ->from('invoice_items as st_ii')
+                        ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
+                        ->whereColumn('st_ii.invoice_id', 'i.id')
+                        ->where('st_s.gr_number', $searchTerm);
+                });
+                $q->where(function ($paidQ) {
+                    $paidQ->where('i.status', 'paid')
+                          ->orWhere('i.paid_minor', '>', 0);
+                });
+            } else {
+                $like = "%{$searchTerm}%";
+                $q->where(function ($sq) use ($like, $receiptInvoiceIds) {
+                    $sq->where('i.invoice_number', 'like', $like)
+                       ->orWhere('f.family_code', 'like', $like)
+                       ->orWhere('f.guardian_name', 'like', $like)
+                       ->orWhere('f.whatsapp', 'like', $like)
+                       ->orWhere('f.email', 'like', $like)
+                       ->orWhereExists(function ($stSub) use ($like) {
+                           $stSub->selectRaw('1')
+                               ->from('invoice_items as st_ii')
+                               ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
+                               ->whereColumn('st_ii.invoice_id', 'i.id')
+                               ->where(function ($stQ) use ($like) {
+                                   $stQ->where('st_s.name', 'like', $like)
+                                       ->orWhere('st_s.gr_number', 'like', $like);
+                               });
+                       });
+                    if (!empty($receiptInvoiceIds)) {
+                        $sq->orWhereIn('i.id', $receiptInvoiceIds);
+                    }
+                });
+                $q->where(function ($paidQ) {
+                    $paidQ->where('i.status', 'paid')
+                          ->orWhere('i.paid_minor', '>', 0);
+                });
+            }
+        }
 
         // Role-based scoping
         if (!in_array($user->role, ['super_admin', 'finance_admin'], true)) {
@@ -1433,35 +1528,6 @@ class InvoiceDeliveryQueueService
                 });
             }
         }
-
-        // Universal Search
-        if (!empty($filters['search'])) {
-            $term = trim($filters['search']);
-            $isExactFamily = DB::table('families')->where('family_code', $term)->exists();
-            if ($isExactFamily) {
-                $q->where('f.family_code', $term);
-            } else {
-                $like = "%{$term}%";
-                $q->where(function ($sq) use ($like) {
-                    $sq->where('i.invoice_number', 'like', $like)
-                       ->orWhere('f.family_code', 'like', $like)
-                       ->orWhere('f.guardian_name', 'like', $like)
-                       ->orWhere('f.whatsapp', 'like', $like)
-                       ->orWhere('f.email', 'like', $like)
-                       ->orWhereExists(function ($stSub) use ($like) {
-                           $stSub->selectRaw('1')
-                               ->from('invoice_items as st_ii')
-                               ->join('students as st_s', 'st_s.id', '=', 'st_ii.student_id')
-                               ->whereColumn('st_ii.invoice_id', 'i.id')
-                               ->where(function ($stQ) use ($like) {
-                                   $stQ->where('st_s.name', 'like', $like)
-                                       ->orWhere('st_s.gr_number', 'like', $like);
-                               });
-                       });
-                });
-            }
-        }
-
 
         return $q;
     }
