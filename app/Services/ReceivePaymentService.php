@@ -122,6 +122,8 @@ final class ReceivePaymentService
                         ->join('enrollments as e', 'e.student_id', '=', 's.id')
                         ->where('s.family_id', $familyId)->where('e.campus_id', $campusId)
                         ->where('e.department_id', $departmentId)->where('e.currency', $currency)
+                        ->whereNotIn('s.status', ['review_hold', 'historical_hold', 'suspended', 'left'])
+                        ->where('e.status', 'active')
                         ->select('s.id as student_id', 'e.id as enrollment_id')->first();
 
                     if (!$student) {
@@ -204,7 +206,7 @@ final class ReceivePaymentService
             ]);
 
             DB::table('payments')->where('id', $paymentId)->update([
-                'receipt_number' => 'RCP-' . date('Y') . '-' . str_pad((string) $paymentId, 7, '0', STR_PAD_LEFT),
+                'receipt_number' => 'RCP-' . $paymentId,
             ]);
 
             $affectedInvoices = [];

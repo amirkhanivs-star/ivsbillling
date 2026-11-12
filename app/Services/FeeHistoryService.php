@@ -214,11 +214,16 @@ class FeeHistoryService
             return null;
         }
 
-        // 1. Search live portal payments by receipt_number
+        // 1. Search live portal payments by receipt_number (supports both legacy RCP-YYYY-XXXXXXX and short RCP-XXXX format)
         $paymentQuery = DB::table('payments as p')
             ->leftJoin('users as u', 'u.id', '=', 'p.received_by')
             ->leftJoin('users as rev', 'rev.id', '=', 'p.reversed_by')
-            ->where('p.receipt_number', $term);
+            ->where(function ($q) use ($term) {
+                $q->where('p.receipt_number', $term);
+                if (preg_match('/^RCP-(\d+)$/i', $term, $m)) {
+                    $q->orWhere('p.id', (int) $m[1]);
+                }
+            });
 
         if ($user && !in_array($user->role, ['super_admin', 'finance_admin'], true)) {
             $paymentQuery->where('p.campus_id', $user->campus_id)
