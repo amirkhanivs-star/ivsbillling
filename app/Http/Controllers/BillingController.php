@@ -13,6 +13,7 @@ use App\Services\WebhookSettingService;
 use App\Services\GuardianNameResolver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Validation\Rule;
 class BillingController {
@@ -130,15 +131,377 @@ class BillingController {
    abort_unless(DB::table('enrollments')->where('student_id',$student)->where('campus_id',$r->user()->campus_id)->when($r->user()->department_id,fn($q)=>$q->where('department_id',$r->user()->department_id))->exists(),403);
   }return $s;
  }
+ public function getStudentLeaveInfo(Request $r, int $student){
+  $s=$this->authorizeStudentWrite($r,$student);
+  $reg=DB::table('student_registration_details')->where('student_id',$student)->first();
+  $dues=\App\Services\FeeEligibilityService::getStudentRemainingDues($student);
+
+  $history = [];
+  if (Schema::hasTable('student_status_history')) {
+   $history = DB::table('student_status_history')
+    ->where('student_id', $student)
+    ->orderByDesc('effective_date')
+    ->orderByDesc('id')
+    ->get()
+    ->map(fn($h) => [
+     'id' => $h->id,
+     'event_type' => $h->event_type,
+     'effective_date' => $h->effective_date,
+     'leaving_category' => $h->leaving_category,
+     'leaving_reason' => $h->leaving_reason,
+     'created_at' => $h->created_at,
+    ])->all();
+  }
+
+  return response()->json([
+   'success'=>true,
+   'student_id'=>$s->id,
+   'student_name'=>$s->name,
+   'gr_number'=>$s->gr_number,
+   'status'=>$s->status,
+   'date_of_leaving'=>$reg->date_of_leaving ?? $s->date_of_leaving ?? now()->toDateString(),
+   'leaving_category'=>$reg->leaving_category ?? '',
+   'leaving_reason'=>$reg->leaving_reason ?? '',
+   'readmission_date'=>$s->date_of_readmission ?? $reg->readmission_date ?? null,
+   'remaining_dues'=>$dues['formatted'],
+   'remaining_dues_minor'=>$dues['total_minor'],
+   'unpaid_items_count'=>$dues['count'],
+   'history'=>$history,
+  ]);
+ }
+
+ public function saveStudentLeave(Request $r, int $student){
+  $s=$this->authorizeStudentWrite($r,$student);
+  $d=$r->validate([
+   'date_of_leaving'=>'required|date',
+   'leaving_category'=>'required|string|max:100',
+   'leaving_reason'=>'required|string|max:1000',
+  ]);
+
+  DB::transaction(function()use($r,$student,$d){
+   $s = DB::table('students')->where('id', $student)->lockForUpdate()->first();
+   abort_unless($s, 404);
+
+   // 1. Record lifecycle event in student_status_history
+   if (Schema::hasTable('student_status_history')) {
+    $latestEvent = DB::table('student_status_history')->where('student_id', $student)->orderByDesc('id')->first();
+    if ($s->status === 'left' && $latestEvent && $latestEvent->event_type === 'left') {
+     DB::table('student_status_history')->where('id', $latestEvent->id)->update([
+      'effective_date' => $d['date_of_leaving'],
+      'leaving_category' => $d['leaving_category'],
+      'leaving_reason' => $d['leaving_reason'],
+      'user_id' => $r->user()?->id,
+      'actor_id' => $r->user()?->id,
+      'updated_at' => now(),
+     ]);
+    } else {
+     DB::table('student_status_history')->insert([
+      'student_id' => $student,
+      'event_type' => 'left',
+      'effective_date' => $d['date_of_leaving'],
+      'leaving_category' => $d['leaving_category'],
+      'leaving_reason' => $d['leaving_reason'],
+      'user_id' => $r->user()?->id,
+      'actor_id' => $r->user()?->id,
+      'metadata' => json_encode([
+       'from_status' => $s->status,
+       'to_status' => 'left',
+       'gr_number' => $s->gr_number,
+       'family_id' => $s->family_id,
+      ]),
+      'created_at' => now(),
+      'updated_at' => now(),
+     ]);
+    }
+   }
+
+   // 2. Update students table: status to 'left', record date_of_leaving
+   DB::table('students')->where('id',$student)->update([
+    'status'=>'left',
+    'date_of_leaving'=>$d['date_of_leaving'],
+    'updated_at'=>now(),
+   ]);
+
+   // 3. Update student_registration_details
+   DB::table('student_registration_details')->updateOrInsert(
+    ['student_id'=>$student],
+    [
+     'date_of_leaving'=>$d['date_of_leaving'],
+     'leaving_category'=>$d['leaving_category'],
+     'leaving_reason'=>$d['leaving_reason'],
+     'updated_at'=>now(),
+    ]
+   );
+
+   // 4. Update enrollments to inactive, ended_on to date_of_leaving
+   DB::table('enrollments')->where('student_id',$student)->where(fn($q)=>$q->where('status','active')->orWhereNull('ended_on'))->update([
+    'status'=>'inactive',
+    'ended_on'=>$d['date_of_leaving'],
+    'updated_at'=>now(),
+   ]);
+
+   // 5. Record audit log
+   DB::table('audit_logs')->insert([
+    'actor_id'=>$r->user()->id,
+    'action'=>'student_marked_left',
+    'subject_type'=>'student',
+    'subject_id'=>$student,
+    'metadata'=>json_encode([
+     'from'=>$s->status,
+     'to'=>'left',
+     'date_of_leaving'=>$d['date_of_leaving'],
+     'leaving_category'=>$d['leaving_category'],
+     'leaving_reason'=>$d['leaving_reason'],
+     'gr_number'=>$s->gr_number,
+    ]),
+    'created_at'=>now(),
+    'updated_at'=>now(),
+   ]);
+  });
+
+  $msg="Student {$s->name} (GR: {$s->gr_number}) has been marked as Left. All future fee generation has been stopped.";
+
+  if($r->wantsJson()||$r->ajax()){
+   return response()->json([
+    'success'=>true,
+    'message'=>$msg,
+    'student'=>[
+     'id'=>$s->id,
+     'name'=>$s->name,
+     'gr_number'=>$s->gr_number,
+     'status'=>'left',
+     'date_of_leaving'=>$d['date_of_leaving'],
+     'leaving_category'=>$d['leaving_category'],
+     'leaving_reason'=>$d['leaving_reason'],
+    ],
+   ]);
+  }
+
+  return back()->with('notice',$msg);
+ }
+
+ public function readmitStudent(Request $r, int $student){
+  $s=$this->authorizeStudentWrite($r,$student);
+
+  if($s->status !== 'left'){
+   if($r->wantsJson()||$r->ajax()){
+    return response()->json([
+     'success'=>false,
+     'message'=>"Student {$s->name} (GR: {$s->gr_number}) is not marked as Left and cannot be readmitted.",
+    ], 422);
+   }
+   return back()->withErrors(['student'=>"Student {$s->name} (GR: {$s->gr_number}) is not marked as Left and cannot be readmitted."]);
+  }
+
+  $d=$r->validate([
+   'readmission_date'=>'nullable|date',
+  ]);
+
+  $readmissionDate = $d['readmission_date'] ?? now()->toDateString();
+
+  DB::transaction(function() use ($r, $student, $readmissionDate){
+   $s = DB::table('students')->where('id', $student)->lockForUpdate()->first();
+   abort_unless($s, 404);
+
+   if($s->status !== 'left'){
+    throw \Illuminate\Validation\ValidationException::withMessages([
+     'student' => "Student {$s->name} (GR: {$s->gr_number}) is not marked as Left and cannot be readmitted."
+    ]);
+   }
+
+   // 1. Record lifecycle event in student_status_history
+   if (Schema::hasTable('student_status_history')) {
+    DB::table('student_status_history')->insert([
+     'student_id' => $student,
+     'event_type' => 'readmitted',
+     'effective_date' => $readmissionDate,
+     'leaving_category' => null,
+     'leaving_reason' => null,
+     'user_id' => $r->user()?->id,
+     'actor_id' => $r->user()?->id,
+     'metadata' => json_encode([
+      'from_status' => $s->status,
+      'to_status' => 'present',
+      'readmission_date' => $readmissionDate,
+      'previous_date_of_leaving' => $s->date_of_leaving ?? DB::table('student_registration_details')->where('student_id', $student)->value('date_of_leaving'),
+      'gr_number' => $s->gr_number,
+      'family_id' => $s->family_id,
+     ]),
+     'created_at' => now(),
+     'updated_at' => now(),
+    ]);
+   }
+
+   // 2. Update students table: status to 'present', record date_of_readmission, preserve date_of_leaving
+   DB::table('students')->where('id', $student)->update([
+    'status'=>'present',
+    'date_of_readmission'=>$readmissionDate,
+    'updated_at'=>now(),
+   ]);
+
+   // 3. Update student_registration_details: set readmission_date, preserve date_of_leaving, reason, category
+   DB::table('student_registration_details')->updateOrInsert(
+    ['student_id'=>$student],
+    [
+     'readmission_date'=>$readmissionDate,
+     'updated_at'=>now(),
+    ]
+   );
+
+   // 4. Reactivate the appropriate student enrollment (most recent enrollment)
+   $latestEnrollment = DB::table('enrollments')
+    ->where('student_id', $student)
+    ->orderByDesc('started_on')
+    ->orderByDesc('id')
+    ->first();
+
+   if ($latestEnrollment) {
+    DB::table('enrollments')->where('id', $latestEnrollment->id)->update([
+     'status'=>'active',
+     'ended_on'=>null,
+     'updated_at'=>now(),
+    ]);
+   }
+
+   // 5. Record audit log
+   DB::table('audit_logs')->insert([
+    'actor_id'=>$r->user()->id,
+    'action'=>'student_readmitted',
+    'subject_type'=>'student',
+    'subject_id'=>$student,
+    'metadata'=>json_encode([
+     'from'=>$s->status,
+     'to'=>'present',
+     'readmission_date'=>$readmissionDate,
+     'previous_date_of_leaving'=>$s->date_of_leaving ?? DB::table('student_registration_details')->where('student_id', $student)->value('date_of_leaving'),
+     'gr_number'=>$s->gr_number,
+     'family_id'=>$s->family_id,
+     'enrollment_id'=>$latestEnrollment?->id,
+    ]),
+    'created_at'=>now(),
+    'updated_at'=>now(),
+   ]);
+  });
+
+  $msg = "Student {$s->name} (GR: {$s->gr_number}) has been readmitted successfully. Future fee generation is now reactivated.";
+
+  if($r->wantsJson()||$r->ajax()){
+   return response()->json([
+    'success'=>true,
+    'message'=>$msg,
+    'student'=>[
+     'id'=>$s->id,
+     'name'=>$s->name,
+     'gr_number'=>$s->gr_number,
+     'family_id'=>$s->family_id,
+     'status'=>'present',
+     'readmission_date'=>$readmissionDate,
+    ],
+   ]);
+  }
+
+  return back()->with('notice', $msg);
+ }
+
  public function studentStatus(Request $r,int $student){
   $s=$this->authorizeStudentWrite($r,$student);
-  $d=$r->validate(['status'=>'required|in:present,suspended,left']);
+  $d=$r->validate([
+   'status'=>'required|in:present,suspended,left',
+   'date_of_leaving'=>'nullable|date',
+   'leaving_category'=>'nullable|string|max:100',
+   'leaving_reason'=>'nullable|string|max:1000',
+  ]);
   DB::transaction(function()use($r,$student,$s,$d){
-   DB::table('students')->where('id',$student)->update(['status'=>$d['status'],'updated_at'=>now()]);
-   DB::table('enrollments')->where('student_id',$student)->update(['status'=>$d['status']==='present'?'active':'inactive','updated_at'=>now()]);
-   DB::table('audit_logs')->insert(['actor_id'=>$r->user()->id,'action'=>'student_status_changed','subject_type'=>'student','subject_id'=>$student,'metadata'=>json_encode(['from'=>$s->status,'to'=>$d['status']]),'created_at'=>now(),'updated_at'=>now()]);
+   $leavingDate = $d['date_of_leaving'] ?? now()->toDateString();
+   $updateData = ['status'=>$d['status'],'updated_at'=>now()];
+   if ($d['status'] === 'left') {
+    $updateData['date_of_leaving'] = $leavingDate;
+   } elseif ($d['status'] === 'present' && $s->status === 'left') {
+    $updateData['date_of_readmission'] = now()->toDateString();
+   }
+   DB::table('students')->where('id',$student)->update($updateData);
+
+   if ($d['status'] === 'left') {
+    if (Schema::hasTable('student_status_history')) {
+     DB::table('student_status_history')->insert([
+      'student_id' => $student,
+      'event_type' => 'left',
+      'effective_date' => $leavingDate,
+      'leaving_category' => $d['leaving_category'] ?? 'Other',
+      'leaving_reason' => $d['leaving_reason'] ?? 'Marked left via status action',
+      'user_id' => $r->user()?->id,
+      'actor_id' => $r->user()?->id,
+      'metadata' => json_encode(['from_status' => $s->status, 'to_status' => 'left', 'gr_number' => $s->gr_number]),
+      'created_at' => now(),
+      'updated_at' => now(),
+     ]);
+    }
+   } elseif ($d['status'] === 'present' && $s->status === 'left') {
+    if (Schema::hasTable('student_status_history')) {
+     DB::table('student_status_history')->insert([
+      'student_id' => $student,
+      'event_type' => 'readmitted',
+      'effective_date' => now()->toDateString(),
+      'leaving_category' => null,
+      'leaving_reason' => null,
+      'user_id' => $r->user()?->id,
+      'actor_id' => $r->user()?->id,
+      'metadata' => json_encode(['from_status' => 'left', 'to_status' => 'present', 'gr_number' => $s->gr_number]),
+      'created_at' => now(),
+      'updated_at' => now(),
+     ]);
+    }
+   }
+
+   if ($d['status'] === 'present' && $s->status === 'left') {
+    $latestEn = DB::table('enrollments')->where('student_id', $student)->orderByDesc('started_on')->orderByDesc('id')->first();
+    if ($latestEn) {
+     DB::table('enrollments')->where('id', $latestEn->id)->update([
+      'status' => 'active',
+      'ended_on' => null,
+      'updated_at' => now(),
+     ]);
+    }
+    DB::table('student_registration_details')->updateOrInsert(
+     ['student_id' => $student],
+     ['readmission_date' => now()->toDateString(), 'updated_at' => now()]
+    );
+   } else {
+    $enUpdate = ['status'=>$d['status']==='present'?'active':'inactive','updated_at'=>now()];
+    if ($d['status'] === 'left') {
+     $enUpdate['ended_on'] = $leavingDate;
+    } elseif ($d['status'] === 'present') {
+     $enUpdate['ended_on'] = null;
+    }
+    DB::table('enrollments')->where('student_id',$student)->where(fn($q)=>$q->where('status','active')->orWhereNull('ended_on'))->update($enUpdate);
+   }
+
+   if ($d['status'] === 'left') {
+    DB::table('student_registration_details')->updateOrInsert(
+     ['student_id' => $student],
+     [
+      'date_of_leaving' => $leavingDate,
+      'leaving_category' => $d['leaving_category'] ?? 'Other',
+      'leaving_reason' => $d['leaving_reason'] ?? 'Marked left via status action',
+      'updated_at' => now(),
+     ]
+    );
+   }
+
+   DB::table('audit_logs')->insert([
+    'actor_id'=>$r->user()->id,
+    'action'=>$d['status']==='left'?'student_marked_left':'student_status_changed',
+    'subject_type'=>'student',
+    'subject_id'=>$student,
+    'metadata'=>json_encode(array_merge(['from'=>$s->status,'to'=>$d['status']], $d['status']==='left'?['date_of_leaving'=>$leavingDate,'category'=>$d['leaving_category']??'Other','reason'=>$d['leaving_reason']??'']:[])),
+    'created_at'=>now(),
+    'updated_at'=>now(),
+   ]);
   });
-  return back()->with('notice','Student status changed. Existing invoices and receipts remain unchanged.');
+  $msg = $d['status']==='left'
+   ? "Student {$s->name} (GR: {$s->gr_number}) has been marked as Left. All future fee generation has been stopped."
+   : 'Student status changed. Existing invoices and receipts remain unchanged.';
+  return back()->with('notice',$msg);
  }
  public function deleteStudent(Request $r,int $student){
   $this->authorizeStudentWrite($r,$student);
@@ -160,7 +523,12 @@ class BillingController {
   return redirect('/manage-student')->with('notice','Unbilled student removed.');
  }
  public function fees(){return view('fee-structure',['types'=>DB::table('fee_types')->orderBy('name')->get(),'plans'=>DB::table('fee_plan_items as p')->join('enrollments as e','e.id','=','p.enrollment_id')->join('students as s','s.id','=','e.student_id')->when(!in_array(auth()->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('e.campus_id',auth()->user()->campus_id)->when(auth()->user()->department_id,fn($v)=>$v->where('e.department_id',auth()->user()->department_id)))->select('p.*','s.name as student_name','s.gr_number')->orderByDesc('p.id')->paginate(25),'enrollments'=>DB::table('enrollments as e')->join('students as s','s.id','=','e.student_id')->when(!in_array(auth()->user()->role,['super_admin','finance_admin'],true),fn($q)=>$q->where('e.campus_id',auth()->user()->campus_id)->when(auth()->user()->department_id,fn($v)=>$v->where('e.department_id',auth()->user()->department_id)))->select('e.id','s.name','s.gr_number','e.currency')->orderBy('s.name')->limit(200)->get()]);}
- public function addFeePlan(Request $r){$d=$r->validate(['enrollment_id'=>'required|exists:enrollments,id','fee_type_id'=>'required|exists:fee_types,id','description'=>'required|string|max:255','amount'=>['required','regex:/^\d{1,13}(?:\.\d{1,2})?$/'],'frequency'=>['required',Rule::in(['monthly','weekly','quarterly','term','annual','one_time','custom'])],'discount_kind'=>'nullable|in:fixed,percent','discount_value'=>'nullable|numeric|min:0','subject_name'=>'nullable|string|max:120','class_days_per_week'=>'nullable|integer|min:1|max:7']);$en=DB::table('enrollments')->where('id',$d['enrollment_id'])->first();abort_if($r->user()->role==='auditor',403);$this->assertAccess($r,$en->department_id,$en->campus_id);
+ public function addFeePlan(Request $r){$d=$r->validate(['enrollment_id'=>'required|exists:enrollments,id','fee_type_id'=>'required|exists:fee_types,id','description'=>'required|string|max:255','amount'=>['required','regex:/^\d{1,13}(?:\.\d{1,2})?$/'],'frequency'=>['required',Rule::in(['monthly','weekly','quarterly','term','annual','one_time','custom'])],'discount_kind'=>'nullable|in:fixed,percent','discount_value'=>'nullable|numeric|min:0','subject_name'=>'nullable|string|max:120','class_days_per_week'=>'nullable|integer|min:1|max:7']);
+  $en=DB::table('enrollments as e')->join('students as s','s.id','=','e.student_id')->where('e.id',$d['enrollment_id'])->select('e.*','s.name as student_name','s.gr_number','s.status as student_status')->first();abort_unless($en,404);
+  if($en->student_status === 'left'){
+   throw \Illuminate\Validation\ValidationException::withMessages(['enrollment_id'=>"Cannot add a fee plan for student {$en->student_name} (GR: {$en->gr_number}) because they are marked as Left."]);
+  }
+  abort_if($r->user()->role==='auditor',403);$this->assertAccess($r,$en->department_id,$en->campus_id);
   $discountKind=$d['discount_kind']??null;$discountValue=$discountKind==='percent'?(int)round(((float)($d['discount_value']??0))*100):($discountKind==='fixed'?Money::minor((string)($d['discount_value']??0)):0);abort_if($discountKind==='percent'&&$discountValue>10000,422);
   $amountMinor=Money::minor((string)$d['amount']);
   $subjectName=$d['subject_name']??null;
@@ -1683,6 +2051,15 @@ class BillingController {
    ->where('e.status','active');
 
   if(!empty($d['student_ids'])){
+   foreach($d['student_ids'] as $sid){
+    foreach($d['months'] as $m){
+     $pStart = sprintf('%04d-%02d-01', (int)$d['year'], (int)$m);
+     $billableCheck = \App\Services\FeeEligibilityService::checkStudentBillable((int)$sid, $pStart);
+     if(!$billableCheck['eligible']){
+      throw \Illuminate\Validation\ValidationException::withMessages(['student_ids'=>$billableCheck['reason']]);
+     }
+    }
+   }
    $held=DB::table('students')->whereIn('id',$d['student_ids'])->whereIn('status',['review_hold','historical_hold'])->first();
    if($held){
     $msg=$held->status==='review_hold'
@@ -1697,6 +2074,13 @@ class BillingController {
    ->select('s.*','e.id as enrollment_id','e.campus_id','e.department_id','e.currency','e.grade_label','e.monthly_fee_minor')->get();
 
   if($students->isEmpty()){
+   $allLeft = DB::table('students')->where('family_id',$family->id)->where('status','left')->exists()
+              && !DB::table('students')->where('family_id',$family->id)->where('status','present')->exists();
+   if($allLeft){
+    throw \Illuminate\Validation\ValidationException::withMessages([
+     'student_ids'=>'All students in this family are marked as Left. No new fees can be generated.'
+    ]);
+   }
    throw \Illuminate\Validation\ValidationException::withMessages([
     'student_ids'=>'No active billable student enrollments found for this family.'
    ]);
@@ -1749,6 +2133,13 @@ class BillingController {
        $periodEnd=(new \DateTimeImmutable($periodStart,BillingPeriod::schoolTimezone()))->format('Y-m-t');
        $dueDate=BillingPeriod::calculateDueDate($year,$month,$dueDay,$issueDate,$minDays);
        $periodKey=$isOneTime?"one_time:{$feeType->code}:{$periodStart}":"monthly:{$periodStart}..{$periodEnd}";
+
+       // Centralized billing eligibility check (supports multiple leave/readmission cycles)
+       $billableCheck = \App\Services\FeeEligibilityService::checkStudentBillable($student, $periodStart);
+       if (!$billableCheck['eligible']) {
+        $skippedItems++;
+        continue;
+       }
 
        // Rule 1, 2, 3, 6: Consolidated rate and currency resolution for target student
        $resolvedFee=\App\Services\InvoiceService::resolveFeeAndCurrency($student,$feeType);

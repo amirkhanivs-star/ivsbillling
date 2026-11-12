@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Services\Migration\HistoricalOpeningBalanceService;
+use App\Services\Money;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -65,11 +66,12 @@ class FeeEligibilityService
         // 1. Fetch eligible students
         $studentsQuery = $db->table('students as s')
             ->join('enrollments as e', 'e.student_id', '=', 's.id')
-            ->where('s.family_id', $family->id)
-            ->where('e.status', 'active');
+            ->where('s.family_id', $family->id);
 
         if (!empty($studentIds)) {
             $studentsQuery->whereIn('s.id', $studentIds);
+        } else {
+            $studentsQuery->where('e.status', 'active');
         }
 
         $students = $studentsQuery->select(
@@ -166,14 +168,17 @@ class FeeEligibilityService
                         'plan_item_id' => $planItem?->id ? (int) $planItem->id : null,
                     ];
 
-                    // Check Student Hold
-                    if ($isStudentHeld) {
+                    // Check Student Hold & Leave Status
+                    $billableCheck = self::checkStudentBillable($student, $periodStart, $conn);
+                    if (!$billableCheck['eligible'] || $isStudentHeld) {
                         $itemResult['status'] = self::STATUS_FINANCIAL_CONFLICT;
-                        $itemResult['status_code'] = 'financial_conflict';
+                        $itemResult['status_code'] = ($student->status === 'left') ? 'student_left' : 'financial_conflict';
                         $itemResult['is_eligible'] = false;
-                        $itemResult['reason'] = $student->status === 'review_hold'
-                            ? "Student GR {$student->gr_number} is on financial review hold."
-                            : "Student GR {$student->gr_number} is marked as {$student->status}.";
+                        $itemResult['reason'] = ($student->status === 'left')
+                            ? "Student {$student->name} (GR: {$student->gr_number}) is marked as Left and cannot be billed."
+                            : ($student->status === 'review_hold'
+                                ? "Student GR {$student->gr_number} is on financial review hold."
+                                : ($billableCheck['reason'] ?? "Student GR {$student->gr_number} is marked as {$student->status}."));
                         $this->accumulateEvaluation($itemResult, $statusCounts, $totalEligible, $totalBlocked, $eligibleAmountMinor, $items);
                         continue;
                     }
@@ -588,5 +593,205 @@ class FeeEligibilityService
         }
 
         $items[] = $itemResult;
+    }
+
+    /**
+     * Centralized billing eligibility check for a student.
+     * Enforces that students marked Left (or with leave date on/before the billing period)
+     * cannot receive any new fee generation or charges.
+     * Supports multiple leave/readmission cycles through student_status_history.
+     */
+    public static function checkStudentBillable(int|object $student, ?string $periodStart = null, ?string $conn = null): array
+    {
+        $conn = $conn ?: config('database.default', 'mysql');
+        $db = DB::connection($conn);
+        $s = is_object($student) ? $student : $db->table('students')->where('id', (int) $student)->first();
+        if (!$s) {
+            return [
+                'eligible' => false,
+                'status' => 'not_found',
+                'reason' => 'Student record not found.',
+            ];
+        }
+
+        if ($s->status === 'left') {
+            return [
+                'eligible' => false,
+                'status' => 'left',
+                'reason' => "Student {$s->name} (GR: {$s->gr_number}) is marked as Left and cannot receive new fee charges.",
+            ];
+        }
+
+        if (in_array($s->status, ['suspended', 'review_hold', 'historical_hold'], true)) {
+            return [
+                'eligible' => false,
+                'status' => $s->status,
+                'reason' => "Student {$s->name} (GR: {$s->gr_number}) has status '{$s->status}' and cannot receive new fee charges.",
+            ];
+        }
+
+        if ($periodStart) {
+            $pStart = Carbon::parse($periodStart)->startOfDay();
+            $pEnd = Carbon::parse($periodStart)->endOfMonth()->startOfDay();
+
+            // 1. Check student_status_history if table exists
+            $hasStatusHistoryTable = Schema::connection($conn)->hasTable('student_status_history');
+            if ($hasStatusHistoryTable) {
+                $history = $db->table('student_status_history')
+                    ->where('student_id', $s->id)
+                    ->orderBy('effective_date', 'asc')
+                    ->orderBy('id', 'asc')
+                    ->get();
+
+                if ($history->isNotEmpty()) {
+                    $intervals = [];
+                    $currentLeave = null;
+
+                    foreach ($history as $event) {
+                        $type = strtolower((string)$event->event_type);
+                        if ($type === 'left') {
+                            if ($currentLeave === null) {
+                                $currentLeave = [
+                                    'left_date' => $event->effective_date,
+                                    'readmitted_date' => null,
+                                ];
+                            } else {
+                                $currentLeave['left_date'] = $event->effective_date;
+                            }
+                        } elseif ($type === 'readmitted') {
+                            if ($currentLeave !== null) {
+                                $currentLeave['readmitted_date'] = $event->effective_date;
+                                $intervals[] = $currentLeave;
+                                $currentLeave = null;
+                            }
+                        }
+                    }
+                    if ($currentLeave !== null) {
+                        $intervals[] = $currentLeave;
+                    }
+
+                    foreach ($intervals as $interval) {
+                        $lDate = Carbon::parse($interval['left_date'])->startOfDay();
+
+                        if (!empty($interval['readmitted_date'])) {
+                            $rMonthStart = Carbon::parse($interval['readmitted_date'])->startOfMonth()->startOfDay();
+
+                            // If period is prior to readmission month AND after or overlapping leaving date
+                            if ($pStart->lessThan($rMonthStart) && ($pEnd->greaterThanOrEqualTo($lDate) || $pStart->greaterThanOrEqualTo($lDate->copy()->startOfMonth()))) {
+                                return [
+                                    'eligible' => false,
+                                    'status' => 'left',
+                                    'reason' => "Student {$s->name} (GR: {$s->gr_number}) was on leave from {$interval['left_date']} until readmission on {$interval['readmitted_date']} and cannot be billed for periods during this absence.",
+                                ];
+                            }
+                        } else {
+                            if ($pStart->greaterThanOrEqualTo($lDate) || $pEnd->greaterThanOrEqualTo($lDate) || $pStart->greaterThanOrEqualTo($lDate->copy()->startOfMonth())) {
+                                return [
+                                    'eligible' => false,
+                                    'status' => 'left',
+                                    'reason' => "Student {$s->name} (GR: {$s->gr_number}) left on {$interval['left_date']} and cannot be billed for periods starting on or after this date.",
+                                ];
+                            }
+                        }
+                    }
+
+                    return [
+                        'eligible' => true,
+                        'status' => $s->status,
+                        'reason' => null,
+                    ];
+                }
+            }
+
+            // Fallback: Check date_of_leaving and date_of_readmission if present on student / registration
+            $leavingDate = $s->date_of_leaving ?? null;
+            if (!$leavingDate) {
+                $leavingDate = $db->table('student_registration_details')
+                    ->where('student_id', $s->id)
+                    ->value('date_of_leaving');
+            }
+
+            $readmissionDate = $s->date_of_readmission ?? null;
+            if (!$readmissionDate) {
+                $readmissionDate = $db->table('student_registration_details')
+                    ->where('student_id', $s->id)
+                    ->value('readmission_date');
+            }
+
+            if ($leavingDate) {
+                $lDate = Carbon::parse($leavingDate)->startOfDay();
+
+                if ($readmissionDate) {
+                    $rMonthStart = Carbon::parse($readmissionDate)->startOfMonth()->startOfDay();
+
+                    // If period is prior to readmission month AND after or overlapping leaving date
+                    if ($pStart->lessThan($rMonthStart) && ($pEnd->greaterThanOrEqualTo($lDate) || $pStart->greaterThanOrEqualTo($lDate->copy()->startOfMonth()))) {
+                        return [
+                            'eligible' => false,
+                            'status' => 'left',
+                            'reason' => "Student {$s->name} (GR: {$s->gr_number}) was on leave from {$leavingDate} until readmission on {$readmissionDate} and cannot be billed for periods during this absence.",
+                        ];
+                    }
+                } else {
+                    if ($pStart->greaterThanOrEqualTo($lDate)) {
+                        return [
+                            'eligible' => false,
+                            'status' => 'left',
+                            'reason' => "Student {$s->name} (GR: {$s->gr_number}) left on {$leavingDate} and cannot be billed for periods starting on or after this date.",
+                        ];
+                    }
+                }
+            }
+        }
+
+        return [
+            'eligible' => true,
+            'status' => $s->status,
+            'reason' => null,
+        ];
+    }
+
+    /**
+     * Retrieve current remaining dues for a student directly from the existing financial ledger.
+     */
+    public static function getStudentRemainingDues(int $studentId, ?string $conn = null): array
+    {
+        $conn = $conn ?: config('database.default', 'mysql');
+        $db = DB::connection($conn);
+
+        $unpaidItems = $db->table('invoice_items as ii')
+            ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+            ->where('ii.student_id', $studentId)
+            ->whereRaw('ii.net_minor > ii.paid_minor')
+            ->whereNotIn('ii.status', ['void', 'voided', 'exempted', 'paid'])
+            ->whereNotIn('i.status', ['void', 'voided', 'paid'])
+            ->select('i.currency', DB::raw('(ii.net_minor - ii.paid_minor) as due_minor'))
+            ->get();
+
+        if ($unpaidItems->isEmpty()) {
+            return [
+                'total_minor' => 0,
+                'formatted' => 'SAR 0.00',
+                'currencies' => [],
+                'count' => 0,
+            ];
+        }
+
+        $byCurrency = [];
+        $formattedParts = [];
+        $totalMinor = 0;
+        foreach ($unpaidItems->groupBy('currency') as $currency => $items) {
+            $currSum = (int) $items->sum('due_minor');
+            $byCurrency[$currency] = $currSum;
+            $totalMinor += $currSum;
+            $formattedParts[] = $currency . ' ' . Money::format($currSum);
+        }
+
+        return [
+            'total_minor' => $totalMinor,
+            'formatted' => implode(', ', $formattedParts),
+            'by_currency' => $byCurrency,
+            'count' => $unpaidItems->count(),
+        ];
     }
 }

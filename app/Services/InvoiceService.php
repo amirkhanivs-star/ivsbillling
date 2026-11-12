@@ -40,6 +40,12 @@ final class InvoiceService {
                 ->orderByDesc('p.id')
                 ->get();
 
+            // Authoritative eligibility check across leave/readmission lifecycle history
+            $rawItems = $rawItems->filter(function ($p) use ($run) {
+                $billable = FeeEligibilityService::checkStudentBillable($p->student_id, $run->period_start);
+                return $billable['eligible'];
+            });
+
             // Authoritative single-plan guard per (enrollment_id, fee_type_id, frequency, subject_name)
             $items = $rawItems->unique(function ($p) {
                 return sprintf(
