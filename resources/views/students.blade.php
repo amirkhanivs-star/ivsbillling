@@ -1,7 +1,7 @@
 @extends('layouts.app')
 @section('title','Students')
 @section('content')
-<link rel="stylesheet" href="{{ asset('assets/iqra-student-list.css') }}">
+<link rel="stylesheet" href="{{ asset('assets/iqra-student-list.css') }}?v={{ filemtime(public_path('assets/iqra-student-list.css')) }}">
 <div class="panel wide iqra-list">
  <form method="get" class="iqra-list-toolbar">
   <a href="{{ route('student.admission.create') }}" class="btn purple">♙ Registration</a>
